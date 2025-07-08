@@ -5,4 +5,5 @@ testdata
 reports
 /dist/
 .claude/worktrees/
+.claude/scratchpad/
 /TODO

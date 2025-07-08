@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.4.0
+
+- Add `--lint` (repeatable; env `ARGOCDF_LINT` for a single command) and `--lint-timeout` (default `5s`): pipe each affected app's rendered manifests through user-supplied shell commands and report their stdout as warnings. Each side (base and target) is linted separately — the command runs with that side's worktree as its working directory, so repo-relative policy paths resolve to the branch's own files — and every non-empty stdout line becomes a `[base]`/`[target]`-labeled warning in all output formats, alongside the existing parse warnings — a `[base]`-only finding was fixed by the change under review, `[target]`-only was introduced, both sides = pre-existing. Any policy tool plugs in through a jq-style adapter (kyverno, conftest, kubeconform, ...); argocdf never parses tool-specific output. A command failure (spawn error, timeout, or exit ≠ 0) is reported as a non-fatal warning line — stdout lines received before the failure are kept
+
 ## 0.3.0
 
 - Add `split[=N]` file-output option for `md-fields`/`md-unified` (e.g. `-f md-unified,split:pr-comment.md`): a report larger than N bytes (default 60000, safely under GitHub's 65,536-char comment cap) is written as multiple self-contained part files (`pr-comment.md`, `pr-comment.2.md`, ...) instead of one oversized file. Each part carries the upsert marker and a `part i/N` heading with balanced `<details>` blocks and code fences, so CI can post every part as its own PR comment. An app's report stays within a single part; only an app that alone exceeds the limit is split at resource boundaries, and only a single resource diff larger than a whole part is truncated (with a note). Stale part files from a previous, larger run are removed automatically.

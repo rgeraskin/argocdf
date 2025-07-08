@@ -279,14 +279,15 @@ func NewManifestDiffer() *ManifestDiffer {
 // from. "base" is the old (merge-base) side, "target" the PR side — matching
 // the "base → target" report header. A message appearing only under [target]
 // was introduced by the change under review; the same message on both sides
-// pre-exists on the base branch.
+// pre-exists on the base branch. Exported so other packages (e.g. lint)
+// attribute their warnings with the same convention.
 const (
-	sideBase   = "base"
-	sideTarget = "target"
+	SideBase   = "base"
+	SideTarget = "target"
 )
 
-// labelSide prefixes each message with its originating side, e.g. "[target] ...".
-func labelSide(side string, msgs []string) []string {
+// LabelSide prefixes each message with its originating side, e.g. "[target] ...".
+func LabelSide(side string, msgs []string) []string {
 	if len(msgs) == 0 {
 		return nil
 	}
@@ -308,13 +309,13 @@ func (d *ManifestDiffer) DiffManifests(oldContent, newContent string) (*Manifest
 	}
 
 	// Collect parse errors from both old and new content, attributed to their side
-	result.ParseErrors = append(result.ParseErrors, labelSide(sideBase, oldResult.ParseErrors)...)
-	result.ParseErrors = append(result.ParseErrors, labelSide(sideTarget, newResult.ParseErrors)...)
+	result.ParseErrors = append(result.ParseErrors, LabelSide(SideBase, oldResult.ParseErrors)...)
+	result.ParseErrors = append(result.ParseErrors, LabelSide(SideTarget, newResult.ParseErrors)...)
 
 	// Collect parse warnings from both old and new content. Duplicate-manifest
 	// warnings are already populated (and side-labeled) by DiffManifestSets.
-	result.ParseWarnings = append(result.ParseWarnings, labelSide(sideBase, oldResult.ParseWarnings)...)
-	result.ParseWarnings = append(result.ParseWarnings, labelSide(sideTarget, newResult.ParseWarnings)...)
+	result.ParseWarnings = append(result.ParseWarnings, LabelSide(SideBase, oldResult.ParseWarnings)...)
+	result.ParseWarnings = append(result.ParseWarnings, LabelSide(SideTarget, newResult.ParseWarnings)...)
 
 	return result, nil
 }
@@ -329,8 +330,8 @@ func (d *ManifestDiffer) DiffManifestSets(oldManifests, newManifests []Manifest)
 	// collision is visible rather than silently hidden.
 	oldMap, oldDupWarnings := buildManifestMap(oldManifests)
 	newMap, newDupWarnings := buildManifestMap(newManifests)
-	result.ParseWarnings = append(result.ParseWarnings, labelSide(sideBase, oldDupWarnings)...)
-	result.ParseWarnings = append(result.ParseWarnings, labelSide(sideTarget, newDupWarnings)...)
+	result.ParseWarnings = append(result.ParseWarnings, LabelSide(SideBase, oldDupWarnings)...)
+	result.ParseWarnings = append(result.ParseWarnings, LabelSide(SideTarget, newDupWarnings)...)
 
 	// Find added and modified
 	for key, newM := range newMap {

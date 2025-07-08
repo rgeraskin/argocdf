@@ -207,6 +207,79 @@ When the report fits in one part, the output is a single file, identical to runn
 |-----------------|-------------------------------------------------------|----------------|
 | `--concurrency` | Applications to render in parallel (`1` = sequential) | Number of CPUs |
 
+### Lint Flags
+
+| Flag             | Description                                                          | Default |
+|------------------|----------------------------------------------------------------------|---------|
+| `--lint`         | Shell command that lints rendered manifests (can be repeated)        | none    |
+| `--lint-timeout` | Timeout for each lint command invocation                             | `5s`    |
+
+Each `--lint` command receives an application's rendered multi-doc YAML on stdin
+(via `sh -c`) and emits findings as **one warning per stdout line**. Both sides
+are linted separately, and each side's command runs **with that side's checkout
+as its working directory** — a repo-relative policy path (like `policies/` below)
+resolves to the policy files as of that branch, so changing a policy in a PR is
+itself reflected in the lint results. Every finding lands in the report's
+warning block with the same side labels used for parse warnings:
+
+- `[base]`-only — the violation existed on the base branch and this change **fixes** it
+- `[target]`-only — this change **introduces** the violation
+- both sides — pre-existing, untouched by this change
+
+The exit code is the only health signal: stdout lines are always reported as
+warnings, and a spawn failure, timeout, or exit ≠ 0 adds one non-fatal
+`lint "<command>": ...` warning line. That warning echoes a truncated prefix of
+the command, so don't embed secrets in the command text — pass them via the
+environment or files instead. Tools like kyverno and conftest exit
+non-zero when policies fail (normal operation), so end the pipeline in an
+adapter — typically `jq`, which also normalizes any tool's output to
+line-per-finding. Use `jq -rn 'input | ...'` rather than plain `jq`: `input`
+demands at least one JSON document, so if the tool crashes and produces empty
+output the adapter exits non-zero instead of silently passing.
+
+```bash
+# kyverno (inline — see the script advice below)
+argocdf --lint 'kyverno apply policies/ --resource - --policy-report --output-format json 2>/dev/null \
+  | jq -rn '\''input | .results[]? | select(.result == "fail" or .result == "warn")
+      | "[kyverno/\(.policy)] \(.resources[0].kind)/\(.resources[0].name): \(.message | gsub("\n"; " "))"'\'''
+
+# conftest (repeat --lint to run several linters per app)
+argocdf --lint 'conftest test - --policy policy/ --output json 2>/dev/null \
+  | jq -rn '\''input | .[] | .failures[]?.msg, .warnings[]?.msg | select(. != null)
+      | "[conftest] " + gsub("\n"; " ")'\'''
+```
+
+These inline commands are only meant to show the contract — the shell quoting
+gets cryptic fast. For real use, put the tool + jq pipeline into a small script
+committed to your repo and pass that to `--lint`. Because each side's command
+runs in that side's worktree, the script — like the policies it references — is
+picked up in each branch's own version:
+
+```bash
+argocdf --lint ./scripts/lint-manifests.sh
+```
+
+```bash
+#!/usr/bin/env bash
+# scripts/lint-manifests.sh — argocdf lint adapter.
+# Reads rendered manifests on stdin, prints one finding per line on stdout.
+# No pipefail: kyverno/conftest exit non-zero on findings (normal operation);
+# `jq -rn 'input ...'` still catches a crashed tool (empty output -> exit != 0).
+set -eu
+
+# Capture stdin once so several tools can each read the manifests.
+manifests=$(cat)
+
+kyverno apply policies/ --resource - --policy-report --output-format json 2>/dev/null <<<"$manifests" |
+  jq -rn 'input | .results[]?
+    | select(.result == "fail" or .result == "warn")
+    | "[kyverno/\(.policy)] \(.resources[0].kind)/\(.resources[0].name): \(.message | gsub("\n"; " "))"'
+
+conftest test - --policy policy/ --output json 2>/dev/null <<<"$manifests" |
+  jq -rn 'input | .[] | .failures[]?.msg, .warnings[]?.msg | select(. != null)
+    | "[conftest] " + gsub("\n"; " ")'
+```
+
 ### CI Flags
 
 | Flag          | Description                                                                    | Default                 |
@@ -240,6 +313,11 @@ the flag name upper-cased, with dashes replaced by underscores, and prefixed wit
 Precedence is **explicit flag > environment variable > default**, so a flag passed
 on the command line always wins over the matching environment variable. Empty
 variables are ignored.
+
+Repeatable flags (`--file`, `--lint`) carry exactly **one** value when set through
+their environment variable — the whole value is taken verbatim (lint commands may
+contain commas and quotes, so no splitting is possible). Repeat the flag on the
+command line to configure multiple values.
 
 ```bash
 # These two invocations are equivalent

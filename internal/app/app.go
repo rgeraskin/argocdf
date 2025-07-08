@@ -18,6 +18,7 @@ import (
 	"github.com/rgeraskin/argocdf/internal/config"
 	"github.com/rgeraskin/argocdf/internal/diff"
 	"github.com/rgeraskin/argocdf/internal/git"
+	"github.com/rgeraskin/argocdf/internal/lint"
 	"github.com/rgeraskin/argocdf/internal/output"
 	"github.com/rgeraskin/argocdf/internal/render"
 	"github.com/rgeraskin/argocdf/internal/rendercache"
@@ -64,7 +65,10 @@ type App struct {
 	renderer   applicationRenderer
 	differ     *diff.ManifestDiffer
 	discoverer *diff.AppDiscoverer
-	writer     output.Writer
+	// linter runs --lint commands against each side's rendered manifests
+	// (nil when linting is disabled).
+	linter *lint.Runner
+	writer output.Writer
 	// baseRef is the ref used for the base side of comparisons: the merge base
 	// of the base and target branches, or the base branch tip as a fallback.
 	baseRef string
@@ -251,6 +255,7 @@ func (a *App) initialize(ctx context.Context) error {
 	// Create differ and discoverer
 	a.differ = a.factory.CreateManifestDiffer()
 	a.discoverer = a.factory.CreateAppDiscoverer()
+	a.linter = a.factory.CreateLintRunner()
 
 	// Create output writer
 	a.writer, err = a.factory.CreateOutputWriter()
@@ -753,6 +758,23 @@ func (a *App) processOneApp(ctx context.Context, queuedApp *diff.QueuedApp) (*ty
 	if err != nil {
 		return nil, fmt.Errorf("failed to compute diff: %w", err)
 	}
+
+	// Lint each side's rendered manifests. Lint findings join ParseWarnings
+	// under the same [base]/[target] labels: a [base]-only finding was fixed by
+	// the change under review, [target]-only was introduced, both = pre-existing.
+	// Each side's command runs in that side's worktree, so repo-relative paths
+	// (e.g. a policy directory) resolve to the files as of that branch.
+	if a.linter != nil {
+		if appDiff.RenderedOld != "" {
+			diffResult.ParseWarnings = append(diffResult.ParseWarnings,
+				diff.LabelSide(diff.SideBase, a.linter.Lint(ctx, a.baseWorktree, appDiff.RenderedOld))...)
+		}
+		if appDiff.RenderedNew != "" {
+			diffResult.ParseWarnings = append(diffResult.ParseWarnings,
+				diff.LabelSide(diff.SideTarget, a.linter.Lint(ctx, a.targetWorktree, appDiff.RenderedNew))...)
+		}
+	}
+
 	appDiff.DiffResult = diffResult
 
 	return appDiff, nil

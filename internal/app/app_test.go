@@ -19,6 +19,7 @@ import (
 	"github.com/rgeraskin/argocdf/internal/config"
 	"github.com/rgeraskin/argocdf/internal/diff"
 	"github.com/rgeraskin/argocdf/internal/git"
+	"github.com/rgeraskin/argocdf/internal/lint"
 	"github.com/rgeraskin/argocdf/internal/render"
 	"github.com/rgeraskin/argocdf/internal/testutil"
 	"github.com/rgeraskin/argocdf/internal/types"
@@ -940,5 +941,215 @@ func TestProcessApplicationsNewChildSkipsBaseRender(t *testing.T) {
 	if childDiff.SourceType != types.SourceTypeHelm {
 		t.Errorf("new-child SourceType = %q, want %q (from the target render)",
 			childDiff.SourceType, types.SourceTypeHelm)
+	}
+}
+
+// sideStampRenderer renders a ConfigMap whose data marks which worktree it was
+// rendered from, so lint tests can assert per-side warning attribution.
+type sideStampRenderer struct {
+	baseWorktree   string
+	targetWorktree string
+}
+
+func (f *sideStampRenderer) RenderApplication(
+	_ context.Context,
+	_ *cluster.Application,
+	repoPath string,
+) (*render.RenderResult, error) {
+	side := "base"
+	if repoPath == f.targetWorktree {
+		side = "target"
+	}
+	return &render.RenderResult{
+		Manifests:  []byte(revConfigMap("stamp-cm", side+"-rev")),
+		SourceType: types.SourceTypeHelm,
+	}, nil
+}
+
+// lintWorktrees creates real base/target worktree directories, each holding a
+// policy-note.txt naming its side, so tests can assert that lint commands run
+// with the side's worktree as their working directory.
+func lintWorktrees(t *testing.T) (base, target string) {
+	t.Helper()
+	base, target = t.TempDir(), t.TempDir()
+	for dir, side := range map[string]string{base: "base", target: "target"} {
+		if err := os.WriteFile(filepath.Join(dir, "policy-note.txt"), []byte("policy-of-"+side+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return base, target
+}
+
+// TestProcessOneAppLintsBothSides pins the lint contract: each side's rendered
+// manifests are piped to the lint command, its stdout lines land in
+// ParseWarnings under the side's [base]/[target] label, and the command runs
+// with that side's worktree as its working directory (so repo-relative policy
+// paths resolve to the side's version of the files).
+func TestProcessOneAppLintsBothSides(t *testing.T) {
+	logger := log.New(nil)
+	logger.SetLevel(log.FatalLevel)
+
+	cfg := &config.Config{Concurrency: 1, MaxDepth: 5}
+	baseWT, targetWT := lintWorktrees(t)
+	fake := &sideStampRenderer{baseWorktree: baseWT, targetWorktree: targetWT}
+
+	a := &App{
+		factory:        NewFactory(cfg, logger),
+		cfg:            cfg,
+		logger:         logger,
+		renderer:       fake,
+		differ:         diff.NewManifestDiffer(),
+		discoverer:     diff.NewAppDiscoverer(),
+		linter:         &lint.Runner{Commands: []string{`grep "revision:"; cat policy-note.txt`}, Timeout: 5 * time.Second},
+		baseWorktree:   fake.baseWorktree,
+		targetWorktree: fake.targetWorktree,
+	}
+
+	spec := cluster.ApplicationSpec{
+		Source: &cluster.ApplicationSource{
+			RepoURL:        "https://example.com/org/repo.git",
+			Chart:          "dummy",
+			TargetRevision: "main",
+		},
+	}
+	appDiff, err := a.processOneApp(context.Background(), &diff.QueuedApp{
+		Name:      "linted",
+		Namespace: "argocd",
+		Spec:      &spec,
+	})
+	if err != nil {
+		t.Fatalf("processOneApp() error: %v", err)
+	}
+
+	setDiff, ok := appDiff.DiffResult.(*diff.ManifestSetDiff)
+	if !ok {
+		t.Fatalf("DiffResult is %T, want *diff.ManifestSetDiff", appDiff.DiffResult)
+	}
+	want := []string{
+		"[base] revision: base-rev",
+		"[base] policy-of-base",
+		"[target] revision: target-rev",
+		"[target] policy-of-target",
+	}
+	if len(setDiff.ParseWarnings) != len(want) {
+		t.Fatalf("ParseWarnings = %v, want %v", setDiff.ParseWarnings, want)
+	}
+	for i, w := range want {
+		if setDiff.ParseWarnings[i] != w {
+			t.Errorf("ParseWarnings[%d] = %q, want %q", i, setDiff.ParseWarnings[i], w)
+		}
+	}
+}
+
+// TestProcessOneAppLintSkipsEmptyBase verifies that a newly-discovered app
+// (no base render) is linted on the target side only.
+func TestProcessOneAppLintSkipsEmptyBase(t *testing.T) {
+	logger := log.New(nil)
+	logger.SetLevel(log.FatalLevel)
+
+	cfg := &config.Config{Concurrency: 1, MaxDepth: 5}
+	baseWT, targetWT := lintWorktrees(t)
+	fake := &sideStampRenderer{baseWorktree: baseWT, targetWorktree: targetWT}
+
+	a := &App{
+		factory:        NewFactory(cfg, logger),
+		cfg:            cfg,
+		logger:         logger,
+		renderer:       fake,
+		differ:         diff.NewManifestDiffer(),
+		discoverer:     diff.NewAppDiscoverer(),
+		linter:         &lint.Runner{Commands: []string{`grep "revision:"`}, Timeout: 5 * time.Second},
+		baseWorktree:   fake.baseWorktree,
+		targetWorktree: fake.targetWorktree,
+	}
+
+	spec := cluster.ApplicationSpec{
+		Source: &cluster.ApplicationSource{
+			RepoURL:        "https://example.com/org/repo.git",
+			Chart:          "dummy",
+			TargetRevision: "main",
+		},
+	}
+	appDiff, err := a.processOneApp(context.Background(), &diff.QueuedApp{
+		Name:      "new-app",
+		Namespace: "argocd",
+		Spec:      &spec,
+		IsNew:     true,
+	})
+	if err != nil {
+		t.Fatalf("processOneApp() error: %v", err)
+	}
+
+	setDiff := appDiff.DiffResult.(*diff.ManifestSetDiff)
+	if len(setDiff.ParseWarnings) != 1 || setDiff.ParseWarnings[0] != "[target] revision: target-rev" {
+		t.Errorf("ParseWarnings = %v, want only the [target] lint line", setDiff.ParseWarnings)
+	}
+}
+
+// emptySideRenderer simulates a deleted app: the base render has content, the
+// target render is empty.
+type emptySideRenderer struct {
+	baseWorktree   string
+	targetWorktree string
+}
+
+func (f *emptySideRenderer) RenderApplication(
+	_ context.Context,
+	_ *cluster.Application,
+	repoPath string,
+) (*render.RenderResult, error) {
+	if repoPath == f.targetWorktree {
+		return &render.RenderResult{Manifests: nil, SourceType: types.SourceTypePlain}, nil
+	}
+	return &render.RenderResult{
+		Manifests:  []byte(revConfigMap("stamp-cm", "base-rev")),
+		SourceType: types.SourceTypeHelm,
+	}, nil
+}
+
+// TestProcessOneAppLintSkipsEmptyTarget verifies that a deleted app (empty
+// target render) is linted on the base side only.
+func TestProcessOneAppLintSkipsEmptyTarget(t *testing.T) {
+	logger := log.New(nil)
+	logger.SetLevel(log.FatalLevel)
+
+	cfg := &config.Config{Concurrency: 1, MaxDepth: 5}
+	baseWT, targetWT := lintWorktrees(t)
+	fake := &emptySideRenderer{baseWorktree: baseWT, targetWorktree: targetWT}
+
+	a := &App{
+		factory:        NewFactory(cfg, logger),
+		cfg:            cfg,
+		logger:         logger,
+		renderer:       fake,
+		differ:         diff.NewManifestDiffer(),
+		discoverer:     diff.NewAppDiscoverer(),
+		linter:         &lint.Runner{Commands: []string{`grep "revision:"`}, Timeout: 5 * time.Second},
+		baseWorktree:   fake.baseWorktree,
+		targetWorktree: fake.targetWorktree,
+	}
+
+	spec := cluster.ApplicationSpec{
+		Source: &cluster.ApplicationSource{
+			RepoURL:        "https://example.com/org/repo.git",
+			Chart:          "dummy",
+			TargetRevision: "main",
+		},
+	}
+	appDiff, err := a.processOneApp(context.Background(), &diff.QueuedApp{
+		Name:      "deleted-app",
+		Namespace: "argocd",
+		Spec:      &spec,
+	})
+	if err != nil {
+		t.Fatalf("processOneApp() error: %v", err)
+	}
+
+	setDiff := appDiff.DiffResult.(*diff.ManifestSetDiff)
+	if len(setDiff.ParseWarnings) != 1 || setDiff.ParseWarnings[0] != "[base] revision: base-rev" {
+		t.Errorf("ParseWarnings = %v, want only the [base] lint line", setDiff.ParseWarnings)
+	}
+	if len(setDiff.Removed) != 1 {
+		t.Errorf("expected the app's resource to diff as removed, got -%d", len(setDiff.Removed))
 	}
 }

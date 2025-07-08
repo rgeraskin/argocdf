@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/charmbracelet/log"
 	"github.com/spf13/cobra"
@@ -63,6 +64,10 @@ var (
 	// Render cache options
 	noCache  bool
 	cacheDir string
+
+	// Lint options
+	lintCommands []string
+	lintTimeout  time.Duration
 )
 
 // envPrefix is prepended to every flag name to form its environment variable,
@@ -146,6 +151,9 @@ Examples:
   # Summary only in terminal
   argocdf --stdout summary
 
+  # Lint rendered manifests: each stdout line of the command becomes a warning
+  argocdf --lint 'conftest test - --policy policy/ --output json 2>/dev/null | jq -rn "input | .[] | .failures[]?.msg"'
+
   # Use external diff tool for side-by-side view
   ARGOCDF_EXTERNAL_DIFF="delta --side-by-side" argocdf`,
 		RunE: runMain,
@@ -197,6 +205,14 @@ Examples:
 	rootCmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "Enable debug logging")
 	rootCmd.Flags().IntVarP(&unifiedContext, "context-lines", "U", config.DefaultUnifiedContext,
 		"Number of context lines in unified diff output (-1 for unlimited)")
+
+	// Lint flags
+	rootCmd.Flags().StringArrayVar(&lintCommands, "lint", nil,
+		"Shell command that lints rendered manifests (can be repeated): receives an app's rendered "+
+			"multi-doc YAML on stdin, each stdout line becomes a report warning; exit != 0 is reported "+
+			"as a lint execution error")
+	rootCmd.Flags().DurationVar(&lintTimeout, "lint-timeout", config.DefaultLintTimeout,
+		"Timeout for each --lint command invocation")
 
 	// CI flags
 	rootCmd.Flags().BoolVar(&exitCode, "exit-code", false,
@@ -381,6 +397,8 @@ func runMain(cmd *cobra.Command, args []string) error {
 		CacheDir:                cacheDir,
 		ExitCode:                exitCode,
 		Marker:                  marker,
+		Lint:                    lintCommands,
+		LintTimeout:             lintTimeout,
 	}
 
 	// Auto-detect missing values

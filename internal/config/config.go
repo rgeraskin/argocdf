@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Default values for configuration.
@@ -32,6 +33,11 @@ const (
 	// MinSplitMax is the smallest accepted `split` value; below this the per-part
 	// marker/heading overhead would dominate the budget.
 	MinSplitMax = 1024
+
+	// DefaultLintTimeout bounds each --lint command invocation. Lint commands
+	// process a single app's already-rendered manifests, so they should finish
+	// in well under a second; 5s leaves room for slow policy engines.
+	DefaultLintTimeout = 5 * time.Second
 )
 
 // DefaultConcurrency returns the default number of applications to render in
@@ -111,6 +117,11 @@ type Config struct {
 	// CI options
 	ExitCode bool   // Exit 2 when changes are present (like `diff`/`terraform plan -detailed-exitcode`)
 	Marker   string // Optional marker id for the PR-comment upsert marker (empty = default marker)
+
+	// Lint options. Each Lint entry is a shell command that receives an app's
+	// rendered manifests on stdin and emits one warning per stdout line.
+	Lint        []string
+	LintTimeout time.Duration // Per-invocation timeout (0 = DefaultLintTimeout)
 }
 
 // ParseFileOutput parses a "format[,option...]:path" string into a FileOutput.
@@ -222,6 +233,10 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("concurrency must be at least 1")
 	}
 
+	if c.LintTimeout < 0 {
+		return fmt.Errorf("lint timeout must be positive")
+	}
+
 	return nil
 }
 
@@ -240,6 +255,9 @@ func (c *Config) WithDefaults() *Config {
 	}
 	if c.Concurrency == 0 {
 		c.Concurrency = DefaultConcurrency()
+	}
+	if c.LintTimeout == 0 {
+		c.LintTimeout = DefaultLintTimeout
 	}
 	// Note: UnifiedContext is not defaulted here because 0 is a valid value
 	// (meaning no context lines). The default is set by the CLI flag.

@@ -10,6 +10,7 @@ import (
 	"github.com/rgeraskin/argocdf/internal/config"
 	"github.com/rgeraskin/argocdf/internal/diff"
 	"github.com/rgeraskin/argocdf/internal/git"
+	"github.com/rgeraskin/argocdf/internal/lint"
 	"github.com/rgeraskin/argocdf/internal/output"
 	"github.com/rgeraskin/argocdf/internal/render"
 	"github.com/rgeraskin/argocdf/internal/rendercache"
@@ -123,6 +124,18 @@ func (f *Factory) CreateRenderCache() (*rendercache.Cache, error) {
 // CreateManifestDiffer creates a manifest differ.
 func (f *Factory) CreateManifestDiffer() *diff.ManifestDiffer {
 	return diff.NewManifestDiffer()
+}
+
+// CreateLintRunner creates the rendered-manifest lint runner, or nil when no
+// --lint commands are configured.
+func (f *Factory) CreateLintRunner() *lint.Runner {
+	if len(f.config.Lint) == 0 {
+		return nil
+	}
+	return &lint.Runner{
+		Commands: f.config.Lint,
+		Timeout:  f.config.LintTimeout,
+	}
 }
 
 // CreateAppDiscoverer creates an application discoverer.

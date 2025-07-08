@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestParseFileOutput(t *testing.T) {
@@ -248,6 +249,19 @@ func TestConfigValidate(t *testing.T) {
 			},
 			wantErr: true,
 			errMsg:  "invalid stdout format",
+		},
+		{
+			name: "negative lint timeout",
+			config: &Config{
+				RepoPath:     tmpDir,
+				StdoutFormat: "fields",
+				MaxDepth:     10,
+				Concurrency:  1,
+				Lint:         []string{"true"},
+				LintTimeout:  -time.Second,
+			},
+			wantErr: true,
+			errMsg:  "lint timeout must be positive",
 		},
 		{
 			name: "none stdout without file outputs",

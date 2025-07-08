@@ -103,6 +103,31 @@ This ensures charts with dependencies (like umbrella charts) render correctly wi
 
 Caveat: `helm dependency build` never adds or refreshes classic HTTP(S) chart repositories — their index must already be in the local helm cache, which on a fresh CI runner it never is (fails with "no cached repository"/"no repository definition"). The opt-in `--helm-add-repos` flag makes argocdf register those repos first, deduplicated per URL per run: a URL already registered under any name is only refreshed (helm matches dependency repos by URL, so no new entry is written), and only unknown URLs are added, under hash-derived names that can never clobber a user's entry. It still mutates local helm state either way — index caches are refreshed and unknown URLs get new repositories.yaml entries — which is why it is off by default; the missing-repo error message points at it.
 
+## Linting Rendered Manifests (`--lint`)
+
+`--lint "shell command"` (repeatable; `--lint-timeout`, default 5s) pipes each
+affected app's rendered multi-doc YAML into the command's stdin via `sh -c`, per
+side. Each side's command runs with that side's ephemeral worktree as its
+working directory, so repo-relative policy paths resolve to the branch's own
+version of the files (a PR changing a policy lints each side with its own
+policy). Every non-empty stdout line becomes a warning appended to
+`ManifestSetDiff.ParseWarnings` with the existing `[base]`/`[target]` labels
+(`diff.LabelSide`), so all writers, badges, and split-packing handle lint
+findings with zero writer-specific code. The label semantics double as the
+diff: `[base]`-only = fixed by the PR, `[target]`-only = introduced, both =
+pre-existing.
+
+The runner lives in `internal/lint` and is spliced into `processOneApp`
+(`internal/app/app.go`) after `DiffManifests`; sides with an empty render
+(new/deleted apps) are skipped. Error contract: the process outcome is the only
+health signal — stdout lines are always kept, and spawn failure, timeout, or
+exit ≠ 0 appends one non-fatal self-identifying warning line. Stdout content
+never influences error detection; tools that exit non-zero on findings
+(kyverno, conftest) are expected to sit behind a jq adapter that exits 0
+(README documents the `jq -rn 'input | ...'` pattern, which also catches a
+crashed upstream tool producing empty output). `ARGOCDF_LINT` can carry only a
+single command (StringArray-via-env limitation); repeat `--lint` for several.
+
 ## Running the Tool
 
 ```bash
