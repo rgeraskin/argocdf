@@ -1,4 +1,4 @@
-module argocdf
+module github.com/rgeraskin/argocdf
 
 go 1.23.2
 

@@ -1,65 +1,17 @@
-package main
+package argocd
 
 import (
-	"bytes"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
 
-	"github.com/charmbracelet/log"
-	"github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing"
-	helmclient "github.com/mittwald/go-helm-client"
-	helmclientValues "github.com/mittwald/go-helm-client/values"
-	"github.com/sergi/go-diff/diffmatchpatch"
-	"gopkg.in/yaml.v3"
-	"helm.sh/helm/v3/pkg/chartutil"
-	"helm.sh/helm/v3/pkg/repo"
+	"github.com/go-git/go-git"
+	"github.com/go-git/go-git/plumbing"
+	"gopkg.in/yaml.v2"
 )
-
-const (
-	gitBranchMaster  = "main"
-	gitBranchCurrent = "feature"
-	gitRepoPath      = "/Users/rg/Projects/argocd/argocd_main/"
-	gitRepoURL       = "https://github.com/asd/argocd-apps.git"
-	kubeVersion      = "v1.23.10"
-	kubeVersionMajor = "1"
-	kubeVersionMinor = "23"
-)
-
-var logger *log.Logger
-
-type KubeResource struct {
-	Kind     string `yaml:"kind"`
-	Metadata struct {
-		Name string `yaml:"name"`
-	} `yaml:"metadata"`
-	Spec interface{} `yaml:"spec"`
-}
-
-type HelmParameter struct {
-	Name  string `yaml:"name"`
-	Value string `yaml:"value"`
-}
-
-type HelmFileParameter struct {
-	Name string `yaml:"name"`
-	Path string `yaml:"path"`
-}
-
-type HelmSpec struct {
-	ReleaseName    string              `yaml:"releaseName,omitempty"`
-	FileParameters []HelmFileParameter `yaml:"fileParameters,omitempty"`
-	Parameters     []HelmParameter     `yaml:"parameters,omitempty"`
-	ValueFiles     []string            `yaml:"valueFiles,omitempty"`
-	Values         string              `yaml:"values,omitempty"`
-	// valueObjects is object with any structure inside
-	ValueObjects []interface{} `yaml:"valueObjects,omitempty"`
-}
 
 type SourceSpec struct {
 	Chart          string    `yaml:"chart,omitempty"`
@@ -91,28 +43,6 @@ type Application struct {
 
 type ApplicationList struct {
 	Items []Application `yaml:"items"`
-}
-
-type App struct {
-	Name              string
-	ParentAppName     string
-	ChildAppNames     []string
-	ApplicationOld    *Application
-	ApplicationNew    *Application
-	Diff              []diffmatchpatch.Diff
-	AffectedResources string
-	RenderedOld       string
-	RenderedNew       string
-}
-
-func execCommand(name string, args ...string) (string, error) {
-	var stdout bytes.Buffer
-	cmd := exec.Command(name, args...)
-	cmd.Dir = gitRepoPath
-	cmd.Stdout = &stdout
-	cmd.Stderr = os.Stderr
-	err := cmd.Run()
-	return stdout.String(), err
 }
 
 func hasChangesInPath(
@@ -176,154 +106,6 @@ func hasChangesInPath(
 	return false, nil
 }
 
-func templateHelmChart(application *Application) ([]byte, error) {
-	logger := logger.With("appName", application.Metadata.Name)
-
-	optionsClient := &helmclient.Options{
-		RepositoryCache:  "/tmp/.helmcache",
-		RepositoryConfig: "/tmp/.helmrepo",
-		Namespace:        application.Spec.Destination.Namespace,
-		Output:           io.Discard,
-	}
-	hc, err := helmclient.New(optionsClient)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create helm client: %w", err)
-	}
-
-	optionsTemplate := &helmclient.HelmTemplateOptions{
-		KubeVersion: &chartutil.KubeVersion{
-			Version: kubeVersion,
-			Major:   kubeVersionMajor,
-			Minor:   kubeVersionMinor,
-		},
-	}
-
-	// check if release name is overridden
-	var releaseName string
-	if application.Spec.Source.Helm != nil && application.Spec.Source.Helm.ReleaseName != "" {
-		logger.Info(
-			"release name overridden",
-			"releaseName",
-			application.Spec.Source.Helm.ReleaseName,
-		)
-		releaseName = application.Spec.Source.Helm.ReleaseName
-	} else {
-		logger.Info("using default release name", "releaseName", application.Metadata.Name)
-		releaseName = application.Metadata.Name
-	}
-
-	var chart, chartVersion string
-	var valueFiles, fileValues []string
-	if application.Spec.Source.Chart != "" {
-		// use chart from remote repo
-		logger.Info("using chart from remote repo", "chart", application.Spec.Source.Chart)
-		repoURL := strings.TrimSuffix(application.Spec.Source.RepoURL, "/")
-		if strings.HasPrefix(repoURL, "https://") {
-			logger.Info("https repo", "repoURL", repoURL)
-			chart = application.Spec.Source.Chart + "/" + application.Spec.Source.Chart
-			repoEntry := repo.Entry{
-				Name:               application.Spec.Source.Chart,
-				URL:                repoURL,
-				PassCredentialsAll: true,
-			}
-			logger.Info("adding chart repo", "repoURL", repoURL)
-			if err := hc.AddOrUpdateChartRepo(repoEntry); err != nil {
-				return nil, fmt.Errorf("failed to add chart repo: %w", err)
-			}
-		} else {
-			logger.Info("oci repo", "repoURL", repoURL)
-			chart = "oci://" + repoURL + "/" + chart
-		}
-		if application.Spec.Source.Helm != nil {
-			// add value files from remote repo
-			valueFiles = application.Spec.Source.Helm.ValueFiles
-			// add file parameters from remote repo
-			for _, fileParam := range application.Spec.Source.Helm.FileParameters {
-				fileValues = append(
-					fileValues,
-					fmt.Sprintf("%s=%s", fileParam.Name, fileParam.Path),
-				)
-			}
-		}
-		if application.Spec.Source.TargetRevision != "HEAD" &&
-			application.Spec.Source.TargetRevision != gitBranchMaster &&
-			application.Spec.Source.TargetRevision != "" {
-			chartVersion = application.Spec.Source.TargetRevision
-		}
-	} else if application.Spec.Source.Path != "" {
-		// use chart from local path
-		chart = filepath.Join(gitRepoPath, application.Spec.Source.Path)
-		logger.Info("using chart from local path", "path", chart)
-		if application.Spec.Source.Helm != nil {
-			// add value files from local path
-			for _, path := range application.Spec.Source.Helm.ValueFiles {
-				valueFiles = append(valueFiles, filepath.Join(gitRepoPath, path))
-			}
-			// add file parameters from local path
-			for _, fileParam := range application.Spec.Source.Helm.FileParameters {
-				fileValues = append(fileValues, fmt.Sprintf("%s=%s", fileParam.Name, filepath.Join(gitRepoPath, fileParam.Path)))
-			}
-		}
-	} else {
-		return nil, fmt.Errorf("no chart specified")
-	}
-
-	if len(valueFiles) > 0 {
-		logger.Info("value files", "valueFiles", valueFiles)
-	}
-	if len(fileValues) > 0 {
-		logger.Info("file values", "fileValues", fileValues)
-	}
-
-	// prepare set values
-	setValues := []string{}
-	if application.Spec.Source.Helm != nil {
-		for _, param := range application.Spec.Source.Helm.Parameters {
-			setValues = append(setValues, fmt.Sprintf("%s=%s", param.Name, param.Value))
-		}
-	}
-
-	if len(setValues) > 0 {
-		logger.Info("set values", "setValues", setValues)
-	}
-
-	valuesOptions := helmclientValues.Options{
-		Values:     setValues,
-		ValueFiles: valueFiles,
-		FileValues: fileValues,
-	}
-
-	chartSpec := helmclient.ChartSpec{
-		ReleaseName:      releaseName,
-		ChartName:        chart,
-		Namespace:        application.Spec.Destination.Namespace,
-		DependencyUpdate: true,
-		ValuesOptions:    valuesOptions,
-	}
-
-	if chartVersion != "" {
-		chartSpec.Version = chartVersion
-	}
-
-	logger.Info("template chart", "chart", chart)
-	output, err := hc.TemplateChart(&chartSpec, optionsTemplate)
-	if err != nil {
-		return nil, fmt.Errorf("failed to template chart: %w", err)
-	}
-	return output, nil
-}
-
-func getAppType(ApplicationSpec ApplicationSpec) string {
-	switch {
-	case isHelmChart(ApplicationSpec):
-		return "helm"
-	case isKustomization(ApplicationSpec):
-		return "kustomize"
-	default:
-		return "unknown"
-	}
-}
-
 func isKustomization(ApplicationSpec ApplicationSpec) bool {
 	logger.Debug("Checking if app is kustomization", "ApplicationSpec", ApplicationSpec)
 	panic("unimplemented")
@@ -364,32 +146,6 @@ func isHelmChart(ApplicationSpec ApplicationSpec) bool {
 
 	// if there is only one source, check if it is a helm chart
 	return check(ApplicationSpec.Source)
-}
-
-func getGit(
-	gitRepoPath string,
-	gitBranchMaster string,
-) (*git.Repository, *plumbing.Reference, *plumbing.Reference, error) {
-	// Open the git repository
-	repo, err := git.PlainOpen(gitRepoPath)
-	if err != nil {
-		logger.Fatal("failed to open repository", "error", err)
-	}
-
-	// Get the HEAD reference
-	head, err := repo.Head()
-	if err != nil {
-		logger.Fatal("failed to get HEAD", "error", err)
-	}
-
-	// Get the main branch reference
-	mainRefName := plumbing.NewBranchReferenceName(gitBranchMaster)
-	mainRef, err := repo.Reference(mainRefName, true)
-	if err != nil {
-		logger.Fatal("failed to get main branch reference", "error", err)
-	}
-
-	return repo, head, mainRef, nil
 }
 
 func appsGetList() (ApplicationList, error) {
@@ -494,19 +250,6 @@ func buildAppsMap(applicationsChanged []Application, appsMap *map[string]*App) e
 	return nil
 }
 
-func printDiffs(appsMap *map[string]*App, parentAppName string) {
-	dmp := diffmatchpatch.New()
-	for _, app := range *appsMap {
-		if app.ParentAppName == parentAppName {
-			fmt.Println("# " + app.Name)
-			fmt.Println(dmp.DiffPrettyText(app.Diff))
-			if len(app.ChildAppNames) > 0 {
-				fmt.Printf("# Children: %v\n", app.ChildAppNames)
-				printDiffs(appsMap, app.Name)
-			}
-		}
-	}
-}
 
 func findNewChildren(app *App, appsMap *map[string]*App) error {
 	// decode yaml from app.AffectedResources
@@ -599,39 +342,6 @@ func findNewChildren(app *App, appsMap *map[string]*App) error {
 	return nil
 }
 
-func getDiff(app *App) error {
-	dmp := diffmatchpatch.New()
-	diffs := dmp.DiffMain(
-		app.RenderedOld,
-		app.RenderedNew,
-		true,
-	)
-
-	// make diff smaller
-	for i, diff := range diffs {
-		if diff.Type == diffmatchpatch.DiffEqual {
-			// delete all text after the first '---' and before the last '---' in diff.Text
-			firstHyphen := strings.Index(diff.Text, "---")
-			lastHyphen := strings.LastIndex(diff.Text, "---")
-			if firstHyphen != -1 && lastHyphen != -1 {
-				diffs[i].Text = diff.Text[:firstHyphen] + diff.Text[lastHyphen:]
-			}
-		}
-	}
-	// delete last equal diff
-	lastDiff := &diffs[len(diffs)-1]
-	if lastDiff.Type == diffmatchpatch.DiffEqual {
-		lastHyphen := strings.LastIndex(lastDiff.Text, "---")
-		if lastHyphen != -1 {
-			lastDiff.Text = lastDiff.Text[:lastHyphen]
-		}
-	}
-
-	app.Diff = diffs
-	app.AffectedResources = string(dmp.DiffText2(diffs))
-	return nil
-}
-
 func renderAppsMap(
 	appsMap *map[string]*App,
 	parentAppName string,
@@ -702,95 +412,4 @@ func renderApp(application *Application) (string, error) {
 	}
 
 	return string(renderedApp), nil
-}
-
-func renderBranches(
-	repo *git.Repository,
-	gitBranchCurrent, gitBranchMaster string,
-	app *App,
-) error {
-	type branch struct {
-		Application *Application
-		Rendered    *string
-	}
-	// branches is a dictionary with branch name as key and branch as value
-	branches := map[string]branch{
-		gitBranchCurrent: {Application: app.ApplicationNew, Rendered: &app.RenderedNew},
-		gitBranchMaster:  {Application: app.ApplicationOld, Rendered: &app.RenderedOld},
-	}
-
-	worktree, err := repo.Worktree()
-	if err != nil {
-		logger.Fatal("failed to get worktree", "error", err)
-	}
-
-	for branchName, opts := range branches {
-		application := opts.Application
-		rendered := opts.Rendered
-
-		logger.Info("Processing branch", "branch", branchName)
-
-		branchRefName := plumbing.NewBranchReferenceName(branchName)
-		branchCoOpts := git.CheckoutOptions{
-			Branch: branchRefName,
-		}
-		if err := worktree.Checkout(&branchCoOpts); err != nil {
-			return fmt.Errorf("failed to checkout branch: %w", err)
-		}
-
-		renderedApp, err := renderApp(application)
-		if err != nil {
-			return fmt.Errorf("error rendering app: %w", err)
-		}
-		*rendered = renderedApp
-	}
-	// checkout to the original branch
-	logger.Info("checkout to the original branch", "branch", gitBranchCurrent)
-	branchRefName := plumbing.NewBranchReferenceName(gitBranchCurrent)
-	branchCoOpts := git.CheckoutOptions{
-		Branch: branchRefName,
-	}
-	if err := worktree.Checkout(&branchCoOpts); err != nil {
-		logger.Fatal("failed to checkout branch", "error", err)
-	}
-
-	return nil
-}
-
-func main() {
-	logger = log.NewWithOptions(os.Stderr, log.Options{
-		// ReportCaller:    true,
-		ReportTimestamp: true,
-		Level:           log.DebugLevel,
-		// Formatter:       log.LogfmtFormatter,
-	})
-
-	repo, head, mainRef, err := getGit(gitRepoPath, gitBranchMaster)
-	if err != nil {
-		logger.Fatal("failed to get git", "error", err)
-	}
-
-	appList, err := appsGetList()
-	if err != nil {
-		logger.Fatal("failed to get argo cd apps", "error", err)
-	}
-
-	applicationsChanged, err := appsGetChanged(appList, repo, head, mainRef)
-	if err != nil {
-		logger.Fatal("failed to get changed apps", "error", err)
-	}
-
-	// build apps dependency map
-	appsMap := map[string]*App{}
-	err = buildAppsMap(applicationsChanged, &appsMap)
-	if err != nil {
-		logger.Fatal("failed to build apps map", "error", err)
-	}
-
-	err = renderAppsMap(&appsMap, "", repo)
-	if err != nil {
-		logger.Fatal("failed to render apps map", "error", err)
-	}
-
-	printDiffs(&appsMap, "")
 }
