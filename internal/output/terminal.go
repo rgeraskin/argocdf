@@ -82,12 +82,10 @@ func (t *TerminalWriter) WriteHeader(title string) error {
 		// Output as comments for valid unified diff format (use titleStyle without margins)
 		fmt.Fprintf(t.out, "# %s\n", titleStyle.Render(title))
 		fmt.Fprintf(t.out, "# %s\n", strings.Repeat("=", len(title)))
-		fmt.Fprintln(t.out)
 		return nil
 	}
 	fmt.Fprintln(t.out, headerStyle.Render(title))
 	fmt.Fprintln(t.out, strings.Repeat("=", len(title)))
-	fmt.Fprintln(t.out)
 	return nil
 }
 
@@ -99,6 +97,9 @@ func (t *TerminalWriter) WriteAppDiff(appDiff *types.AppDiff, depth int) error {
 	}
 
 	indent := strings.Repeat("  ", depth)
+
+	// Add blank line before app (provides spacing between apps)
+	fmt.Fprintln(t.out)
 
 	// Write app name with tree indicator
 	prefix := "├─"
@@ -418,7 +419,6 @@ func (t *TerminalWriter) writeSummaryUnified(summary Summary) error {
 
 // WriteFooter writes the footer.
 func (t *TerminalWriter) WriteFooter() error {
-	fmt.Fprintln(t.out)
 	return nil
 }
 
