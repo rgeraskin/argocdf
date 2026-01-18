@@ -10,7 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 # Build
-make build          # Build binary to ./bin/argocdf
+make build          # Build binary to ./argocdf
 make install        # Install to GOPATH/bin
 
 # Test
@@ -51,14 +51,24 @@ The tool follows a pipeline architecture orchestrated by `internal/app/app.go`:
 | `internal/git` | Repository operations, change detection |
 | `internal/render` | Helm/Kustomize manifest rendering |
 | `internal/diff` | Manifest comparison, apps-of-apps discovery |
-| `internal/output` | Terminal and HTML output writers |
+| `internal/output` | Output writers (terminal, markdown, HTML, unified) |
 
 ### Design Patterns
 
 - **Interface-based design**: `Renderer`, `Writer`, `Differ` allow pluggable implementations
 - **Factory pattern**: `internal/app/factory.go` handles dependency injection
-- **Multi-writer**: Simultaneous output to terminal and HTML
+- **Multi-writer**: Simultaneous output to multiple destinations (terminal + files)
 - **Queue-based recursion**: Depth-limited discovery for apps-of-apps pattern
+
+### Output Writers
+
+| Writer | File | Description |
+|--------|------|-------------|
+| `TerminalWriter` | `terminal.go` | Colored terminal output (fields/summary/unified modes) |
+| `MarkdownWriter` | `markdown.go` | GitHub/Atlantis markdown with collapsible sections |
+| `HTMLWriter` | `html.go` | Interactive HTML with diff2html side-by-side view |
+| `UnifiedWriter` | `unified_writer.go` | Patch-compatible unified diff format |
+| `MultiWriter` | `output.go` | Fans out to multiple writers simultaneously |
 
 ## ArgoCD Application Support
 
@@ -68,21 +78,60 @@ The tool supports both single and multi-source applications:
 
 Apps-of-apps pattern is handled via recursive discovery with configurable max depth.
 
+### Automatic Helm Dependency Management
+
+When rendering local Helm charts, argocdf automatically runs `helm dependency build` if:
+1. The chart has a `Chart.yaml` with a `dependencies:` section
+2. The `charts/` subdirectory is missing or empty
+
+This ensures charts with dependencies (like umbrella charts) render correctly without manual setup.
+
 ## Running the Tool
 
 ```bash
 # Basic usage (auto-detects everything)
-./bin/argocdf
+./argocdf
 
 # Specify branches
-./bin/argocdf --base main --target feature-branch
-
-# Different output formats
-./bin/argocdf -o html --html-file report.html
-./bin/argocdf -o both  # terminal + html
+./argocdf --base main --target feature-branch
 
 # Different cluster/namespace
-./bin/argocdf --context prod-cluster -n argocd
+./argocdf --context prod-cluster -n argocd
+
+# Scan all namespaces
+./argocdf -A
+```
+
+### Output Formats
+
+**Terminal output** (`--stdout`):
+- `fields` (default) - Field-level changes with colors
+- `summary` - Counts only, no diff details
+- `unified` - Traditional unified diff format
+- `none` - Suppress terminal output
+
+**File output** (`-f/--file format:path`):
+- `md` - GitHub-flavored markdown with collapsible sections
+- `md-atlantis` - Atlantis-style markdown
+- `html-side-by-side` - Interactive HTML with side-by-side diff
+- `unified` - Patch-compatible unified diff
+
+```bash
+# Quiet mode with markdown file output
+./argocdf -q -f md:pr-comment.md
+
+# Multiple file outputs
+./argocdf -f md:pr.md -f html-side-by-side:report.html
+
+# Unified diff for patch workflows
+./argocdf --stdout unified
+./argocdf -f unified:changes.patch
+
+# Summary only in terminal
+./argocdf --stdout summary
+
+# Use external diff tool (e.g., delta for side-by-side)
+ARGOCDF_EXTERNAL_DIFF="delta --side-by-side" ./argocdf
 ```
 
 ## Test Data

@@ -49,19 +49,24 @@ var (
 
 // TerminalWriter writes diff output to the terminal with colors.
 type TerminalWriter struct {
-	out         io.Writer
-	sideBySide  bool
-	summaryOnly bool
-	contextLine int
+	out            io.Writer
+	summaryOnly    bool
+	unifiedDiff    bool   // Show unified diff format
+	externalDiff   string // External diff command from ARGOCDF_EXTERNAL_DIFF
+	contextLine    int
 }
 
 // NewTerminalWriter creates a new TerminalWriter.
-func NewTerminalWriter(sideBySide, summaryOnly bool) *TerminalWriter {
+// Format can be "fields", "summary", or "unified".
+// If ARGOCDF_EXTERNAL_DIFF environment variable is set, it will be used
+// for side-by-side diff display automatically (when format is "fields").
+func NewTerminalWriter(format string) *TerminalWriter {
 	return &TerminalWriter{
-		out:         os.Stdout,
-		sideBySide:  sideBySide,
-		summaryOnly: summaryOnly,
-		contextLine: 3,
+		out:          os.Stdout,
+		summaryOnly:  format == "summary",
+		unifiedDiff:  format == "unified",
+		externalDiff: os.Getenv("ARGOCDF_EXTERNAL_DIFF"),
+		contextLine:  3,
 	}
 }
 
@@ -123,10 +128,12 @@ func (t *TerminalWriter) WriteAppDiff(appDiff *types.AppDiff, depth int) error {
 	}
 
 	// Show detailed diff unless summaryOnly is set
-	// Default behavior is to show details (opposite of old behavior)
 	if !t.summaryOnly {
-		if t.sideBySide {
-			// Use external diff tool for side-by-side view
+		if t.unifiedDiff {
+			// Use unified diff format
+			t.writeUnifiedDiff(result, indent)
+		} else if t.externalDiff != "" {
+			// Use external diff tool for side-by-side view (ARGOCDF_EXTERNAL_DIFF is set)
 			t.writeExternalDiff(appDiff, result, indent)
 		} else {
 			// Use built-in detailed diff
@@ -175,20 +182,45 @@ func (t *TerminalWriter) writeFieldChanges(result *diff.DiffResult, indent strin
 	}
 }
 
-// writeExternalDiff uses an external diff tool to display side-by-side diffs.
-// It respects the KUBECTL_EXTERNAL_DIFF environment variable like ArgoCD does.
-func (t *TerminalWriter) writeExternalDiff(_ *types.AppDiff, result *diff.ManifestSetDiff, indent string) {
-	// Get the external diff command
-	diffCmd := os.Getenv("KUBECTL_EXTERNAL_DIFF")
-	if diffCmd == "" {
-		// Fall back to built-in diff display with hint
-		fmt.Fprintf(t.out, "%s    %s\n", indent, dimStyle.Render("(Set KUBECTL_EXTERNAL_DIFF for side-by-side view, e.g., 'delta --side-by-side')"))
-		t.writeDetailedDiff(result, indent)
+// writeUnifiedDiff writes unified diff format output.
+func (t *TerminalWriter) writeUnifiedDiff(result *diff.ManifestSetDiff, indent string) {
+	diffs, err := GenerateManifestUnifiedDiffs(result)
+	if err != nil {
+		fmt.Fprintf(t.out, "%s    %s\n", indent, errorStyle.Render("Error generating diff: "+err.Error()))
 		return
 	}
 
-	// Parse the diff command
-	parts := strings.Fields(diffCmd)
+	keys := GetSortedKeys(result)
+	for _, key := range keys {
+		if d, ok := diffs[key]; ok && d != "" {
+			// Print each line of the unified diff with appropriate coloring
+			lines := strings.Split(d, "\n")
+			for _, line := range lines {
+				if line == "" {
+					continue
+				}
+				switch {
+				case strings.HasPrefix(line, "+++") || strings.HasPrefix(line, "---"):
+					fmt.Fprintf(t.out, "%s    %s\n", indent, dimStyle.Render(line))
+				case strings.HasPrefix(line, "@@"):
+					fmt.Fprintf(t.out, "%s    %s\n", indent, dimStyle.Render(line))
+				case strings.HasPrefix(line, "+"):
+					fmt.Fprintf(t.out, "%s    %s\n", indent, addedStyle.Render(line))
+				case strings.HasPrefix(line, "-"):
+					fmt.Fprintf(t.out, "%s    %s\n", indent, removedStyle.Render(line))
+				default:
+					fmt.Fprintf(t.out, "%s    %s\n", indent, line)
+				}
+			}
+		}
+	}
+}
+
+// writeExternalDiff uses an external diff tool to display side-by-side diffs.
+// Uses the ARGOCDF_EXTERNAL_DIFF environment variable.
+func (t *TerminalWriter) writeExternalDiff(_ *types.AppDiff, result *diff.ManifestSetDiff, indent string) {
+	// Parse the diff command (already validated to be non-empty)
+	parts := strings.Fields(t.externalDiff)
 	if len(parts) == 0 {
 		t.writeDetailedDiff(result, indent)
 		return

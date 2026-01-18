@@ -30,33 +30,33 @@ type Application struct {
 
 // ApplicationSpec contains the specification of an ArgoCD Application.
 type ApplicationSpec struct {
-	Source      *ApplicationSource   `json:"source,omitempty"`
-	Sources     []ApplicationSource  `json:"sources,omitempty"`
-	Destination ApplicationDest      `json:"destination"`
-	Project     string               `json:"project,omitempty"`
+	Source      *ApplicationSource     `json:"source,omitempty"`
+	Sources     []ApplicationSource    `json:"sources,omitempty"`
+	Destination ApplicationDest        `json:"destination"`
+	Project     string                 `json:"project,omitempty"`
 	SyncPolicy  *ApplicationSyncPolicy `json:"syncPolicy,omitempty"`
 }
 
 // ApplicationSource defines the source of an application.
 type ApplicationSource struct {
-	RepoURL        string           `json:"repoURL"`
-	Path           string           `json:"path,omitempty"`
-	TargetRevision string           `json:"targetRevision,omitempty"`
-	Chart          string           `json:"chart,omitempty"`
-	Ref            string           `json:"ref,omitempty"`
+	RepoURL        string                      `json:"repoURL"`
+	Path           string                      `json:"path,omitempty"`
+	TargetRevision string                      `json:"targetRevision,omitempty"`
+	Chart          string                      `json:"chart,omitempty"`
+	Ref            string                      `json:"ref,omitempty"`
 	Helm           *ApplicationSourceHelm      `json:"helm,omitempty"`
 	Kustomize      *ApplicationSourceKustomize `json:"kustomize,omitempty"`
 }
 
 // ApplicationSourceHelm contains Helm-specific source configuration.
 type ApplicationSourceHelm struct {
-	ReleaseName     string            `json:"releaseName,omitempty"`
-	ValueFiles      []string          `json:"valueFiles,omitempty"`
-	Values          string            `json:"values,omitempty"`
-	Parameters      []HelmParameter   `json:"parameters,omitempty"`
+	ReleaseName     string              `json:"releaseName,omitempty"`
+	ValueFiles      []string            `json:"valueFiles,omitempty"`
+	Values          string              `json:"values,omitempty"`
+	Parameters      []HelmParameter     `json:"parameters,omitempty"`
 	FileParameters  []HelmFileParameter `json:"fileParameters,omitempty"`
-	Version         string            `json:"version,omitempty"`
-	PassCredentials bool              `json:"passCredentials,omitempty"`
+	Version         string              `json:"version,omitempty"`
+	PassCredentials bool                `json:"passCredentials,omitempty"`
 }
 
 // HelmParameter represents a Helm parameter override.
@@ -74,12 +74,12 @@ type HelmFileParameter struct {
 
 // ApplicationSourceKustomize contains Kustomize-specific source configuration.
 type ApplicationSourceKustomize struct {
-	NamePrefix string            `json:"namePrefix,omitempty"`
-	NameSuffix string            `json:"nameSuffix,omitempty"`
-	Images     []string          `json:"images,omitempty"`
-	CommonLabels map[string]string `json:"commonLabels,omitempty"`
+	NamePrefix        string            `json:"namePrefix,omitempty"`
+	NameSuffix        string            `json:"nameSuffix,omitempty"`
+	Images            []string          `json:"images,omitempty"`
+	CommonLabels      map[string]string `json:"commonLabels,omitempty"`
 	CommonAnnotations map[string]string `json:"commonAnnotations,omitempty"`
-	Version    string            `json:"version,omitempty"`
+	Version           string            `json:"version,omitempty"`
 }
 
 // ApplicationDest defines the destination cluster and namespace.
@@ -102,8 +102,8 @@ type SyncPolicyAutomated struct {
 
 // ApplicationStatus contains the status of an ArgoCD Application.
 type ApplicationStatus struct {
-	Health  HealthStatus `json:"health,omitempty"`
-	Sync    SyncStatus   `json:"sync,omitempty"`
+	Health HealthStatus `json:"health,omitempty"`
+	Sync   SyncStatus   `json:"sync,omitempty"`
 }
 
 // HealthStatus represents the health status.

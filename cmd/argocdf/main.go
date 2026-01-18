@@ -28,13 +28,11 @@ var (
 	baseBranch     string
 	targetBranch   string
 	kubeVersion    string
-	outputFormat   string
-	htmlFile       string
-	noRecursive  bool
-	maxDepth     int
-	sideBySide   bool
-	summaryOnly  bool
-	githubCompat bool
+	stdoutFormat   string
+	fileOutputs    []string
+	quiet          bool
+	noRecursive    bool
+	maxDepth       int
 )
 
 func main() {
@@ -63,11 +61,24 @@ Examples:
   # Scan all namespaces for ArgoCD applications
   argocdf --all-namespaces
 
-  # Override repo URL (useful when SSH config has custom hostname aliases)
-  argocdf --repo-dir /path/to/repo --repo-url https://github.com/org/repo
+  # Generate GitHub markdown for PR comment
+  argocdf -q -f md:diff.md
 
-  # Generate HTML report
-  argocdf --output both --html-file report.html`,
+  # Generate multiple outputs
+  argocdf -f md:pr-comment.md -f html-side-by-side:report.html
+
+  # Generate unified diff output
+  argocdf --stdout unified
+  argocdf -f unified:changes.patch
+
+  # Use Atlantis-style markdown format
+  argocdf --file md-atlantis:diff.md
+
+  # Summary only in terminal
+  argocdf --stdout summary
+
+  # Use external diff tool for side-by-side view
+  ARGOCDF_EXTERNAL_DIFF="delta --side-by-side" argocdf`,
 		RunE: runMain,
 	}
 
@@ -87,17 +98,15 @@ Examples:
 	rootCmd.Flags().StringVar(&kubeVersion, "kube-version", "", "Kubernetes version for rendering (auto-detected)")
 
 	// Output flags
-	rootCmd.Flags().StringVarP(&outputFormat, "output", "o", "terminal", "Output format: terminal, html, or both")
-	rootCmd.Flags().StringVar(&htmlFile, "html-file", config.DefaultHTMLFile, "HTML output file path")
+	rootCmd.Flags().StringVar(&stdoutFormat, "stdout", config.DefaultStdoutFormat,
+		"Terminal output format: fields, summary, unified, none (set ARGOCDF_EXTERNAL_DIFF for side-by-side)")
+	rootCmd.Flags().StringArrayVarP(&fileOutputs, "file", "f", nil,
+		"File output in format:path (can be repeated). Formats: md, html-side-by-side, md-atlantis, unified")
+	rootCmd.Flags().BoolVarP(&quiet, "quiet", "q", false, "Suppress terminal output (same as --stdout none)")
 
 	// Recursion flags
 	rootCmd.Flags().BoolVar(&noRecursive, "no-recursive", false, "Disable apps-of-apps recursion")
 	rootCmd.Flags().IntVar(&maxDepth, "max-depth", config.DefaultMaxDepth, "Maximum recursion depth")
-
-	// Output detail flags
-	rootCmd.Flags().BoolVar(&sideBySide, "side-by-side", false, "Show side-by-side YAML diff (uses KUBECTL_EXTERNAL_DIFF for terminal)")
-	rootCmd.Flags().BoolVar(&summaryOnly, "summary-only", false, "Show only affected apps without detailed diff")
-	rootCmd.Flags().BoolVar(&githubCompat, "github", false, "Output GitHub-compatible HTML (pasteable to PR comments)")
 
 	// Version command
 	rootCmd.AddCommand(&cobra.Command{
@@ -132,6 +141,21 @@ func runMain(cmd *cobra.Command, args []string) error {
 		Level:           log.InfoLevel,
 	})
 
+	// Handle quiet flag (alias for --stdout none)
+	if quiet {
+		stdoutFormat = "none"
+	}
+
+	// Parse file outputs
+	var parsedFileOutputs []config.FileOutput
+	for _, spec := range fileOutputs {
+		fo, err := config.ParseFileOutput(spec)
+		if err != nil {
+			return err
+		}
+		parsedFileOutputs = append(parsedFileOutputs, fo)
+	}
+
 	// Build configuration
 	cfg := &config.Config{
 		KubeconfigPath: kubeconfigPath,
@@ -143,13 +167,10 @@ func runMain(cmd *cobra.Command, args []string) error {
 		BaseBranch:     baseBranch,
 		TargetBranch:   targetBranch,
 		KubeVersion:    kubeVersion,
-		OutputFormat:   outputFormat,
-		HTMLFilePath:   htmlFile,
-		NoRecursive:  noRecursive,
-		MaxDepth:     maxDepth,
-		SideBySide:   sideBySide,
-		SummaryOnly:  summaryOnly,
-		GitHubCompat: githubCompat,
+		StdoutFormat:   stdoutFormat,
+		FileOutputs:    parsedFileOutputs,
+		NoRecursive:    noRecursive,
+		MaxDepth:       maxDepth,
 	}
 
 	// Auto-detect missing values

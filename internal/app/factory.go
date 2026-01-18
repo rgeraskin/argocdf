@@ -69,18 +69,47 @@ func (f *Factory) CreateAppQueue() *diff.AppDiffQueue {
 func (f *Factory) CreateOutputWriter() (output.Writer, error) {
 	var writers []output.Writer
 
-	// Terminal output
-	if f.config.OutputFormat == "terminal" || f.config.OutputFormat == "both" {
-		writers = append(writers, output.NewTerminalWriter(f.config.SideBySide, f.config.SummaryOnly))
+	// Terminal output (unless "none")
+	if f.config.StdoutFormat != "none" {
+		writers = append(writers, output.NewTerminalWriter(f.config.StdoutFormat))
 	}
 
-	// HTML output
-	if f.config.OutputFormat == "html" || f.config.OutputFormat == "both" {
-		htmlWriter, err := output.NewHTMLWriter(f.config.HTMLFilePath, f.config.SideBySide, f.config.SummaryOnly, f.config.GitHubCompat)
-		if err != nil {
-			return nil, err
+	// File outputs
+	for _, fo := range f.config.FileOutputs {
+		switch fo.Format {
+		case "md":
+			mdWriter, err := output.NewMarkdownWriter(fo.Path, output.MarkdownFormatGitHub)
+			if err != nil {
+				return nil, err
+			}
+			writers = append(writers, mdWriter)
+
+		case "md-atlantis":
+			mdWriter, err := output.NewMarkdownWriter(fo.Path, output.MarkdownFormatAtlantis)
+			if err != nil {
+				return nil, err
+			}
+			writers = append(writers, mdWriter)
+
+		case "html-side-by-side":
+			htmlWriter, err := output.NewHTMLWriter(fo.Path, true, false, false)
+			if err != nil {
+				return nil, err
+			}
+			writers = append(writers, htmlWriter)
+
+		case "unified":
+			unifiedWriter, err := output.NewUnifiedWriter(fo.Path)
+			if err != nil {
+				return nil, err
+			}
+			writers = append(writers, unifiedWriter)
 		}
-		writers = append(writers, htmlWriter)
+	}
+
+	// Handle no outputs (shouldn't happen due to validation, but be safe)
+	if len(writers) == 0 {
+		return output.NewNullWriter(), nil
 	}
 
 	if len(writers) == 1 {

@@ -15,36 +15,31 @@ import (
 
 // HTMLWriter writes diff output as an HTML report.
 type HTMLWriter struct {
-	file         *os.File
-	sideBySide   bool
-	summaryOnly  bool
-	githubCompat bool
-	diffCount    int // Counter for unique diff IDs
+	file        *os.File
+	sideBySide  bool
+	summaryOnly bool
+	diffCount   int // Counter for unique diff IDs
 }
 
 // NewHTMLWriter creates a new HTMLWriter.
-func NewHTMLWriter(filePath string, sideBySide, summaryOnly, githubCompat bool) (*HTMLWriter, error) {
+// The sideBySide parameter controls whether to use side-by-side diff display.
+// The summaryOnly parameter controls whether to show only summary without details.
+// The third parameter is kept for backward compatibility but is ignored (use MarkdownWriter for markdown).
+func NewHTMLWriter(filePath string, sideBySide, summaryOnly, _ bool) (*HTMLWriter, error) {
 	file, err := os.Create(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create HTML file: %w", err)
 	}
 
 	return &HTMLWriter{
-		file:         file,
-		sideBySide:   sideBySide,
-		summaryOnly:  summaryOnly,
-		githubCompat: githubCompat,
+		file:        file,
+		sideBySide:  sideBySide,
+		summaryOnly: summaryOnly,
 	}, nil
 }
 
 // WriteHeader writes the HTML header.
 func (h *HTMLWriter) WriteHeader(title string) error {
-	if h.githubCompat {
-		// GitHub-compatible: just a simple header, no document wrapper
-		_, err := io.WriteString(h.file, fmt.Sprintf("## %s\n\n", html.EscapeString(title)))
-		return err
-	}
-
 	// Full HTML document for standalone viewing
 	_, err := io.WriteString(h.file, fmt.Sprintf(`<!DOCTYPE html>
 <html lang="en">
@@ -112,9 +107,6 @@ func (h *HTMLWriter) WriteHeader(title string) error {
 
 // WriteAppDiff writes the diff for an application.
 func (h *HTMLWriter) WriteAppDiff(appDiff *types.AppDiff, depth int) error {
-	if h.githubCompat {
-		return h.writeAppDiffGitHub(appDiff, depth)
-	}
 	return h.writeAppDiffFull(appDiff, depth)
 }
 
@@ -167,100 +159,6 @@ func (h *HTMLWriter) writeAppDiffFull(appDiff *types.AppDiff, depth int) error {
 
 	h.write(`</div>`)
 	return nil
-}
-
-// writeAppDiffGitHub writes app diff with inline styles for GitHub compatibility.
-func (h *HTMLWriter) writeAppDiffGitHub(appDiff *types.AppDiff, _ int) error {
-	appName := appDiff.Name
-	if appDiff.Namespace != "" {
-		appName += fmt.Sprintf(" (%s)", appDiff.Namespace)
-	}
-
-	// Type assert DiffResult
-	result, ok := appDiff.DiffResult.(*diff.ManifestSetDiff)
-
-	// Build summary line with emoji badges
-	var badges []string
-	if appDiff.Error != nil {
-		badges = append(badges, "❌ Error")
-	} else if ok && result != nil && result.HasChanges {
-		if len(result.Added) > 0 {
-			badges = append(badges, fmt.Sprintf("🟢+%d", len(result.Added)))
-		}
-		if len(result.Removed) > 0 {
-			badges = append(badges, fmt.Sprintf("🔴-%d", len(result.Removed)))
-		}
-		if len(result.Modified) > 0 {
-			badges = append(badges, fmt.Sprintf("🟡~%d", len(result.Modified)))
-		}
-	}
-
-	badgeStr := ""
-	if len(badges) > 0 {
-		badgeStr = " " + strings.Join(badges, " ")
-	}
-
-	// Use <details> for collapsible section (supported by GitHub)
-	h.write("<details>\n")
-	h.write(fmt.Sprintf("<summary><b>%s</b>%s</summary>\n\n", html.EscapeString(appName), badgeStr))
-
-	// Error message
-	if appDiff.Error != nil {
-		h.write(fmt.Sprintf("> ⚠️ %s\n\n", html.EscapeString(appDiff.Error.Error())))
-	} else if !ok || result == nil || !result.HasChanges {
-		h.write("_No changes_\n\n")
-	} else if !h.summaryOnly {
-		// Show detailed diff - always use diff code blocks for GitHub
-		h.writeDetailedDiffGitHub(result)
-	}
-
-	h.write("</details>\n\n")
-	return nil
-}
-
-// writeDetailedDiffGitHub writes detailed diff for GitHub using diff code blocks.
-func (h *HTMLWriter) writeDetailedDiffGitHub(result *diff.ManifestSetDiff) {
-	// Added resources
-	for _, m := range result.Added {
-		h.write(fmt.Sprintf("#### ➕ %s\n\n", m.Key()))
-		h.write("```yaml\n")
-		h.write(m.Raw)
-		if !strings.HasSuffix(m.Raw, "\n") {
-			h.write("\n")
-		}
-		h.write("```\n\n")
-	}
-
-	// Removed resources
-	for _, m := range result.Removed {
-		h.write(fmt.Sprintf("#### ➖ %s\n\n", m.Key()))
-		h.write("```yaml\n")
-		h.write(m.Raw)
-		if !strings.HasSuffix(m.Raw, "\n") {
-			h.write("\n")
-		}
-		h.write("```\n\n")
-	}
-
-	// Modified resources - show as diff code block
-	for _, md := range result.Modified {
-		h.write(fmt.Sprintf("#### 📝 %s\n\n", md.Key))
-		if md.Diff != nil && len(md.Diff.Changes) > 0 {
-			h.write("```diff\n")
-			for _, change := range md.Diff.Changes {
-				switch change.Type {
-				case diff.ChangeTypeAdded:
-					h.write(fmt.Sprintf("+ %s: %v\n", change.Path, change.NewValue))
-				case diff.ChangeTypeRemoved:
-					h.write(fmt.Sprintf("- %s: %v\n", change.Path, change.OldValue))
-				case diff.ChangeTypeModified:
-					h.write(fmt.Sprintf("- %s: %v\n", change.Path, change.OldValue))
-					h.write(fmt.Sprintf("+ %s: %v\n", change.Path, change.NewValue))
-				}
-			}
-			h.write("```\n\n")
-		}
-	}
 }
 
 // writeDetailedDiff writes the detailed diff.
@@ -495,10 +393,6 @@ func (h *HTMLWriter) WriteTree(tree *diff.AppTree) error {
 
 // WriteSummary writes the summary.
 func (h *HTMLWriter) WriteSummary(summary Summary) error {
-	if h.githubCompat {
-		return h.writeSummaryGitHub(summary)
-	}
-
 	h.write(`<div class="summary">`)
 	h.write(`<h2>Summary</h2>`)
 	h.write(`<div class="summary-grid">`)
@@ -525,31 +419,6 @@ func (h *HTMLWriter) WriteSummary(summary Summary) error {
 	return nil
 }
 
-// writeSummaryGitHub writes summary in GitHub-compatible markdown.
-func (h *HTMLWriter) writeSummaryGitHub(summary Summary) error {
-	h.write("---\n\n### Summary\n\n")
-	h.write(fmt.Sprintf("| Metric | Value |\n"))
-	h.write(fmt.Sprintf("|--------|-------|\n"))
-	h.write(fmt.Sprintf("| Applications analyzed | %d |\n", summary.TotalApps))
-	h.write(fmt.Sprintf("| Applications with changes | %d |\n", summary.AppsWithChanges))
-
-	if summary.AppsWithErrors > 0 {
-		h.write(fmt.Sprintf("| Applications with errors | %d |\n", summary.AppsWithErrors))
-	}
-	if summary.TotalAdded > 0 {
-		h.write(fmt.Sprintf("| Resources added | +%d |\n", summary.TotalAdded))
-	}
-	if summary.TotalRemoved > 0 {
-		h.write(fmt.Sprintf("| Resources removed | -%d |\n", summary.TotalRemoved))
-	}
-	if summary.TotalModified > 0 {
-		h.write(fmt.Sprintf("| Resources modified | ~%d |\n", summary.TotalModified))
-	}
-
-	h.write("\n")
-	return nil
-}
-
 // writeSummaryItem writes a summary item.
 func (h *HTMLWriter) writeSummaryItem(label, value, colorClass string) {
 	color := ""
@@ -570,11 +439,6 @@ func (h *HTMLWriter) writeSummaryItem(label, value, colorClass string) {
 
 // WriteFooter writes the footer.
 func (h *HTMLWriter) WriteFooter() error {
-	if h.githubCompat {
-		h.write(fmt.Sprintf("\n---\n_Generated at %s by argocdf_\n", time.Now().Format(time.RFC3339)))
-		return nil
-	}
-
 	h.write(fmt.Sprintf(`<p class="timestamp">Generated at %s by argocdf</p>`, time.Now().Format(time.RFC3339)))
 	h.write(`</div></body></html>`)
 	return nil

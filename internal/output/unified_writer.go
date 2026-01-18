@@ -1,0 +1,125 @@
+// Package output provides unified diff file output functionality.
+package output
+
+import (
+	"fmt"
+	"io"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/rgeraskin/argocdf/internal/diff"
+	"github.com/rgeraskin/argocdf/internal/types"
+)
+
+// UnifiedWriter writes diff output in unified diff format to a file.
+// This format is compatible with patch(1) and can be used with diff viewers.
+type UnifiedWriter struct {
+	file *os.File
+}
+
+// NewUnifiedWriter creates a new UnifiedWriter.
+func NewUnifiedWriter(filePath string) (*UnifiedWriter, error) {
+	file, err := os.Create(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create unified diff file: %w", err)
+	}
+
+	return &UnifiedWriter{
+		file: file,
+	}, nil
+}
+
+// WriteHeader writes the header comment.
+func (u *UnifiedWriter) WriteHeader(title string) error {
+	_, err := io.WriteString(u.file, fmt.Sprintf("# %s\n", title))
+	return err
+}
+
+// WriteAppDiff writes the diff for an application in unified diff format.
+func (u *UnifiedWriter) WriteAppDiff(appDiff *types.AppDiff, _ int) error {
+	// Write app header as comment
+	appName := appDiff.Name
+	if appDiff.Namespace != "" {
+		appName += fmt.Sprintf(" (%s)", appDiff.Namespace)
+	}
+	u.write(fmt.Sprintf("# Application: %s\n", appName))
+
+	// Handle error
+	if appDiff.Error != nil {
+		u.write(fmt.Sprintf("# Error: %s\n\n", appDiff.Error.Error()))
+		return nil
+	}
+
+	// Type assert DiffResult
+	result, ok := appDiff.DiffResult.(*diff.ManifestSetDiff)
+	if !ok || result == nil || !result.HasChanges {
+		u.write("# No changes\n\n")
+		return nil
+	}
+
+	// Generate unified diffs for all manifests
+	diffs, err := GenerateManifestUnifiedDiffs(result)
+	if err != nil {
+		u.write(fmt.Sprintf("# Error generating diff: %s\n\n", err.Error()))
+		return nil
+	}
+
+	keys := GetSortedKeys(result)
+	for _, key := range keys {
+		if d, ok := diffs[key]; ok && d != "" {
+			u.write(d)
+			// Add newline between diffs if not already present
+			if !strings.HasSuffix(d, "\n") {
+				u.write("\n")
+			}
+		}
+	}
+
+	u.write("\n")
+	return nil
+}
+
+// WriteTree writes the full application tree.
+func (u *UnifiedWriter) WriteTree(tree *diff.AppTree) error {
+	tree.Walk(func(node *diff.AppTreeNode, depth int) {
+		if appDiff, ok := node.AppDiff.(*types.AppDiff); ok {
+			u.WriteAppDiff(appDiff, depth)
+		}
+	})
+	return nil
+}
+
+// WriteSummary writes a summary comment.
+func (u *UnifiedWriter) WriteSummary(summary Summary) error {
+	u.write("# Summary\n")
+	u.write(fmt.Sprintf("# Applications: %d total, %d with changes",
+		summary.TotalApps, summary.AppsWithChanges))
+	if summary.AppsWithErrors > 0 {
+		u.write(fmt.Sprintf(", %d with errors", summary.AppsWithErrors))
+	}
+	u.write("\n")
+
+	if summary.TotalAdded > 0 || summary.TotalRemoved > 0 || summary.TotalModified > 0 {
+		u.write(fmt.Sprintf("# Resources: +%d added, -%d removed, ~%d modified\n",
+			summary.TotalAdded, summary.TotalRemoved, summary.TotalModified))
+	}
+
+	return nil
+}
+
+// WriteFooter writes the footer comment.
+func (u *UnifiedWriter) WriteFooter() error {
+	_, err := io.WriteString(u.file, fmt.Sprintf("# Generated at %s by argocdf\n", time.Now().Format(time.RFC3339)))
+	return err
+}
+
+// Flush flushes and closes the file.
+func (u *UnifiedWriter) Flush() error {
+	return u.file.Close()
+}
+
+// write is a helper to write strings.
+func (u *UnifiedWriter) write(s string) {
+	io.WriteString(u.file, s)
+}

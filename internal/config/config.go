@@ -5,16 +5,22 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Default values for configuration.
 const (
 	DefaultContext      = "pp-admin-aws"
 	DefaultNamespace    = "argocd"
-	DefaultOutputFormat = "terminal"
-	DefaultHTMLFile     = "argocdf-report.html"
+	DefaultStdoutFormat = "fields"
 	DefaultMaxDepth     = 10
 )
+
+// FileOutput represents a single file output specification.
+type FileOutput struct {
+	Format string // "md", "html-side-by-side", "md-atlantis"
+	Path   string // File path
+}
 
 // Config holds all configuration for the argocdf tool.
 type Config struct {
@@ -33,18 +39,38 @@ type Config struct {
 	// Kubernetes version for rendering (auto-detected from cluster if empty)
 	KubeVersion string
 
-	// Output configuration
-	OutputFormat string // "terminal", "html", or "both"
-	HTMLFilePath string
+	// Output configuration (new)
+	StdoutFormat string       // "fields", "summary", "unified", "none"
+	FileOutputs  []FileOutput // Multiple file outputs
 
 	// Recursion settings
 	NoRecursive bool
 	MaxDepth    int
+}
 
-	// Output detail level
-	SideBySide  bool // Show side-by-side diff (uses external diff tool for terminal, diff2html for HTML)
-	SummaryOnly bool // Show only affected apps without detailed diff
-	GitHubCompat bool // Output GitHub-compatible HTML (no document wrapper, pasteable to comments)
+// ParseFileOutput parses a "format:path" string into a FileOutput.
+func ParseFileOutput(spec string) (FileOutput, error) {
+	parts := strings.SplitN(spec, ":", 2)
+	if len(parts) != 2 {
+		return FileOutput{}, fmt.Errorf("invalid file output format: %q (expected format:path)", spec)
+	}
+
+	format := parts[0]
+	path := parts[1]
+
+	// Validate format
+	switch format {
+	case "md", "html-side-by-side", "md-atlantis", "unified":
+		// Valid formats
+	default:
+		return FileOutput{}, fmt.Errorf("unknown file format: %q (valid: md, html-side-by-side, md-atlantis, unified)", format)
+	}
+
+	if path == "" {
+		return FileOutput{}, fmt.Errorf("file path cannot be empty")
+	}
+
+	return FileOutput{Format: format, Path: path}, nil
 }
 
 // New creates a new Config with default values.
@@ -52,8 +78,7 @@ func New() *Config {
 	return &Config{
 		Context:      DefaultContext,
 		Namespace:    DefaultNamespace,
-		OutputFormat: DefaultOutputFormat,
-		HTMLFilePath: DefaultHTMLFile,
+		StdoutFormat: DefaultStdoutFormat,
 		MaxDepth:     DefaultMaxDepth,
 	}
 }
@@ -79,12 +104,17 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("not a git repository: %s", c.RepoPath)
 	}
 
-	// Validate output format
-	switch c.OutputFormat {
-	case "terminal", "html", "both":
+	// Validate stdout format
+	switch c.StdoutFormat {
+	case "fields", "summary", "unified", "none":
 		// Valid
 	default:
-		return fmt.Errorf("invalid output format: %s (must be terminal, html, or both)", c.OutputFormat)
+		return fmt.Errorf("invalid stdout format: %s (must be fields, summary, unified, or none)", c.StdoutFormat)
+	}
+
+	// Warn if no output configured
+	if c.StdoutFormat == "none" && len(c.FileOutputs) == 0 {
+		return fmt.Errorf("no output configured: --stdout is 'none' and no --file outputs specified")
 	}
 
 	if c.MaxDepth < 1 {
@@ -102,11 +132,8 @@ func (c *Config) WithDefaults() *Config {
 	if c.Namespace == "" {
 		c.Namespace = DefaultNamespace
 	}
-	if c.OutputFormat == "" {
-		c.OutputFormat = DefaultOutputFormat
-	}
-	if c.HTMLFilePath == "" {
-		c.HTMLFilePath = DefaultHTMLFile
+	if c.StdoutFormat == "" {
+		c.StdoutFormat = DefaultStdoutFormat
 	}
 	if c.MaxDepth == 0 {
 		c.MaxDepth = DefaultMaxDepth

@@ -55,11 +55,11 @@ func NewDiffer() *Differ {
 	return &Differ{
 		IgnoredFields: map[string]bool{
 			// ArgoCD/Kubernetes metadata fields that change frequently
-			"metadata.resourceVersion":                       true,
-			"metadata.uid":                                   true,
-			"metadata.generation":                            true,
-			"metadata.creationTimestamp":                     true,
-			"metadata.managedFields":                         true,
+			"metadata.resourceVersion":   true,
+			"metadata.uid":               true,
+			"metadata.generation":        true,
+			"metadata.creationTimestamp": true,
+			"metadata.managedFields":     true,
 			"metadata.annotations.kubectl.kubernetes.io/last-applied-configuration": true,
 			"status": true,
 		},

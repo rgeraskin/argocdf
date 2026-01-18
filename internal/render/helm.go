@@ -40,6 +40,14 @@ func (r *HelmRenderer) Render(app *cluster.Application, source *cluster.Applicat
 		defer os.RemoveAll(tempDir)
 	}
 
+	// For local charts, ensure dependencies are built
+	if source.Path != "" {
+		chartPath := filepath.Join(repoPath, source.Path)
+		if err := r.ensureDependencies(chartPath); err != nil {
+			return nil, fmt.Errorf("failed to build dependencies: %w", err)
+		}
+	}
+
 	// Run helm template
 	cmd := exec.Command("helm", args...)
 	var stdout, stderr bytes.Buffer
@@ -243,4 +251,49 @@ func ParseKubeVersion(version string) (major, minor string, err error) {
 	}
 
 	return parts[0], parts[1], nil
+}
+
+// ensureDependencies checks if the chart has dependencies and builds them if needed.
+// It runs `helm dependency build` if:
+// 1. Chart.yaml exists with a dependencies section
+// 2. The charts/ directory is missing or empty
+func (r *HelmRenderer) ensureDependencies(chartPath string) error {
+	// Check if Chart.yaml exists
+	chartYamlPath := filepath.Join(chartPath, "Chart.yaml")
+	if _, err := os.Stat(chartYamlPath); os.IsNotExist(err) {
+		// No Chart.yaml, nothing to do
+		return nil
+	}
+
+	// Read Chart.yaml to check for dependencies
+	chartYaml, err := os.ReadFile(chartYamlPath)
+	if err != nil {
+		return fmt.Errorf("failed to read Chart.yaml: %w", err)
+	}
+
+	// Simple check for dependencies section
+	// We look for "dependencies:" at the start of a line
+	if !strings.Contains(string(chartYaml), "\ndependencies:") &&
+		!strings.HasPrefix(string(chartYaml), "dependencies:") {
+		// No dependencies defined
+		return nil
+	}
+
+	// Check if charts/ directory exists and has content
+	chartsDir := filepath.Join(chartPath, "charts")
+	if entries, err := os.ReadDir(chartsDir); err == nil && len(entries) > 0 {
+		// charts/ exists and has files, dependencies already built
+		return nil
+	}
+
+	// Run helm dependency build
+	cmd := exec.Command("helm", "dependency", "build", chartPath)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("helm dependency build failed: %v\nstderr: %s", err, stderr.String())
+	}
+
+	return nil
 }

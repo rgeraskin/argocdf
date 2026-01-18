@@ -29,14 +29,40 @@ type Writer interface {
 
 // Summary contains summary information about the diff.
 type Summary struct {
-	TotalApps         int
-	AppsWithChanges   int
-	AppsWithErrors    int
-	TotalAdded        int
-	TotalRemoved      int
-	TotalModified     int
-	NewApplications   int
+	TotalApps       int
+	AppsWithChanges int
+	AppsWithErrors  int
+	TotalAdded      int
+	TotalRemoved    int
+	TotalModified   int
+	NewApplications int
 }
+
+// NullWriter is a no-op writer that discards all output.
+type NullWriter struct{}
+
+// NewNullWriter creates a new NullWriter.
+func NewNullWriter() *NullWriter {
+	return &NullWriter{}
+}
+
+// WriteHeader is a no-op.
+func (n *NullWriter) WriteHeader(title string) error { return nil }
+
+// WriteAppDiff is a no-op.
+func (n *NullWriter) WriteAppDiff(appDiff *types.AppDiff, depth int) error { return nil }
+
+// WriteTree is a no-op.
+func (n *NullWriter) WriteTree(tree *diff.AppTree) error { return nil }
+
+// WriteSummary is a no-op.
+func (n *NullWriter) WriteSummary(summary Summary) error { return nil }
+
+// WriteFooter is a no-op.
+func (n *NullWriter) WriteFooter() error { return nil }
+
+// Flush is a no-op.
+func (n *NullWriter) Flush() error { return nil }
 
 // MultiWriter writes to multiple outputs simultaneously.
 type MultiWriter struct {
