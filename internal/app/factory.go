@@ -78,14 +78,14 @@ func (f *Factory) CreateOutputWriter() (output.Writer, error) {
 	for _, fo := range f.config.FileOutputs {
 		switch fo.Format {
 		case "md-fields":
-			mdWriter, err := output.NewMarkdownWriter(fo.Path, output.MarkdownFormatGitHub)
+			mdWriter, err := output.NewMarkdownWriter(fo.Path, output.MarkdownFormatGitHub, 0)
 			if err != nil {
 				return nil, err
 			}
 			writers = append(writers, mdWriter)
 
 		case "md-unified":
-			mdWriter, err := output.NewMarkdownWriter(fo.Path, output.MarkdownFormatAtlantis)
+			mdWriter, err := output.NewMarkdownWriter(fo.Path, output.MarkdownFormatAtlantis, f.config.UnifiedContext)
 			if err != nil {
 				return nil, err
 			}

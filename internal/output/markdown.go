@@ -25,23 +25,26 @@ const (
 
 // MarkdownWriter writes diff output as GitHub-compatible markdown.
 type MarkdownWriter struct {
-	file        *os.File
-	format      MarkdownFormat
-	summaryOnly bool
+	file         *os.File
+	format       MarkdownFormat
+	summaryOnly  bool
+	contextLines int // for unified diff context in md-unified format
 	// Pre-computed summary for Atlantis format (needs to be written at header)
 	pendingSummary *Summary
 }
 
 // NewMarkdownWriter creates a new MarkdownWriter.
-func NewMarkdownWriter(filePath string, format MarkdownFormat) (*MarkdownWriter, error) {
+// contextLines specifies the number of context lines for unified diff format (md-unified).
+func NewMarkdownWriter(filePath string, format MarkdownFormat, contextLines int) (*MarkdownWriter, error) {
 	file, err := os.Create(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create markdown file: %w", err)
 	}
 
 	return &MarkdownWriter{
-		file:   file,
-		format: format,
+		file:         file,
+		format:       format,
+		contextLines: contextLines,
 	}, nil
 }
 
@@ -207,54 +210,51 @@ func (m *MarkdownWriter) writeDetailedDiffGitHub(result *diff.ManifestSetDiff) {
 	}
 }
 
-// writeDetailedDiffAtlantis writes detailed diff in Atlantis style.
+// writeDetailedDiffAtlantis writes detailed diff in unified diff format.
 func (m *MarkdownWriter) writeDetailedDiffAtlantis(result *diff.ManifestSetDiff) {
-	// Added resources with Atlantis-style header
+	diffs, err := GenerateManifestUnifiedDiffs(result, m.contextLines)
+	if err != nil {
+		m.write(fmt.Sprintf("> Error generating diff: %s\n\n", err.Error()))
+		return
+	}
+
+	// Added resources
 	for _, man := range result.Added {
-		m.write("```diff\n")
-		m.write(fmt.Sprintf("# %s will be created\n", man.Key()))
-		// Show as all additions
-		lines := strings.Split(man.Raw, "\n")
-		for _, line := range lines {
-			if line != "" {
-				m.write(fmt.Sprintf("+ %s\n", line))
+		m.write(fmt.Sprintf("#### ➕ %s\n\n", man.Key()))
+		if d, ok := diffs[man.Key()]; ok && d != "" {
+			m.write("```diff\n")
+			m.write(d)
+			if !strings.HasSuffix(d, "\n") {
+				m.write("\n")
 			}
+			m.write("```\n\n")
 		}
-		m.write("```\n\n")
 	}
 
-	// Removed resources with Atlantis-style header
+	// Removed resources
 	for _, man := range result.Removed {
-		m.write("```diff\n")
-		m.write(fmt.Sprintf("# %s will be removed\n", man.Key()))
-		// Show as all removals
-		lines := strings.Split(man.Raw, "\n")
-		for _, line := range lines {
-			if line != "" {
-				m.write(fmt.Sprintf("- %s\n", line))
+		m.write(fmt.Sprintf("#### ➖ %s\n\n", man.Key()))
+		if d, ok := diffs[man.Key()]; ok && d != "" {
+			m.write("```diff\n")
+			m.write(d)
+			if !strings.HasSuffix(d, "\n") {
+				m.write("\n")
 			}
+			m.write("```\n\n")
 		}
-		m.write("```\n\n")
 	}
 
-	// Modified resources with Atlantis-style header
+	// Modified resources
 	for _, md := range result.Modified {
-		m.write("```diff\n")
-		m.write(fmt.Sprintf("# %s will be updated\n", md.Key))
-		if md.Diff != nil && len(md.Diff.Changes) > 0 {
-			for _, change := range md.Diff.Changes {
-				switch change.Type {
-				case diff.ChangeTypeAdded:
-					m.write(fmt.Sprintf("+ %s: %v\n", change.Path, change.NewValue))
-				case diff.ChangeTypeRemoved:
-					m.write(fmt.Sprintf("- %s: %v\n", change.Path, change.OldValue))
-				case diff.ChangeTypeModified:
-					m.write(fmt.Sprintf("- %s: %v\n", change.Path, change.OldValue))
-					m.write(fmt.Sprintf("+ %s: %v\n", change.Path, change.NewValue))
-				}
+		m.write(fmt.Sprintf("#### 📝 %s\n\n", md.Key))
+		if d, ok := diffs[md.Key]; ok && d != "" {
+			m.write("```diff\n")
+			m.write(d)
+			if !strings.HasSuffix(d, "\n") {
+				m.write("\n")
 			}
+			m.write("```\n\n")
 		}
-		m.write("```\n\n")
 	}
 }
 
@@ -294,7 +294,7 @@ func (m *MarkdownWriter) writeSummaryGitHub(summary Summary) error {
 		parts = append(parts, fmt.Sprintf("%d errors", summary.AppsWithErrors))
 	}
 
-	m.write(fmt.Sprintf("**Summary:** %s\n\n", strings.Join(parts, " | ")))
+	m.write(fmt.Sprintf("**Summary:** %s\n", strings.Join(parts, " | ")))
 	return nil
 }
 
@@ -316,10 +316,7 @@ func (m *MarkdownWriter) writeSummaryAtlantis(summary Summary) error {
 		parts = append(parts, fmt.Sprintf("%d errors", summary.AppsWithErrors))
 	}
 
-	m.write(fmt.Sprintf("**Summary:** %s\n\n", strings.Join(parts, " | ")))
-
-	// Atlantis-style action command
-	m.write("To sync applications: `argocd app sync <app-name>`\n")
+	m.write(fmt.Sprintf("**Summary:** %s\n", strings.Join(parts, " | ")))
 
 	return nil
 }

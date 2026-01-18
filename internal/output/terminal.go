@@ -98,7 +98,6 @@ func (t *TerminalWriter) WriteAppDiff(appDiff *types.AppDiff, depth int) error {
 	// Handle error
 	if appDiff.Error != nil {
 		fmt.Fprintf(t.out, "%s  %s\n", indent, errorStyle.Render("Error: "+appDiff.Error.Error()))
-		fmt.Fprintln(t.out)
 		return nil
 	}
 
@@ -106,14 +105,12 @@ func (t *TerminalWriter) WriteAppDiff(appDiff *types.AppDiff, depth int) error {
 	result, ok := appDiff.DiffResult.(*diff.ManifestSetDiff)
 	if !ok || result == nil {
 		fmt.Fprintf(t.out, "%s  %s\n", indent, dimStyle.Render("No diff available"))
-		fmt.Fprintln(t.out)
 		return nil
 	}
 
 	// No changes
 	if !result.HasChanges {
 		fmt.Fprintf(t.out, "%s  %s\n", indent, dimStyle.Render("No changes"))
-		fmt.Fprintln(t.out)
 		return nil
 	}
 
@@ -142,7 +139,6 @@ func (t *TerminalWriter) WriteAppDiff(appDiff *types.AppDiff, depth int) error {
 		}
 	}
 
-	fmt.Fprintln(t.out)
 	return nil
 }
 

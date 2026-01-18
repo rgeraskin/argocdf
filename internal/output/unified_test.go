@@ -143,7 +143,7 @@ line10: j
 				return strings.Contains(d, "-line5: OLD") &&
 					strings.Contains(d, "+line5: NEW") &&
 					!strings.Contains(d, " line4:") && // No context before
-					!strings.Contains(d, " line6:")    // No context after
+					!strings.Contains(d, " line6:") // No context after
 			},
 			desc: "should show only changed lines with 0 context",
 		},
