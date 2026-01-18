@@ -63,17 +63,17 @@ Examples:
   argocdf --all-namespaces
 
   # Generate GitHub markdown for PR comment
-  argocdf -q -f md:diff.md
+  argocdf -q -f md-fields:diff.md
 
   # Generate multiple outputs
-  argocdf -f md:pr-comment.md -f html-side-by-side:report.html
+  argocdf -f md-fields:pr-comment.md -f html-side-by-side:report.html
 
   # Generate unified diff output
   argocdf --stdout unified
   argocdf -f unified:changes.patch
 
-  # Use Atlantis-style markdown format
-  argocdf --file md-atlantis:diff.md
+  # Use unified diff format inside markdown
+  argocdf --file md-unified:diff.md
 
   # Summary only in terminal
   argocdf --stdout summary
@@ -102,7 +102,7 @@ Examples:
 	rootCmd.Flags().StringVar(&stdoutFormat, "stdout", config.DefaultStdoutFormat,
 		"Terminal output format: fields, summary, unified, none (set ARGOCDF_EXTERNAL_DIFF for side-by-side)")
 	rootCmd.Flags().StringArrayVarP(&fileOutputs, "file", "f", nil,
-		"File output in format:path (can be repeated). Formats: md, html-side-by-side, md-atlantis, unified")
+		"File output in format:path (can be repeated). Formats: md-fields, html-side-by-side, md-unified, unified")
 	rootCmd.Flags().BoolVarP(&quiet, "quiet", "q", false, "Suppress terminal output (same as --stdout none)")
 	rootCmd.Flags().IntVarP(&unifiedContext, "context-lines", "U", config.DefaultUnifiedContext,
 		"Number of context lines in unified diff output (-1 for unlimited)")

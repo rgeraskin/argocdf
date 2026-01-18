@@ -19,7 +19,7 @@ const (
 
 // FileOutput represents a single file output specification.
 type FileOutput struct {
-	Format string // "md", "html-side-by-side", "md-atlantis"
+	Format string // "md-fields", "html-side-by-side", "md-unified", "unified"
 	Path   string // File path
 }
 
@@ -64,10 +64,10 @@ func ParseFileOutput(spec string) (FileOutput, error) {
 
 	// Validate format
 	switch format {
-	case "md", "html-side-by-side", "md-atlantis", "unified":
+	case "md-fields", "html-side-by-side", "md-unified", "unified":
 		// Valid formats
 	default:
-		return FileOutput{}, fmt.Errorf("unknown file format: %q (valid: md, html-side-by-side, md-atlantis, unified)", format)
+		return FileOutput{}, fmt.Errorf("unknown file format: %q (valid: md-fields, html-side-by-side, md-unified, unified)", format)
 	}
 
 	if path == "" {

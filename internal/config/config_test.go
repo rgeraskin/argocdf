@@ -15,9 +15,9 @@ func TestParseFileOutput(t *testing.T) {
 		errMsg  string
 	}{
 		{
-			name: "valid md format",
-			spec: "md:output.md",
-			want: FileOutput{Format: "md", Path: "output.md"},
+			name: "valid md-fields format",
+			spec: "md-fields:output.md",
+			want: FileOutput{Format: "md-fields", Path: "output.md"},
 		},
 		{
 			name: "valid html-side-by-side format",
@@ -25,9 +25,9 @@ func TestParseFileOutput(t *testing.T) {
 			want: FileOutput{Format: "html-side-by-side", Path: "report.html"},
 		},
 		{
-			name: "valid md-atlantis format",
-			spec: "md-atlantis:diff.md",
-			want: FileOutput{Format: "md-atlantis", Path: "diff.md"},
+			name: "valid md-unified format",
+			spec: "md-unified:diff.md",
+			want: FileOutput{Format: "md-unified", Path: "diff.md"},
 		},
 		{
 			name: "valid unified format",
@@ -36,13 +36,13 @@ func TestParseFileOutput(t *testing.T) {
 		},
 		{
 			name: "path with directories",
-			spec: "md:/tmp/output/diff.md",
-			want: FileOutput{Format: "md", Path: "/tmp/output/diff.md"},
+			spec: "md-fields:/tmp/output/diff.md",
+			want: FileOutput{Format: "md-fields", Path: "/tmp/output/diff.md"},
 		},
 		{
 			name: "path with colons (Windows-like)",
-			spec: "md:C:/Users/test/output.md",
-			want: FileOutput{Format: "md", Path: "C:/Users/test/output.md"},
+			spec: "md-fields:C:/Users/test/output.md",
+			want: FileOutput{Format: "md-fields", Path: "C:/Users/test/output.md"},
 		},
 		{
 			name:    "missing colon separator",
@@ -58,7 +58,7 @@ func TestParseFileOutput(t *testing.T) {
 		},
 		{
 			name:    "empty path",
-			spec:    "md:",
+			spec:    "md-fields:",
 			wantErr: true,
 			errMsg:  "file path cannot be empty",
 		},
@@ -137,7 +137,7 @@ func TestConfigValidate(t *testing.T) {
 			config: &Config{
 				RepoPath:     tmpDir,
 				StdoutFormat: "none",
-				FileOutputs:  []FileOutput{{Format: "md", Path: "output.md"}},
+				FileOutputs:  []FileOutput{{Format: "md-fields", Path: "output.md"}},
 				MaxDepth:     10,
 			},
 		},

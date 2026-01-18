@@ -111,17 +111,17 @@ This ensures charts with dependencies (like umbrella charts) render correctly wi
 - `none` - Suppress terminal output
 
 **File output** (`-f/--file format:path`):
-- `md` - GitHub-flavored markdown with collapsible sections
-- `md-atlantis` - Atlantis-style markdown
+- `md-fields` - GitHub-flavored markdown with field-level diffs
+- `md-unified` - Markdown with unified diff format
 - `html-side-by-side` - Interactive HTML with side-by-side diff
 - `unified` - Patch-compatible unified diff
 
 ```bash
 # Quiet mode with markdown file output
-./argocdf -q -f md:pr-comment.md
+./argocdf -q -f md-fields:pr-comment.md
 
 # Multiple file outputs
-./argocdf -f md:pr.md -f html-side-by-side:report.html
+./argocdf -f md-fields:pr.md -f html-side-by-side:report.html
 
 # Unified diff for patch workflows
 ./argocdf --stdout unified
