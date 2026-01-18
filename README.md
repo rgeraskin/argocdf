@@ -47,8 +47,15 @@ argocdf --all-namespaces
 # Generate HTML report
 argocdf --output both --html-file report.html
 
-# Verbose output
-argocdf --verbose
+# Show only summary (no detailed diff)
+argocdf --summary-only
+
+# Side-by-side diff using external tool
+export KUBECTL_EXTERNAL_DIFF="delta --side-by-side --hunk-header-style=omit --file-style=omit"
+argocdf --side-by-side
+
+# Generate GitHub-compatible output for PR comments
+argocdf --output html --github --html-file diff.md
 ```
 
 ## Flags
@@ -67,7 +74,55 @@ argocdf --verbose
 | `--html-file` | | HTML output file path | `argocdf-report.html` |
 | `--no-recursive` | | Disable apps-of-apps recursion | `false` |
 | `--max-depth` | | Maximum recursion depth | `10` |
-| `--verbose` | `-v` | Enable verbose logging | `false` |
+| `--side-by-side` | | Show side-by-side YAML diff | `false` |
+| `--summary-only` | | Show only affected apps without detailed diff | `false` |
+| `--github` | | Output GitHub-compatible markdown (pasteable to PR comments) | `false` |
+
+## GitHub PR Comments
+
+Use the `--github` flag to generate output that can be pasted directly into GitHub PR comments:
+
+```bash
+argocdf --output html --github --html-file diff.md
+cat diff.md  # Copy and paste into GitHub PR comment
+```
+
+The output uses:
+- GitHub-flavored markdown with collapsible `<details>` sections
+- Emoji badges for change types (🟢 added, 🔴 removed, 🟡 modified)
+- `diff` code blocks for syntax-highlighted changes
+- Markdown tables for the summary
+
+## Side-by-Side Diff
+
+The `--side-by-side` flag enables a side-by-side diff view similar to the ArgoCD web UI.
+
+### Terminal Output
+
+For terminal output, argocdf uses the `KUBECTL_EXTERNAL_DIFF` environment variable (following kubectl's convention). Set this to your preferred diff tool:
+
+**Recommended setup with [delta](https://github.com/dandavison/delta):**
+```bash
+export KUBECTL_EXTERNAL_DIFF="delta --side-by-side --hunk-header-style=omit --file-style=omit"
+```
+
+**Alternative with [difftastic](https://github.com/Wilfred/difftastic):**
+```bash
+export KUBECTL_EXTERNAL_DIFF="difft --display side-by-side-show-both"
+```
+
+Then run:
+```bash
+argocdf --side-by-side
+```
+
+### HTML Output
+
+For HTML output, `--side-by-side` uses [diff2html](https://diff2html.xyz/) to render GitHub-style side-by-side diffs with syntax highlighting:
+
+```bash
+argocdf --output html --side-by-side --html-file report.html
+```
 
 ## How It Works
 

@@ -41,8 +41,10 @@ type Config struct {
 	NoRecursive bool
 	MaxDepth    int
 
-	// Logging
-	Verbose bool
+	// Output detail level
+	SideBySide  bool // Show side-by-side diff (uses external diff tool for terminal, diff2html for HTML)
+	SummaryOnly bool // Show only affected apps without detailed diff
+	GitHubCompat bool // Output GitHub-compatible HTML (no document wrapper, pasteable to comments)
 }
 
 // New creates a new Config with default values.

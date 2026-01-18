@@ -30,9 +30,11 @@ var (
 	kubeVersion    string
 	outputFormat   string
 	htmlFile       string
-	noRecursive    bool
-	maxDepth       int
-	verbose        bool
+	noRecursive  bool
+	maxDepth     int
+	sideBySide   bool
+	summaryOnly  bool
+	githubCompat bool
 )
 
 func main() {
@@ -92,8 +94,10 @@ Examples:
 	rootCmd.Flags().BoolVar(&noRecursive, "no-recursive", false, "Disable apps-of-apps recursion")
 	rootCmd.Flags().IntVar(&maxDepth, "max-depth", config.DefaultMaxDepth, "Maximum recursion depth")
 
-	// General flags
-	rootCmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "Enable verbose output")
+	// Output detail flags
+	rootCmd.Flags().BoolVar(&sideBySide, "side-by-side", false, "Show side-by-side YAML diff (uses KUBECTL_EXTERNAL_DIFF for terminal)")
+	rootCmd.Flags().BoolVar(&summaryOnly, "summary-only", false, "Show only affected apps without detailed diff")
+	rootCmd.Flags().BoolVar(&githubCompat, "github", false, "Output GitHub-compatible HTML (pasteable to PR comments)")
 
 	// Version command
 	rootCmd.AddCommand(&cobra.Command{
@@ -123,13 +127,9 @@ func runMain(cmd *cobra.Command, args []string) error {
 	}()
 
 	// Setup logger
-	logLevel := log.InfoLevel
-	if verbose {
-		logLevel = log.DebugLevel
-	}
 	logger := log.NewWithOptions(os.Stderr, log.Options{
 		ReportTimestamp: true,
-		Level:           logLevel,
+		Level:           log.InfoLevel,
 	})
 
 	// Build configuration
@@ -145,9 +145,11 @@ func runMain(cmd *cobra.Command, args []string) error {
 		KubeVersion:    kubeVersion,
 		OutputFormat:   outputFormat,
 		HTMLFilePath:   htmlFile,
-		NoRecursive:    noRecursive,
-		MaxDepth:       maxDepth,
-		Verbose:        verbose,
+		NoRecursive:  noRecursive,
+		MaxDepth:     maxDepth,
+		SideBySide:   sideBySide,
+		SummaryOnly:  summaryOnly,
+		GitHubCompat: githubCompat,
 	}
 
 	// Auto-detect missing values

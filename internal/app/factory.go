@@ -71,12 +71,12 @@ func (f *Factory) CreateOutputWriter() (output.Writer, error) {
 
 	// Terminal output
 	if f.config.OutputFormat == "terminal" || f.config.OutputFormat == "both" {
-		writers = append(writers, output.NewTerminalWriter(f.config.Verbose))
+		writers = append(writers, output.NewTerminalWriter(f.config.SideBySide, f.config.SummaryOnly))
 	}
 
 	// HTML output
 	if f.config.OutputFormat == "html" || f.config.OutputFormat == "both" {
-		htmlWriter, err := output.NewHTMLWriter(f.config.HTMLFilePath, f.config.Verbose)
+		htmlWriter, err := output.NewHTMLWriter(f.config.HTMLFilePath, f.config.SideBySide, f.config.SummaryOnly, f.config.GitHubCompat)
 		if err != nil {
 			return nil, err
 		}

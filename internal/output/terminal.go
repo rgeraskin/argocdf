@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -49,15 +50,17 @@ var (
 // TerminalWriter writes diff output to the terminal with colors.
 type TerminalWriter struct {
 	out         io.Writer
-	verbose     bool
+	sideBySide  bool
+	summaryOnly bool
 	contextLine int
 }
 
 // NewTerminalWriter creates a new TerminalWriter.
-func NewTerminalWriter(verbose bool) *TerminalWriter {
+func NewTerminalWriter(sideBySide, summaryOnly bool) *TerminalWriter {
 	return &TerminalWriter{
 		out:         os.Stdout,
-		verbose:     verbose,
+		sideBySide:  sideBySide,
+		summaryOnly: summaryOnly,
 		contextLine: 3,
 	}
 }
@@ -119,15 +122,23 @@ func (t *TerminalWriter) WriteAppDiff(appDiff *types.AppDiff, depth int) error {
 		fmt.Fprintf(t.out, "%s  %s\n", indent, modifiedStyle.Render(fmt.Sprintf("~ %d modified", len(result.Modified))))
 	}
 
-	if t.verbose {
-		t.writeDetailedDiff(result, indent)
+	// Show detailed diff unless summaryOnly is set
+	// Default behavior is to show details (opposite of old behavior)
+	if !t.summaryOnly {
+		if t.sideBySide {
+			// Use external diff tool for side-by-side view
+			t.writeExternalDiff(appDiff, result, indent)
+		} else {
+			// Use built-in detailed diff
+			t.writeDetailedDiff(result, indent)
+		}
 	}
 
 	fmt.Fprintln(t.out)
 	return nil
 }
 
-// writeDetailedDiff writes the detailed diff for verbose mode.
+// writeDetailedDiff writes the detailed diff with field-level changes.
 func (t *TerminalWriter) writeDetailedDiff(result *diff.ManifestSetDiff, indent string) {
 	// Added manifests
 	for _, m := range result.Added {
@@ -164,6 +175,80 @@ func (t *TerminalWriter) writeFieldChanges(result *diff.DiffResult, indent strin
 	}
 }
 
+// writeExternalDiff uses an external diff tool to display side-by-side diffs.
+// It respects the KUBECTL_EXTERNAL_DIFF environment variable like ArgoCD does.
+func (t *TerminalWriter) writeExternalDiff(_ *types.AppDiff, result *diff.ManifestSetDiff, indent string) {
+	// Get the external diff command
+	diffCmd := os.Getenv("KUBECTL_EXTERNAL_DIFF")
+	if diffCmd == "" {
+		// Fall back to built-in diff display with hint
+		fmt.Fprintf(t.out, "%s    %s\n", indent, dimStyle.Render("(Set KUBECTL_EXTERNAL_DIFF for side-by-side view, e.g., 'delta --side-by-side')"))
+		t.writeDetailedDiff(result, indent)
+		return
+	}
+
+	// Parse the diff command
+	parts := strings.Fields(diffCmd)
+	if len(parts) == 0 {
+		t.writeDetailedDiff(result, indent)
+		return
+	}
+
+	// Show added manifests with their names
+	for _, m := range result.Added {
+		fmt.Fprintf(t.out, "\n%s    %s\n", indent, addedStyle.Render("+ "+m.Key()))
+		t.runExternalDiff(parts, "", m.Raw, indent)
+	}
+
+	// Show removed manifests with their names
+	for _, m := range result.Removed {
+		fmt.Fprintf(t.out, "\n%s    %s\n", indent, removedStyle.Render("- "+m.Key()))
+		t.runExternalDiff(parts, m.Raw, "", indent)
+	}
+
+	// Show modified manifests with their names
+	for _, md := range result.Modified {
+		fmt.Fprintf(t.out, "\n%s    %s\n", indent, modifiedStyle.Render("~ "+md.Key))
+		if md.Old != nil && md.New != nil {
+			t.runExternalDiff(parts, md.Old.Raw, md.New.Raw, indent)
+		}
+	}
+}
+
+// runExternalDiff executes the external diff command for a single manifest.
+func (t *TerminalWriter) runExternalDiff(cmdParts []string, oldContent, newContent, indent string) {
+	// Create temp files
+	oldFile, err := os.CreateTemp("", "argocdf-old-*.yaml")
+	if err != nil {
+		fmt.Fprintf(t.out, "%s      %s\n", indent, errorStyle.Render("Failed to create temp file: "+err.Error()))
+		return
+	}
+	defer os.Remove(oldFile.Name())
+
+	newFile, err := os.CreateTemp("", "argocdf-new-*.yaml")
+	if err != nil {
+		fmt.Fprintf(t.out, "%s      %s\n", indent, errorStyle.Render("Failed to create temp file: "+err.Error()))
+		return
+	}
+	defer os.Remove(newFile.Name())
+
+	// Write content
+	oldFile.WriteString(oldContent)
+	oldFile.Close()
+
+	newFile.WriteString(newContent)
+	newFile.Close()
+
+	// Execute the external diff command
+	args := append(cmdParts[1:], oldFile.Name(), newFile.Name())
+	cmd := exec.Command(cmdParts[0], args...)
+	cmd.Stdout = t.out
+	cmd.Stderr = os.Stderr
+
+	// Run the command (ignore exit code as diff returns non-zero when files differ)
+	cmd.Run()
+}
+
 // WriteTree writes the full application tree.
 func (t *TerminalWriter) WriteTree(tree *diff.AppTree) error {
 	tree.Walk(func(node *diff.AppTreeNode, depth int) {
@@ -176,7 +261,6 @@ func (t *TerminalWriter) WriteTree(tree *diff.AppTree) error {
 
 // WriteSummary writes the summary.
 func (t *TerminalWriter) WriteSummary(summary Summary) error {
-	fmt.Fprintln(t.out)
 	fmt.Fprintln(t.out, summaryStyle.Render("Summary"))
 	fmt.Fprintln(t.out, strings.Repeat("-", 40))
 
