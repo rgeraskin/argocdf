@@ -221,22 +221,27 @@ func (h *HTMLWriter) writeDetailedDiffSideBySide(result *diff.ManifestSetDiff) {
 	}
 }
 
-// Inline style constants for GitHub compatibility (no external CSS)
+// Inline style constants for side-by-side diff (dark theme)
 const (
-	// Background colors for diff highlighting
-	bgAdded   = "#e6ffec"
-	bgRemoved = "#ffeef0"
-	bgEmpty   = "#f5f5f5"
+	// Background colors for diff highlighting (dark theme compatible)
+	bgAdded   = "rgba(78, 201, 176, 0.15)"
+	bgRemoved = "rgba(241, 76, 76, 0.15)"
+	bgEmpty   = "#252525"
 
-	// Badge styles
-	badgeAddedStyle   = "background-color:#dcffe4;color:#22863a;padding:2px 8px;border-radius:4px;font-weight:bold;font-family:monospace;"
-	badgeRemovedStyle = "background-color:#ffeef0;color:#cb2431;padding:2px 8px;border-radius:4px;font-weight:bold;font-family:monospace;"
-	badgeModStyle     = "background-color:#fff5b1;color:#b08800;padding:2px 8px;border-radius:4px;font-weight:bold;font-family:monospace;"
+	// Text colors
+	textAdded   = "#4ec9b0"
+	textRemoved = "#f14c4c"
+	textNormal  = "#d4d4d4"
 
-	// Table styles
-	tableStyle      = "width:100%;border-collapse:collapse;font-family:SFMono-Regular,Consolas,Liberation Mono,Menlo,monospace;font-size:12px;"
-	lineNumStyle    = "width:40px;padding:0 8px;text-align:right;color:#6a737d;background-color:#fafbfc;border-right:1px solid #e1e4e8;user-select:none;vertical-align:top;"
-	lineContentBase = "padding:0 8px;white-space:pre-wrap;word-wrap:break-word;vertical-align:top;"
+	// Badge styles (dark theme)
+	badgeAddedStyle   = "background-color:rgba(78,201,176,0.2);color:#4ec9b0;padding:2px 8px;border-radius:4px;font-weight:bold;font-family:monospace;"
+	badgeRemovedStyle = "background-color:rgba(241,76,76,0.2);color:#f14c4c;padding:2px 8px;border-radius:4px;font-weight:bold;font-family:monospace;"
+	badgeModStyle     = "background-color:rgba(220,220,170,0.2);color:#dcdcaa;padding:2px 8px;border-radius:4px;font-weight:bold;font-family:monospace;"
+
+	// Table styles (dark theme)
+	tableStyle      = "width:100%;border-collapse:collapse;font-family:SFMono-Regular,Consolas,Liberation Mono,Menlo,monospace;font-size:12px;background-color:#1a1a1a;"
+	lineNumStyle    = "width:40px;padding:0 8px;text-align:right;color:#6a737d;background-color:#252525;border-right:1px solid #404040;user-select:none;vertical-align:top;"
+	lineContentBase = "padding:0 8px;white-space:pre-wrap;word-wrap:break-word;vertical-align:top;color:#d4d4d4;"
 )
 
 // writeSideBySideDiffBlock writes a single manifest diff with its name header.
@@ -291,35 +296,43 @@ func (h *HTMLWriter) writeSideBySideTable(oldContent, newContent string) {
 			newNum = fmt.Sprintf("%d", i+1)
 		}
 
-		// Determine background colors based on differences
+		// Determine styling based on differences
 		leftBg := ""
 		rightBg := ""
+		leftColor := textNormal
+		rightColor := textNormal
+
 		if !hasOld && hasNew {
 			rightBg = bgAdded
+			rightColor = textAdded
 		} else if hasOld && !hasNew {
 			leftBg = bgRemoved
+			leftColor = textRemoved
 		} else if oldLine != newLine {
 			leftBg = bgRemoved
 			rightBg = bgAdded
+			leftColor = textRemoved
+			rightColor = textAdded
 		}
 
 		h.write(`<tr>`)
 
 		// Left side (old) - line number
-		leftNumStyle := lineNumStyle + "border-right:1px solid #e1e4e8;"
+		leftNumStyle := lineNumStyle
 		if leftBg != "" {
 			leftNumStyle += fmt.Sprintf("background-color:%s;", leftBg)
 		}
 		h.write(fmt.Sprintf(`<td style="%s">%s</td>`, leftNumStyle, oldNum))
 
 		// Left side (old) - content
-		leftContentStyle := lineContentBase + "border-right:2px solid #e1e4e8;"
+		leftContentStyle := lineContentBase + "border-right:1px solid #404040;"
 		if leftBg != "" {
 			leftContentStyle += fmt.Sprintf("background-color:%s;", leftBg)
 		}
 		if !hasOld {
 			leftContentStyle += fmt.Sprintf("background-color:%s;", bgEmpty)
 		}
+		leftContentStyle += fmt.Sprintf("color:%s;", leftColor)
 		h.write(fmt.Sprintf(`<td style="%s">%s</td>`, leftContentStyle, html.EscapeString(oldLine)))
 
 		// Right side (new) - line number
@@ -337,6 +350,7 @@ func (h *HTMLWriter) writeSideBySideTable(oldContent, newContent string) {
 		if !hasNew {
 			rightContentStyle += fmt.Sprintf("background-color:%s;", bgEmpty)
 		}
+		rightContentStyle += fmt.Sprintf("color:%s;", rightColor)
 		h.write(fmt.Sprintf(`<td style="%s">%s</td>`, rightContentStyle, html.EscapeString(newLine)))
 
 		h.write(`</tr>`)
