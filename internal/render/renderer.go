@@ -2,6 +2,9 @@
 package render
 
 import (
+	"os"
+	"path/filepath"
+
 	"github.com/rgeraskin/argocdf/internal/cluster"
 	"github.com/rgeraskin/argocdf/internal/types"
 )
@@ -57,12 +60,20 @@ func NewFactory(opts RenderOptions) *Factory {
 }
 
 // GetRenderer returns the appropriate renderer for the given source.
-func (f *Factory) GetRenderer(source *cluster.ApplicationSource) Renderer {
+// repoPath is used to detect Helm charts by checking for Chart.yaml in the source path.
+func (f *Factory) GetRenderer(source *cluster.ApplicationSource, repoPath string) Renderer {
 	if source.IsHelm() {
 		return f.helmRenderer
 	}
 	if source.IsKustomize() {
 		return f.kustomizeRenderer
+	}
+	// Check if the path contains a Chart.yaml (ArgoCD auto-detection)
+	if source.Path != "" && repoPath != "" {
+		chartPath := filepath.Join(repoPath, source.Path, "Chart.yaml")
+		if _, err := os.Stat(chartPath); err == nil {
+			return f.helmRenderer
+		}
 	}
 	// Default to Kustomize for plain directories (ArgoCD behavior)
 	return f.kustomizeRenderer
@@ -79,7 +90,7 @@ func (f *Factory) RenderApplication(app *cluster.Application, repoPath string) (
 
 	// For single source apps, render directly
 	if len(sources) == 1 && !sources[0].IsRef() {
-		renderer := f.GetRenderer(&sources[0])
+		renderer := f.GetRenderer(&sources[0], repoPath)
 		manifests, err := renderer.Render(app, &sources[0], repoPath)
 		return &RenderResult{
 			Manifests:  manifests,

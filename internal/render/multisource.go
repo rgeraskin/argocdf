@@ -52,7 +52,7 @@ func (r *MultiSourceRenderer) RenderMultiSource(app *cluster.Application) ([]byt
 			continue
 		}
 
-		renderer := r.factory.GetRenderer(&sources[i])
+		renderer := r.factory.GetRenderer(&sources[i], r.repoPath)
 		manifests, err := renderer.Render(app, &sources[i], r.repoPath)
 		if err != nil {
 			return nil, fmt.Errorf("failed to render source %d: %w", i, err)
