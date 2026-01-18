@@ -49,24 +49,25 @@ var (
 
 // TerminalWriter writes diff output to the terminal with colors.
 type TerminalWriter struct {
-	out            io.Writer
-	summaryOnly    bool
-	unifiedDiff    bool   // Show unified diff format
-	externalDiff   string // External diff command from ARGOCDF_EXTERNAL_DIFF
-	contextLine    int
+	out          io.Writer
+	summaryOnly  bool
+	unifiedDiff  bool   // Show unified diff format
+	externalDiff string // External diff command from ARGOCDF_EXTERNAL_DIFF
+	contextLines int    // Number of context lines for unified diff
 }
 
 // NewTerminalWriter creates a new TerminalWriter.
 // Format can be "fields", "summary", or "unified".
+// contextLines specifies the number of unchanged lines to show around changes in unified diff.
 // If ARGOCDF_EXTERNAL_DIFF environment variable is set, it will be used
 // for side-by-side diff display automatically (when format is "fields").
-func NewTerminalWriter(format string) *TerminalWriter {
+func NewTerminalWriter(format string, contextLines int) *TerminalWriter {
 	return &TerminalWriter{
 		out:          os.Stdout,
 		summaryOnly:  format == "summary",
 		unifiedDiff:  format == "unified",
 		externalDiff: os.Getenv("ARGOCDF_EXTERNAL_DIFF"),
-		contextLine:  3,
+		contextLines: contextLines,
 	}
 }
 
@@ -184,7 +185,7 @@ func (t *TerminalWriter) writeFieldChanges(result *diff.DiffResult, indent strin
 
 // writeUnifiedDiff writes unified diff format output.
 func (t *TerminalWriter) writeUnifiedDiff(result *diff.ManifestSetDiff, indent string) {
-	diffs, err := GenerateManifestUnifiedDiffs(result)
+	diffs, err := GenerateManifestUnifiedDiffs(result, t.contextLines)
 	if err != nil {
 		fmt.Fprintf(t.out, "%s    %s\n", indent, errorStyle.Render("Error generating diff: "+err.Error()))
 		return
@@ -296,36 +297,30 @@ func (t *TerminalWriter) WriteSummary(summary Summary) error {
 	fmt.Fprintln(t.out, summaryStyle.Render("Summary"))
 	fmt.Fprintln(t.out, strings.Repeat("-", 40))
 
-	fmt.Fprintf(t.out, "Applications analyzed: %d\n", summary.TotalApps)
+	fmt.Fprintf(t.out, "Applications affected: %d\n", summary.TotalApps)
 
 	if summary.AppsWithChanges > 0 {
-		fmt.Fprintf(t.out, "Applications with changes: %s\n",
+		fmt.Fprintf(t.out, "Applications changed: %s\n",
 			modifiedStyle.Render(fmt.Sprintf("%d", summary.AppsWithChanges)))
 	} else {
-		fmt.Fprintln(t.out, "Applications with changes: 0")
+		fmt.Fprintln(t.out, "Applications changed: 0")
+	}
+
+	// Resources line (always show if there are any changes)
+	if summary.TotalAdded > 0 || summary.TotalRemoved > 0 || summary.TotalModified > 0 {
+		fmt.Fprintf(t.out, "Resources: %s, %s, %s\n",
+			addedStyle.Render(fmt.Sprintf("+%d added", summary.TotalAdded)),
+			removedStyle.Render(fmt.Sprintf("-%d removed", summary.TotalRemoved)),
+			modifiedStyle.Render(fmt.Sprintf("~%d modified", summary.TotalModified)))
 	}
 
 	if summary.AppsWithErrors > 0 {
-		fmt.Fprintf(t.out, "Applications with errors: %s\n",
+		fmt.Fprintf(t.out, "Errors: %s\n",
 			errorStyle.Render(fmt.Sprintf("%d", summary.AppsWithErrors)))
 	}
 
-	if summary.TotalAdded > 0 || summary.TotalRemoved > 0 || summary.TotalModified > 0 {
-		fmt.Fprintln(t.out)
-		fmt.Fprintln(t.out, "Resource changes:")
-		if summary.TotalAdded > 0 {
-			fmt.Fprintf(t.out, "  %s\n", addedStyle.Render(fmt.Sprintf("+%d added", summary.TotalAdded)))
-		}
-		if summary.TotalRemoved > 0 {
-			fmt.Fprintf(t.out, "  %s\n", removedStyle.Render(fmt.Sprintf("-%d removed", summary.TotalRemoved)))
-		}
-		if summary.TotalModified > 0 {
-			fmt.Fprintf(t.out, "  %s\n", modifiedStyle.Render(fmt.Sprintf("~%d modified", summary.TotalModified)))
-		}
-	}
-
 	if summary.NewApplications > 0 {
-		fmt.Fprintf(t.out, "\nNew Application CRDs discovered: %s\n",
+		fmt.Fprintf(t.out, "New Application CRDs discovered: %s\n",
 			addedStyle.Render(fmt.Sprintf("%d", summary.NewApplications)))
 	}
 

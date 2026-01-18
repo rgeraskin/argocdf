@@ -87,7 +87,7 @@ data:
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := GenerateUnifiedDiff(tt.oldYAML, tt.newYAML, tt.filename)
+			got, err := GenerateUnifiedDiff(tt.oldYAML, tt.newYAML, tt.filename, 3)
 			if tt.wantErr {
 				if err == nil {
 					t.Error("GenerateUnifiedDiff() expected error, got nil")
@@ -99,6 +99,88 @@ data:
 				return
 			}
 			if !tt.check(got) {
+				t.Errorf("GenerateUnifiedDiff() check failed: %s\nGot:\n%s", tt.desc, got)
+			}
+		})
+	}
+}
+
+func TestGenerateUnifiedDiffContextLines(t *testing.T) {
+	// A file with 10 lines, change in the middle (line 5)
+	oldYAML := `line1: a
+line2: b
+line3: c
+line4: d
+line5: OLD
+line6: f
+line7: g
+line8: h
+line9: i
+line10: j
+`
+	newYAML := `line1: a
+line2: b
+line3: c
+line4: d
+line5: NEW
+line6: f
+line7: g
+line8: h
+line9: i
+line10: j
+`
+	tests := []struct {
+		name         string
+		contextLines int
+		checkContext func(string) bool
+		desc         string
+	}{
+		{
+			name:         "zero context lines",
+			contextLines: 0,
+			checkContext: func(d string) bool {
+				// With 0 context, should only see the changed line, not surrounding lines
+				return strings.Contains(d, "-line5: OLD") &&
+					strings.Contains(d, "+line5: NEW") &&
+					!strings.Contains(d, " line4:") && // No context before
+					!strings.Contains(d, " line6:")    // No context after
+			},
+			desc: "should show only changed lines with 0 context",
+		},
+		{
+			name:         "one context line",
+			contextLines: 1,
+			checkContext: func(d string) bool {
+				// With 1 context, should see 1 line before and after
+				return strings.Contains(d, " line4: d") &&
+					strings.Contains(d, "-line5: OLD") &&
+					strings.Contains(d, "+line5: NEW") &&
+					strings.Contains(d, " line6: f") &&
+					!strings.Contains(d, " line3:") // Not 2 lines before
+			},
+			desc: "should show 1 context line before and after",
+		},
+		{
+			name:         "unlimited context (-1)",
+			contextLines: -1,
+			checkContext: func(d string) bool {
+				// With unlimited context, should see all lines
+				return strings.Contains(d, " line1: a") &&
+					strings.Contains(d, " line2: b") &&
+					strings.Contains(d, " line10: j")
+			},
+			desc: "should show all lines with unlimited context",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := GenerateUnifiedDiff(oldYAML, newYAML, "test.yaml", tt.contextLines)
+			if err != nil {
+				t.Errorf("GenerateUnifiedDiff() unexpected error = %v", err)
+				return
+			}
+			if !tt.checkContext(got) {
 				t.Errorf("GenerateUnifiedDiff() check failed: %s\nGot:\n%s", tt.desc, got)
 			}
 		})
@@ -212,7 +294,7 @@ func TestGenerateManifestUnifiedDiffs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := GenerateManifestUnifiedDiffs(tt.result)
+			got, err := GenerateManifestUnifiedDiffs(tt.result, 3)
 			if tt.wantErr {
 				if err == nil {
 					t.Error("GenerateManifestUnifiedDiffs() expected error, got nil")

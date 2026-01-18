@@ -15,18 +15,21 @@ import (
 // UnifiedWriter writes diff output in unified diff format to a file.
 // This format is compatible with patch(1) and can be used with diff viewers.
 type UnifiedWriter struct {
-	file *os.File
+	file         *os.File
+	contextLines int // Number of context lines for unified diff
 }
 
 // NewUnifiedWriter creates a new UnifiedWriter.
-func NewUnifiedWriter(filePath string) (*UnifiedWriter, error) {
+// contextLines specifies the number of unchanged lines to show around changes.
+func NewUnifiedWriter(filePath string, contextLines int) (*UnifiedWriter, error) {
 	file, err := os.Create(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create unified diff file: %w", err)
 	}
 
 	return &UnifiedWriter{
-		file: file,
+		file:         file,
+		contextLines: contextLines,
 	}, nil
 }
 
@@ -59,7 +62,7 @@ func (u *UnifiedWriter) WriteAppDiff(appDiff *types.AppDiff, _ int) error {
 	}
 
 	// Generate unified diffs for all manifests
-	diffs, err := GenerateManifestUnifiedDiffs(result)
+	diffs, err := GenerateManifestUnifiedDiffs(result, u.contextLines)
 	if err != nil {
 		u.write(fmt.Sprintf("# Error generating diff: %s\n\n", err.Error()))
 		return nil
@@ -93,16 +96,16 @@ func (u *UnifiedWriter) WriteTree(tree *diff.AppTree) error {
 // WriteSummary writes a summary comment.
 func (u *UnifiedWriter) WriteSummary(summary Summary) error {
 	u.write("# Summary\n")
-	u.write(fmt.Sprintf("# Applications: %d total, %d with changes",
-		summary.TotalApps, summary.AppsWithChanges))
-	if summary.AppsWithErrors > 0 {
-		u.write(fmt.Sprintf(", %d with errors", summary.AppsWithErrors))
-	}
-	u.write("\n")
+	u.write(fmt.Sprintf("# Applications affected: %d\n", summary.TotalApps))
+	u.write(fmt.Sprintf("# Applications changed: %d\n", summary.AppsWithChanges))
 
 	if summary.TotalAdded > 0 || summary.TotalRemoved > 0 || summary.TotalModified > 0 {
 		u.write(fmt.Sprintf("# Resources: +%d added, -%d removed, ~%d modified\n",
 			summary.TotalAdded, summary.TotalRemoved, summary.TotalModified))
+	}
+
+	if summary.AppsWithErrors > 0 {
+		u.write(fmt.Sprintf("# Errors: %d\n", summary.AppsWithErrors))
 	}
 
 	return nil

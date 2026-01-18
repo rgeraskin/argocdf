@@ -38,7 +38,7 @@ func TestNewTerminalWriter(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			w := NewTerminalWriter(tt.format)
+			w := NewTerminalWriter(tt.format, 3)
 			if w.summaryOnly != tt.summaryOnly {
 				t.Errorf("NewTerminalWriter(%q).summaryOnly = %v, want %v", tt.format, w.summaryOnly, tt.summaryOnly)
 			}
@@ -51,7 +51,7 @@ func TestNewTerminalWriter(t *testing.T) {
 
 func TestTerminalWriterWriteHeader(t *testing.T) {
 	var buf bytes.Buffer
-	w := NewTerminalWriter("fields")
+	w := NewTerminalWriter("fields", 3)
 	w.out = &buf
 
 	err := w.WriteHeader("Test Header")
@@ -166,7 +166,7 @@ func TestTerminalWriterWriteAppDiff(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			w := NewTerminalWriter(tt.format)
+			w := NewTerminalWriter(tt.format, 3)
 			w.out = &buf
 
 			err := w.WriteAppDiff(tt.appDiff, 0)
@@ -192,7 +192,7 @@ func TestTerminalWriterWriteAppDiff(t *testing.T) {
 
 func TestTerminalWriterWriteSummary(t *testing.T) {
 	var buf bytes.Buffer
-	w := NewTerminalWriter("fields")
+	w := NewTerminalWriter("fields", 3)
 	w.out = &buf
 
 	summary := Summary{
@@ -221,7 +221,7 @@ func TestTerminalWriterWriteSummary(t *testing.T) {
 }
 
 func TestTerminalWriterFlush(t *testing.T) {
-	w := NewTerminalWriter("fields")
+	w := NewTerminalWriter("fields", 3)
 	if err := w.Flush(); err != nil {
 		t.Errorf("Flush() error = %v", err)
 	}

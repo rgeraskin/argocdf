@@ -12,26 +12,41 @@ import (
 
 // GenerateUnifiedDiff creates a unified diff string from two YAML contents.
 // The filename is used in the diff header for context.
-func GenerateUnifiedDiff(oldYAML, newYAML, filename string) (string, error) {
+// contextLines specifies the number of unchanged lines to show around changes.
+// Use -1 for unlimited context (shows entire file).
+func GenerateUnifiedDiff(oldYAML, newYAML, filename string, contextLines int) (string, error) {
+	oldLines := difflib.SplitLines(oldYAML)
+	newLines := difflib.SplitLines(newYAML)
+
+	// Handle unlimited context (-1): use max of both file lengths
+	ctx := contextLines
+	if ctx < 0 {
+		ctx = len(oldLines)
+		if len(newLines) > ctx {
+			ctx = len(newLines)
+		}
+	}
+
 	unifiedDiff := difflib.UnifiedDiff{
-		A:        difflib.SplitLines(oldYAML),
-		B:        difflib.SplitLines(newYAML),
+		A:        oldLines,
+		B:        newLines,
 		FromFile: "base/" + filename,
 		ToFile:   "target/" + filename,
-		Context:  3,
+		Context:  ctx,
 	}
 	return difflib.GetUnifiedDiffString(unifiedDiff)
 }
 
 // GenerateManifestUnifiedDiffs generates unified diffs for all modified manifests.
 // Returns a map of manifest key to unified diff string.
-func GenerateManifestUnifiedDiffs(result *diff.ManifestSetDiff) (map[string]string, error) {
+// contextLines specifies the number of unchanged lines to show around changes.
+func GenerateManifestUnifiedDiffs(result *diff.ManifestSetDiff, contextLines int) (map[string]string, error) {
 	diffs := make(map[string]string)
 
 	// Generate diffs for modified manifests
 	for _, md := range result.Modified {
 		if md.Old != nil && md.New != nil {
-			diffStr, err := GenerateUnifiedDiff(md.Old.Raw, md.New.Raw, md.Key)
+			diffStr, err := GenerateUnifiedDiff(md.Old.Raw, md.New.Raw, md.Key, contextLines)
 			if err != nil {
 				return nil, fmt.Errorf("failed to generate diff for %s: %w", md.Key, err)
 			}
@@ -43,7 +58,7 @@ func GenerateManifestUnifiedDiffs(result *diff.ManifestSetDiff) (map[string]stri
 
 	// Generate diffs for added manifests (entire content is new)
 	for _, m := range result.Added {
-		diffStr, err := GenerateUnifiedDiff("", m.Raw, m.Key())
+		diffStr, err := GenerateUnifiedDiff("", m.Raw, m.Key(), contextLines)
 		if err != nil {
 			return nil, fmt.Errorf("failed to generate diff for added %s: %w", m.Key(), err)
 		}
@@ -54,7 +69,7 @@ func GenerateManifestUnifiedDiffs(result *diff.ManifestSetDiff) (map[string]stri
 
 	// Generate diffs for removed manifests (entire content is removed)
 	for _, m := range result.Removed {
-		diffStr, err := GenerateUnifiedDiff(m.Raw, "", m.Key())
+		diffStr, err := GenerateUnifiedDiff(m.Raw, "", m.Key(), contextLines)
 		if err != nil {
 			return nil, fmt.Errorf("failed to generate diff for removed %s: %w", m.Key(), err)
 		}

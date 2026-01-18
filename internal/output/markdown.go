@@ -278,26 +278,23 @@ func (m *MarkdownWriter) WriteSummary(summary Summary) error {
 
 // writeSummaryGitHub writes summary in GitHub-compatible markdown.
 func (m *MarkdownWriter) writeSummaryGitHub(summary Summary) error {
-	m.write("---\n\n### Summary\n\n")
-	m.write("| Metric | Value |\n")
-	m.write("|--------|-------|\n")
-	m.write(fmt.Sprintf("| Applications analyzed | %d |\n", summary.TotalApps))
-	m.write(fmt.Sprintf("| Applications with changes | %d |\n", summary.AppsWithChanges))
+	m.write("---\n\n")
+
+	// Build inline summary matching Atlantis style
+	var parts []string
+	parts = append(parts, fmt.Sprintf("%d applications affected", summary.TotalApps))
+	parts = append(parts, fmt.Sprintf("%d changed", summary.AppsWithChanges))
+
+	if summary.TotalAdded > 0 || summary.TotalRemoved > 0 || summary.TotalModified > 0 {
+		parts = append(parts, fmt.Sprintf("+%d/-%d/~%d resources",
+			summary.TotalAdded, summary.TotalRemoved, summary.TotalModified))
+	}
 
 	if summary.AppsWithErrors > 0 {
-		m.write(fmt.Sprintf("| Applications with errors | %d |\n", summary.AppsWithErrors))
-	}
-	if summary.TotalAdded > 0 {
-		m.write(fmt.Sprintf("| Resources added | +%d |\n", summary.TotalAdded))
-	}
-	if summary.TotalRemoved > 0 {
-		m.write(fmt.Sprintf("| Resources removed | -%d |\n", summary.TotalRemoved))
-	}
-	if summary.TotalModified > 0 {
-		m.write(fmt.Sprintf("| Resources modified | ~%d |\n", summary.TotalModified))
+		parts = append(parts, fmt.Sprintf("%d errors", summary.AppsWithErrors))
 	}
 
-	m.write("\n")
+	m.write(fmt.Sprintf("**Summary:** %s\n\n", strings.Join(parts, " | ")))
 	return nil
 }
 
@@ -305,24 +302,14 @@ func (m *MarkdownWriter) writeSummaryGitHub(summary Summary) error {
 func (m *MarkdownWriter) writeSummaryAtlantis(summary Summary) error {
 	m.write("---\n\n")
 
-	// Atlantis-style summary line
+	// Unified summary format
 	var parts []string
-	parts = append(parts, fmt.Sprintf("%d applications", summary.TotalApps))
+	parts = append(parts, fmt.Sprintf("%d applications affected", summary.TotalApps))
+	parts = append(parts, fmt.Sprintf("%d changed", summary.AppsWithChanges))
 
-	if summary.AppsWithChanges > 0 || summary.TotalAdded > 0 || summary.TotalRemoved > 0 || summary.TotalModified > 0 {
-		var changes []string
-		if summary.TotalAdded > 0 {
-			changes = append(changes, fmt.Sprintf("%d added", summary.TotalAdded))
-		}
-		if summary.TotalModified > 0 {
-			changes = append(changes, fmt.Sprintf("%d modified", summary.TotalModified))
-		}
-		if summary.TotalRemoved > 0 {
-			changes = append(changes, fmt.Sprintf("%d removed", summary.TotalRemoved))
-		}
-		if len(changes) > 0 {
-			parts = append(parts, fmt.Sprintf("%d resources changed (%s)", summary.TotalAdded+summary.TotalModified+summary.TotalRemoved, strings.Join(changes, ", ")))
-		}
+	if summary.TotalAdded > 0 || summary.TotalRemoved > 0 || summary.TotalModified > 0 {
+		parts = append(parts, fmt.Sprintf("+%d/-%d/~%d resources",
+			summary.TotalAdded, summary.TotalRemoved, summary.TotalModified))
 	}
 
 	if summary.AppsWithErrors > 0 {

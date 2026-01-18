@@ -71,7 +71,7 @@ func (f *Factory) CreateOutputWriter() (output.Writer, error) {
 
 	// Terminal output (unless "none")
 	if f.config.StdoutFormat != "none" {
-		writers = append(writers, output.NewTerminalWriter(f.config.StdoutFormat))
+		writers = append(writers, output.NewTerminalWriter(f.config.StdoutFormat, f.config.UnifiedContext))
 	}
 
 	// File outputs
@@ -99,7 +99,7 @@ func (f *Factory) CreateOutputWriter() (output.Writer, error) {
 			writers = append(writers, htmlWriter)
 
 		case "unified":
-			unifiedWriter, err := output.NewUnifiedWriter(fo.Path)
+			unifiedWriter, err := output.NewUnifiedWriter(fo.Path, f.config.UnifiedContext)
 			if err != nil {
 				return nil, err
 			}

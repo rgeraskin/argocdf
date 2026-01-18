@@ -33,6 +33,7 @@ var (
 	quiet          bool
 	noRecursive    bool
 	maxDepth       int
+	unifiedContext int
 )
 
 func main() {
@@ -103,6 +104,8 @@ Examples:
 	rootCmd.Flags().StringArrayVarP(&fileOutputs, "file", "f", nil,
 		"File output in format:path (can be repeated). Formats: md, html-side-by-side, md-atlantis, unified")
 	rootCmd.Flags().BoolVarP(&quiet, "quiet", "q", false, "Suppress terminal output (same as --stdout none)")
+	rootCmd.Flags().IntVarP(&unifiedContext, "context-lines", "U", config.DefaultUnifiedContext,
+		"Number of context lines in unified diff output (-1 for unlimited)")
 
 	// Recursion flags
 	rootCmd.Flags().BoolVar(&noRecursive, "no-recursive", false, "Disable apps-of-apps recursion")
@@ -171,6 +174,7 @@ func runMain(cmd *cobra.Command, args []string) error {
 		FileOutputs:    parsedFileOutputs,
 		NoRecursive:    noRecursive,
 		MaxDepth:       maxDepth,
+		UnifiedContext: unifiedContext,
 	}
 
 	// Auto-detect missing values

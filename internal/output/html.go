@@ -411,21 +411,18 @@ func (h *HTMLWriter) WriteSummary(summary Summary) error {
 	h.write(`<h2>Summary</h2>`)
 	h.write(`<div class="summary-grid">`)
 
-	h.writeSummaryItem("Total Apps", fmt.Sprintf("%d", summary.TotalApps), "")
-	h.writeSummaryItem("Changed", fmt.Sprintf("%d", summary.AppsWithChanges), "modified")
+	h.writeSummaryItem("Apps affected", fmt.Sprintf("%d", summary.TotalApps), "")
+	h.writeSummaryItem("Apps changed", fmt.Sprintf("%d", summary.AppsWithChanges), "modified")
+
+	// Always show resources line if there are any changes
+	if summary.TotalAdded > 0 || summary.TotalRemoved > 0 || summary.TotalModified > 0 {
+		h.writeSummaryItem("Added", fmt.Sprintf("+%d", summary.TotalAdded), "added")
+		h.writeSummaryItem("Removed", fmt.Sprintf("-%d", summary.TotalRemoved), "removed")
+		h.writeSummaryItem("Modified", fmt.Sprintf("~%d", summary.TotalModified), "modified")
+	}
 
 	if summary.AppsWithErrors > 0 {
 		h.writeSummaryItem("Errors", fmt.Sprintf("%d", summary.AppsWithErrors), "removed")
-	}
-
-	if summary.TotalAdded > 0 {
-		h.writeSummaryItem("Added", fmt.Sprintf("+%d", summary.TotalAdded), "added")
-	}
-	if summary.TotalRemoved > 0 {
-		h.writeSummaryItem("Removed", fmt.Sprintf("-%d", summary.TotalRemoved), "removed")
-	}
-	if summary.TotalModified > 0 {
-		h.writeSummaryItem("Modified", fmt.Sprintf("~%d", summary.TotalModified), "modified")
 	}
 
 	h.write(`</div>`)

@@ -10,10 +10,11 @@ import (
 
 // Default values for configuration.
 const (
-	DefaultContext      = "pp-admin-aws"
-	DefaultNamespace    = "argocd"
-	DefaultStdoutFormat = "fields"
-	DefaultMaxDepth     = 10
+	DefaultContext        = "pp-admin-aws"
+	DefaultNamespace      = "argocd"
+	DefaultStdoutFormat   = "fields"
+	DefaultMaxDepth       = 10
+	DefaultUnifiedContext = 3 // Standard unified diff context lines
 )
 
 // FileOutput represents a single file output specification.
@@ -46,6 +47,9 @@ type Config struct {
 	// Recursion settings
 	NoRecursive bool
 	MaxDepth    int
+
+	// Unified diff settings
+	UnifiedContext int // Number of context lines in unified diff output
 }
 
 // ParseFileOutput parses a "format:path" string into a FileOutput.
@@ -138,5 +142,7 @@ func (c *Config) WithDefaults() *Config {
 	if c.MaxDepth == 0 {
 		c.MaxDepth = DefaultMaxDepth
 	}
+	// Note: UnifiedContext is not defaulted here because 0 is a valid value
+	// (meaning no context lines). The default is set by the CLI flag.
 	return c
 }

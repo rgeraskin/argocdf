@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./argocdf:*)",
+      "Bash(./run_e2e_tests.sh:*)",
+      "Bash(chmod:*)",
+      "Bash(find:*)",
+      "Bash(git add:*)",
+      "Bash(git checkout:*)",
+      "Bash(go build:*)",
+      "Bash(go fmt:*)",
+      "Bash(go get:*)",
+      "Bash(go mod tidy:*)",
+      "Bash(go run:*)",
+      "Bash(go test:*)",
+      "Bash(go vet:*)",
+      "Bash(grep:*)",
+      "Bash(make:*)",
+      "Bash(tee:*)",
+      "WebFetch(domain:argo-cd.readthedocs.io)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:spacelift.io)",
+      "WebFetch(domain:www.runatlantis.io)"
+    ]
+  }
+}
