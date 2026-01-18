@@ -1,0 +1,293 @@
+// Package diff provides recursive application discovery.
+package diff
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/rgeraskin/argocdf/internal/cluster"
+	"github.com/rgeraskin/argocdf/internal/types"
+)
+
+// AppDiscoverer discovers new applications from rendered manifests.
+type AppDiscoverer struct {
+	parser *ManifestParser
+}
+
+// NewAppDiscoverer creates a new AppDiscoverer.
+func NewAppDiscoverer() *AppDiscoverer {
+	return &AppDiscoverer{
+		parser: NewManifestParser(),
+	}
+}
+
+// DiscoveredApplication represents an Application CRD found in rendered manifests.
+type DiscoveredApplication struct {
+	Name      string
+	Namespace string
+	Spec      cluster.ApplicationSpec
+	RawYAML   string
+}
+
+// DiscoverApplications finds Application CRDs in the given manifest content.
+func (d *AppDiscoverer) DiscoverApplications(content string) ([]DiscoveredApplication, error) {
+	manifests, err := d.parser.ParseManifests(content)
+	if err != nil {
+		return nil, err
+	}
+
+	var apps []DiscoveredApplication
+
+	for _, m := range manifests {
+		if m.Kind != "Application" {
+			continue
+		}
+		if !strings.Contains(m.APIVersion, "argoproj.io") {
+			continue
+		}
+
+		// Extract spec from the object
+		spec := cluster.ApplicationSpec{}
+		if specMap, ok := m.Object["spec"].(map[string]interface{}); ok {
+			spec = parseApplicationSpec(specMap)
+		}
+
+		apps = append(apps, DiscoveredApplication{
+			Name:      m.Name,
+			Namespace: m.Namespace,
+			Spec:      spec,
+			RawYAML:   m.Raw,
+		})
+	}
+
+	return apps, nil
+}
+
+// parseApplicationSpec parses a spec map into ApplicationSpec.
+func parseApplicationSpec(specMap map[string]interface{}) cluster.ApplicationSpec {
+	spec := cluster.ApplicationSpec{}
+
+	// Parse destination
+	if dest, ok := specMap["destination"].(map[string]interface{}); ok {
+		spec.Destination = cluster.ApplicationDest{
+			Server:    getStringFromMap(dest, "server"),
+			Namespace: getStringFromMap(dest, "namespace"),
+			Name:      getStringFromMap(dest, "name"),
+		}
+	}
+
+	// Parse source (single)
+	if source, ok := specMap["source"].(map[string]interface{}); ok {
+		src := parseSource(source)
+		spec.Source = &src
+	}
+
+	// Parse sources (multiple)
+	if sources, ok := specMap["sources"].([]interface{}); ok {
+		for _, s := range sources {
+			if srcMap, ok := s.(map[string]interface{}); ok {
+				spec.Sources = append(spec.Sources, parseSource(srcMap))
+			}
+		}
+	}
+
+	spec.Project = getStringFromMap(specMap, "project")
+
+	return spec
+}
+
+// parseSource parses a source map into ApplicationSource.
+func parseSource(srcMap map[string]interface{}) cluster.ApplicationSource {
+	src := cluster.ApplicationSource{
+		RepoURL:        getStringFromMap(srcMap, "repoURL"),
+		Path:           getStringFromMap(srcMap, "path"),
+		TargetRevision: getStringFromMap(srcMap, "targetRevision"),
+		Chart:          getStringFromMap(srcMap, "chart"),
+		Ref:            getStringFromMap(srcMap, "ref"),
+	}
+
+	// Parse helm config if present
+	if helm, ok := srcMap["helm"].(map[string]interface{}); ok {
+		src.Helm = &cluster.ApplicationSourceHelm{
+			ReleaseName: getStringFromMap(helm, "releaseName"),
+			Values:      getStringFromMap(helm, "values"),
+		}
+		if valueFiles, ok := helm["valueFiles"].([]interface{}); ok {
+			for _, vf := range valueFiles {
+				if s, ok := vf.(string); ok {
+					src.Helm.ValueFiles = append(src.Helm.ValueFiles, s)
+				}
+			}
+		}
+	}
+
+	return src
+}
+
+// getStringFromMap safely extracts a string from a map.
+func getStringFromMap(m map[string]interface{}, key string) string {
+	if v, ok := m[key]; ok {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
+// FindNewApplications compares old and new manifests to find newly added Applications.
+func (d *AppDiscoverer) FindNewApplications(oldContent, newContent string) ([]DiscoveredApplication, error) {
+	oldApps, err := d.DiscoverApplications(oldContent)
+	if err != nil {
+		return nil, fmt.Errorf("failed to discover old applications: %w", err)
+	}
+
+	newApps, err := d.DiscoverApplications(newContent)
+	if err != nil {
+		return nil, fmt.Errorf("failed to discover new applications: %w", err)
+	}
+
+	// Build set of old app names
+	oldNames := make(map[string]bool)
+	for _, app := range oldApps {
+		key := fmt.Sprintf("%s/%s", app.Namespace, app.Name)
+		oldNames[key] = true
+	}
+
+	// Find apps that are in new but not in old
+	var newlyAdded []DiscoveredApplication
+	for _, app := range newApps {
+		key := fmt.Sprintf("%s/%s", app.Namespace, app.Name)
+		if !oldNames[key] {
+			newlyAdded = append(newlyAdded, app)
+		}
+	}
+
+	return newlyAdded, nil
+}
+
+// AppDiffQueue manages the queue of applications to process for apps-of-apps.
+type AppDiffQueue struct {
+	pending   []QueuedApp
+	processed map[string]bool
+	maxDepth  int
+}
+
+// QueuedApp represents an application in the processing queue.
+type QueuedApp struct {
+	Name      string
+	Namespace string
+	Depth     int
+	ParentApp string
+	Spec      *cluster.ApplicationSpec
+}
+
+// NewAppDiffQueue creates a new AppDiffQueue.
+func NewAppDiffQueue(maxDepth int) *AppDiffQueue {
+	return &AppDiffQueue{
+		pending:   make([]QueuedApp, 0),
+		processed: make(map[string]bool),
+		maxDepth:  maxDepth,
+	}
+}
+
+// Add adds an application to the queue if not already processed.
+func (q *AppDiffQueue) Add(app QueuedApp) bool {
+	key := fmt.Sprintf("%s/%s", app.Namespace, app.Name)
+	if q.processed[key] {
+		return false
+	}
+	if app.Depth >= q.maxDepth {
+		return false
+	}
+	q.pending = append(q.pending, app)
+	return true
+}
+
+// Next returns the next application to process, or nil if queue is empty.
+func (q *AppDiffQueue) Next() *QueuedApp {
+	if len(q.pending) == 0 {
+		return nil
+	}
+	app := q.pending[0]
+	q.pending = q.pending[1:]
+	key := fmt.Sprintf("%s/%s", app.Namespace, app.Name)
+	q.processed[key] = true
+	return &app
+}
+
+// IsEmpty returns true if the queue is empty.
+func (q *AppDiffQueue) IsEmpty() bool {
+	return len(q.pending) == 0
+}
+
+// ProcessedCount returns the number of processed applications.
+func (q *AppDiffQueue) ProcessedCount() int {
+	return len(q.processed)
+}
+
+// AppTree structures the diff results into a tree based on parent-child relationships.
+type AppTree struct {
+	Root     []*AppTreeNode
+	AllNodes map[string]*AppTreeNode
+}
+
+// AppTreeNode represents a node in the application tree.
+type AppTreeNode struct {
+	AppDiff  interface{} // *types.AppDiff - using interface{} to avoid import cycle in output pkg
+	Children []*AppTreeNode
+}
+
+// NewAppTree creates a new AppTree from a slice of AppDiffs.
+func NewAppTree(diffs []*types.AppDiff) *AppTree {
+	tree := &AppTree{
+		Root:     make([]*AppTreeNode, 0),
+		AllNodes: make(map[string]*AppTreeNode),
+	}
+
+	// Create nodes for all apps
+	for _, d := range diffs {
+		key := fmt.Sprintf("%s/%s", d.Namespace, d.Name)
+		tree.AllNodes[key] = &AppTreeNode{
+			AppDiff:  d,
+			Children: make([]*AppTreeNode, 0),
+		}
+	}
+
+	// Build parent-child relationships
+	for _, d := range diffs {
+		key := fmt.Sprintf("%s/%s", d.Namespace, d.Name)
+		node := tree.AllNodes[key]
+
+		if d.ParentAppName == "" {
+			// Root node
+			tree.Root = append(tree.Root, node)
+		} else {
+			// Find parent and add as child
+			for parentKey, parentNode := range tree.AllNodes {
+				if parentAppDiff, ok := parentNode.AppDiff.(*types.AppDiff); ok {
+					if parentAppDiff.Name == d.ParentAppName {
+						parentNode.Children = append(parentNode.Children, node)
+						break
+					}
+				}
+				_ = parentKey // unused
+			}
+		}
+	}
+
+	return tree
+}
+
+// Walk traverses the tree depth-first, calling fn for each node.
+func (t *AppTree) Walk(fn func(node *AppTreeNode, depth int)) {
+	for _, root := range t.Root {
+		walkNode(root, 0, fn)
+	}
+}
+
+func walkNode(node *AppTreeNode, depth int, fn func(node *AppTreeNode, depth int)) {
+	fn(node, depth)
+	for _, child := range node.Children {
+		walkNode(child, depth+1, fn)
+	}
+}

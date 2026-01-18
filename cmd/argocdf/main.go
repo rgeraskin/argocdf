@@ -1,146 +1,183 @@
+// Package main provides the CLI entry point for argocdf.
 package main
 
 import (
-	"bytes"
-	"fmt"
+	"context"
 	"os"
-	"os/exec"
-	"strings"
+	"os/signal"
+	"syscall"
 
 	"github.com/charmbracelet/log"
-	"github.com/sergi/go-diff/diffmatchpatch"
+	"github.com/spf13/cobra"
+
+	"github.com/rgeraskin/argocdf/internal/app"
+	"github.com/rgeraskin/argocdf/internal/config"
 )
 
-const (
-	kubeVersion      = "v1.23.10"
-	kubeVersionMajor = "1"
-	kubeVersionMinor = "23"
+var (
+	// Version is set at build time
+	Version = "dev"
+
+	// Config flags
+	kubeconfigPath string
+	kubeContext    string
+	namespace      string
+	allNamespaces  bool
+	repoPath       string
+	repoURL        string
+	baseBranch     string
+	targetBranch   string
+	kubeVersion    string
+	outputFormat   string
+	htmlFile       string
+	noRecursive    bool
+	maxDepth       int
+	verbose        bool
 )
-
-var logger *log.Logger
-
-type KubeResource struct {
-	Kind     string `yaml:"kind"`
-	Metadata struct {
-		Name string `yaml:"name"`
-	} `yaml:"metadata"`
-	Spec interface{} `yaml:"spec"`
-}
-
-type App struct {
-	Name              string
-	ParentAppName     string
-	ChildAppNames     []string
-	ApplicationOld    *Application
-	ApplicationNew    *Application
-	Diff              []diffmatchpatch.Diff
-	AffectedResources string
-	RenderedOld       string
-	RenderedNew       string
-}
-
-func execCommand(name string, args ...string) (string, error) {
-	var stdout bytes.Buffer
-	cmd := exec.Command(name, args...)
-	cmd.Dir = gitRepoPath
-	cmd.Stdout = &stdout
-	cmd.Stderr = os.Stderr
-	err := cmd.Run()
-	return stdout.String(), err
-}
-
-func getAppType(ApplicationSpec ApplicationSpec) string {
-	switch {
-	case isHelmChart(ApplicationSpec):
-		return "helm"
-	case isKustomization(ApplicationSpec):
-		return "kustomize"
-	default:
-		return "unknown"
-	}
-}
-
-func printDiffs(appsMap *map[string]*App, parentAppName string) {
-	dmp := diffmatchpatch.New()
-	for _, app := range *appsMap {
-		if app.ParentAppName == parentAppName {
-			fmt.Println("# " + app.Name)
-			fmt.Println(dmp.DiffPrettyText(app.Diff))
-			if len(app.ChildAppNames) > 0 {
-				fmt.Printf("# Children: %v\n", app.ChildAppNames)
-				printDiffs(appsMap, app.Name)
-			}
-		}
-	}
-}
-
-func getDiff(app *App) error {
-	dmp := diffmatchpatch.New()
-	diffs := dmp.DiffMain(
-		app.RenderedOld,
-		app.RenderedNew,
-		true,
-	)
-
-	// make diff smaller
-	for i, diff := range diffs {
-		if diff.Type == diffmatchpatch.DiffEqual {
-			// delete all text after the first '---' and before the last '---' in diff.Text
-			firstHyphen := strings.Index(diff.Text, "---")
-			lastHyphen := strings.LastIndex(diff.Text, "---")
-			if firstHyphen != -1 && lastHyphen != -1 {
-				diffs[i].Text = diff.Text[:firstHyphen] + diff.Text[lastHyphen:]
-			}
-		}
-	}
-	// delete last equal diff
-	lastDiff := &diffs[len(diffs)-1]
-	if lastDiff.Type == diffmatchpatch.DiffEqual {
-		lastHyphen := strings.LastIndex(lastDiff.Text, "---")
-		if lastHyphen != -1 {
-			lastDiff.Text = lastDiff.Text[:lastHyphen]
-		}
-	}
-
-	app.Diff = diffs
-	app.AffectedResources = string(dmp.DiffText2(diffs))
-	return nil
-}
 
 func main() {
-	logger = log.NewWithOptions(os.Stderr, log.Options{
-		// ReportCaller:    true,
-		ReportTimestamp: true,
-		Level:           log.DebugLevel,
-		// Formatter:       log.LogfmtFormatter,
+	rootCmd := &cobra.Command{
+		Use:   "argocdf",
+		Short: "Show diffs for ArgoCD applications affected by PR changes",
+		Long: `argocdf analyzes your git repository and ArgoCD cluster to show
+what manifest changes will occur when your PR is merged.
+
+It supports:
+- Single and multi-source ArgoCD applications
+- Helm charts (local and remote)
+- Kustomize directories
+- Apps-of-apps pattern with recursive discovery
+
+Examples:
+  # Basic usage (auto-detects repository and branches)
+  argocdf
+
+  # Specify branches explicitly
+  argocdf --base main --target feature/new-service
+
+  # Use a different Kubernetes context
+  argocdf --context my-cluster
+
+  # Scan all namespaces for ArgoCD applications
+  argocdf --all-namespaces
+
+  # Override repo URL (useful when SSH config has custom hostname aliases)
+  argocdf --repo-dir /path/to/repo --repo-url https://github.com/org/repo
+
+  # Generate HTML report
+  argocdf --output both --html-file report.html`,
+		RunE: runMain,
+	}
+
+	// Kubernetes flags
+	rootCmd.Flags().StringVarP(&kubeconfigPath, "kubeconfig", "k", "", "Path to kubeconfig file")
+	rootCmd.Flags().StringVar(&kubeContext, "context", config.DefaultContext, "Kubernetes context to use")
+	rootCmd.Flags().StringVarP(&namespace, "namespace", "n", config.DefaultNamespace, "ArgoCD namespace to search")
+	rootCmd.Flags().BoolVarP(&allNamespaces, "all-namespaces", "A", false, "Search all namespaces")
+
+	// Git flags
+	rootCmd.Flags().StringVarP(&repoPath, "repo-dir", "r", "", "Path to git repository (default: current directory)")
+	rootCmd.Flags().StringVar(&repoURL, "repo-url", "", "Repository URL for matching ArgoCD apps (overrides auto-detected URL)")
+	rootCmd.Flags().StringVar(&baseBranch, "base", "", "Base branch for comparison (default: main or master)")
+	rootCmd.Flags().StringVar(&targetBranch, "target", "", "Target branch for comparison (default: HEAD)")
+
+	// Rendering flags
+	rootCmd.Flags().StringVar(&kubeVersion, "kube-version", "", "Kubernetes version for rendering (auto-detected)")
+
+	// Output flags
+	rootCmd.Flags().StringVarP(&outputFormat, "output", "o", "terminal", "Output format: terminal, html, or both")
+	rootCmd.Flags().StringVar(&htmlFile, "html-file", config.DefaultHTMLFile, "HTML output file path")
+
+	// Recursion flags
+	rootCmd.Flags().BoolVar(&noRecursive, "no-recursive", false, "Disable apps-of-apps recursion")
+	rootCmd.Flags().IntVar(&maxDepth, "max-depth", config.DefaultMaxDepth, "Maximum recursion depth")
+
+	// General flags
+	rootCmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "Enable verbose output")
+
+	// Version command
+	rootCmd.AddCommand(&cobra.Command{
+		Use:   "version",
+		Short: "Print version information",
+		Run: func(cmd *cobra.Command, args []string) {
+			cmd.Printf("argocdf version %s\n", Version)
+		},
 	})
 
-	repo, head, mainRef, err := getGit(gitRepoPath, gitBranchMaster)
-	if err != nil {
-		logger.Fatal("failed to get git", "error", err)
+	if err := rootCmd.Execute(); err != nil {
+		os.Exit(1)
+	}
+}
+
+func runMain(cmd *cobra.Command, args []string) error {
+	// Setup context with cancellation
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Handle signals
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigChan
+		cancel()
+	}()
+
+	// Setup logger
+	logLevel := log.InfoLevel
+	if verbose {
+		logLevel = log.DebugLevel
+	}
+	logger := log.NewWithOptions(os.Stderr, log.Options{
+		ReportTimestamp: true,
+		Level:           logLevel,
+	})
+
+	// Build configuration
+	cfg := &config.Config{
+		KubeconfigPath: kubeconfigPath,
+		Context:        kubeContext,
+		Namespace:      namespace,
+		AllNamespaces:  allNamespaces,
+		RepoPath:       repoPath,
+		RepoURL:        repoURL,
+		BaseBranch:     baseBranch,
+		TargetBranch:   targetBranch,
+		KubeVersion:    kubeVersion,
+		OutputFormat:   outputFormat,
+		HTMLFilePath:   htmlFile,
+		NoRecursive:    noRecursive,
+		MaxDepth:       maxDepth,
+		Verbose:        verbose,
 	}
 
-	appList, err := appsGetList()
-	if err != nil {
-		logger.Fatal("failed to get argo cd apps", "error", err)
+	// Auto-detect missing values
+	logger.Debug("Auto-detecting configuration...")
+	if err := config.AutoDetect(cfg); err != nil {
+		return err
 	}
 
-	applicationsChanged, err := appsGetChanged(appList, repo, head, mainRef)
-	if err != nil {
-		logger.Fatal("failed to get changed apps", "error", err)
+	// Apply defaults
+	cfg.WithDefaults()
+
+	// Validate configuration
+	if err := cfg.Validate(); err != nil {
+		return err
 	}
 
-	// build apps dependency map
-	appsMap := map[string]*App{}
-	err = buildAppsMap(applicationsChanged, &appsMap)
+	logger.Debug("Configuration",
+		"repo", cfg.RepoPath,
+		"repoURL", cfg.RepoURL,
+		"base", cfg.BaseBranch,
+		"target", cfg.TargetBranch,
+		"context", cfg.Context,
+		"namespace", cfg.Namespace,
+	)
+
+	// Create and run the app
+	application, err := app.New(cfg, logger)
 	if err != nil {
-		logger.Fatal("failed to build apps map", "error", err)
+		return err
 	}
 
-	err = renderAppsMap(&appsMap, "", repo)
-	if err != nil {
-		logger.Fatal("failed to render apps map", "error", err)
-	}
-
-	printDiffs(&appsMap, "")
+	return application.Run(ctx)
 }

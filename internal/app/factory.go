@@ -1,0 +1,101 @@
+// Package app provides the main application orchestrator.
+package app
+
+import (
+	"github.com/charmbracelet/log"
+
+	"github.com/rgeraskin/argocdf/internal/cluster"
+	"github.com/rgeraskin/argocdf/internal/config"
+	"github.com/rgeraskin/argocdf/internal/diff"
+	"github.com/rgeraskin/argocdf/internal/git"
+	"github.com/rgeraskin/argocdf/internal/output"
+	"github.com/rgeraskin/argocdf/internal/render"
+)
+
+// Factory creates and configures all dependencies.
+type Factory struct {
+	config *config.Config
+	logger *log.Logger
+}
+
+// NewFactory creates a new Factory with the given configuration.
+func NewFactory(cfg *config.Config, logger *log.Logger) *Factory {
+	return &Factory{
+		config: cfg,
+		logger: logger,
+	}
+}
+
+// CreateClusterClient creates a Kubernetes cluster client.
+func (f *Factory) CreateClusterClient() (*cluster.Client, error) {
+	return cluster.NewClient(f.config.KubeconfigPath, f.config.Context)
+}
+
+// CreateAppService creates an ArgoCD application service.
+func (f *Factory) CreateAppService(client *cluster.Client) *cluster.ApplicationService {
+	return cluster.NewApplicationService(client)
+}
+
+// CreateRepository opens the git repository.
+func (f *Factory) CreateRepository() (*git.Repository, error) {
+	return git.Open(f.config.RepoPath)
+}
+
+// CreateRenderFactory creates a render factory.
+func (f *Factory) CreateRenderFactory(kubeVersion string) *render.Factory {
+	opts := render.RenderOptions{
+		RepoPath:    f.config.RepoPath,
+		KubeVersion: kubeVersion,
+	}
+	return render.NewFactory(opts)
+}
+
+// CreateManifestDiffer creates a manifest differ.
+func (f *Factory) CreateManifestDiffer() *diff.ManifestDiffer {
+	return diff.NewManifestDiffer()
+}
+
+// CreateAppDiscoverer creates an application discoverer.
+func (f *Factory) CreateAppDiscoverer() *diff.AppDiscoverer {
+	return diff.NewAppDiscoverer()
+}
+
+// CreateAppQueue creates an application processing queue.
+func (f *Factory) CreateAppQueue() *diff.AppDiffQueue {
+	return diff.NewAppDiffQueue(f.config.MaxDepth)
+}
+
+// CreateOutputWriter creates the appropriate output writer(s).
+func (f *Factory) CreateOutputWriter() (output.Writer, error) {
+	var writers []output.Writer
+
+	// Terminal output
+	if f.config.OutputFormat == "terminal" || f.config.OutputFormat == "both" {
+		writers = append(writers, output.NewTerminalWriter(f.config.Verbose))
+	}
+
+	// HTML output
+	if f.config.OutputFormat == "html" || f.config.OutputFormat == "both" {
+		htmlWriter, err := output.NewHTMLWriter(f.config.HTMLFilePath, f.config.Verbose)
+		if err != nil {
+			return nil, err
+		}
+		writers = append(writers, htmlWriter)
+	}
+
+	if len(writers) == 1 {
+		return writers[0], nil
+	}
+
+	return output.NewMultiWriter(writers...), nil
+}
+
+// Config returns the configuration.
+func (f *Factory) Config() *config.Config {
+	return f.config
+}
+
+// Logger returns the logger.
+func (f *Factory) Logger() *log.Logger {
+	return f.logger
+}
