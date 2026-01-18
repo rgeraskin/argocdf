@@ -45,6 +45,11 @@ var (
 			Bold(true).
 			Foreground(lipgloss.Color("39")).
 			MarginTop(1)
+
+	// titleStyle is like headerStyle but without margins, for use in unified diff output
+	titleStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("39"))
 )
 
 // TerminalWriter writes diff output to the terminal with colors.
@@ -73,6 +78,13 @@ func NewTerminalWriter(format string, contextLines int) *TerminalWriter {
 
 // WriteHeader writes the header.
 func (t *TerminalWriter) WriteHeader(title string) error {
+	if t.unifiedDiff {
+		// Output as comments for valid unified diff format (use titleStyle without margins)
+		fmt.Fprintf(t.out, "# %s\n", titleStyle.Render(title))
+		fmt.Fprintf(t.out, "# %s\n", strings.Repeat("=", len(title)))
+		fmt.Fprintln(t.out)
+		return nil
+	}
 	fmt.Fprintln(t.out, headerStyle.Render(title))
 	fmt.Fprintln(t.out, strings.Repeat("=", len(title)))
 	fmt.Fprintln(t.out)
@@ -81,6 +93,11 @@ func (t *TerminalWriter) WriteHeader(title string) error {
 
 // WriteAppDiff writes the diff for an application.
 func (t *TerminalWriter) WriteAppDiff(appDiff *types.AppDiff, depth int) error {
+	// For unified diff mode, output patch-compatible format with colors
+	if t.unifiedDiff {
+		return t.writeAppDiffUnified(appDiff)
+	}
+
 	indent := strings.Repeat("  ", depth)
 
 	// Write app name with tree indicator
@@ -127,10 +144,7 @@ func (t *TerminalWriter) WriteAppDiff(appDiff *types.AppDiff, depth int) error {
 
 	// Show detailed diff unless summaryOnly is set
 	if !t.summaryOnly {
-		if t.unifiedDiff {
-			// Use unified diff format
-			t.writeUnifiedDiff(result, indent)
-		} else if t.externalDiff != "" {
+		if t.externalDiff != "" {
 			// Use external diff tool for side-by-side view (ARGOCDF_EXTERNAL_DIFF is set)
 			t.writeExternalDiff(appDiff, result, indent)
 		} else {
@@ -139,6 +153,78 @@ func (t *TerminalWriter) WriteAppDiff(appDiff *types.AppDiff, depth int) error {
 		}
 	}
 
+	return nil
+}
+
+// writeAppDiffUnified writes the diff for an application in patch-compatible unified diff format.
+// Non-diff lines are written as comments (#) to maintain valid unified diff format.
+// Colors are preserved for terminal display.
+func (t *TerminalWriter) writeAppDiffUnified(appDiff *types.AppDiff) error {
+	// Write app header as comment with color
+	appName := appDiff.Name
+	if appDiff.Namespace != "" {
+		appName += fmt.Sprintf(" (%s)", appDiff.Namespace)
+	}
+	fmt.Fprintf(t.out, "# %s\n", appNameStyle.Render("Application: "+appName))
+
+	// Handle error
+	if appDiff.Error != nil {
+		fmt.Fprintf(t.out, "# %s\n\n", errorStyle.Render("Error: "+appDiff.Error.Error()))
+		return nil
+	}
+
+	// Type assert DiffResult
+	result, ok := appDiff.DiffResult.(*diff.ManifestSetDiff)
+	if !ok || result == nil || !result.HasChanges {
+		fmt.Fprintf(t.out, "# %s\n\n", dimStyle.Render("No changes"))
+		return nil
+	}
+
+	// Write summary counts as comments
+	if len(result.Added) > 0 {
+		fmt.Fprintf(t.out, "# %s\n", addedStyle.Render(fmt.Sprintf("+ %d added", len(result.Added))))
+	}
+	if len(result.Removed) > 0 {
+		fmt.Fprintf(t.out, "# %s\n", removedStyle.Render(fmt.Sprintf("- %d removed", len(result.Removed))))
+	}
+	if len(result.Modified) > 0 {
+		fmt.Fprintf(t.out, "# %s\n", modifiedStyle.Render(fmt.Sprintf("~ %d modified", len(result.Modified))))
+	}
+
+	// Generate unified diffs for all manifests
+	diffs, err := GenerateManifestUnifiedDiffs(result, t.contextLines)
+	if err != nil {
+		fmt.Fprintf(t.out, "# %s\n\n", errorStyle.Render("Error generating diff: "+err.Error()))
+		return nil
+	}
+
+	keys := GetSortedKeys(result)
+	for _, key := range keys {
+		if d, ok := diffs[key]; ok && d != "" {
+			// Print each line of the unified diff with appropriate coloring
+			// but without indentation to maintain valid unified diff format
+			lines := strings.Split(d, "\n")
+			for _, line := range lines {
+				if line == "" {
+					continue
+				}
+				switch {
+				case strings.HasPrefix(line, "+++") || strings.HasPrefix(line, "---"):
+					fmt.Fprintln(t.out, dimStyle.Render(line))
+				case strings.HasPrefix(line, "@@"):
+					fmt.Fprintln(t.out, dimStyle.Render(line))
+				case strings.HasPrefix(line, "+"):
+					fmt.Fprintln(t.out, addedStyle.Render(line))
+				case strings.HasPrefix(line, "-"):
+					fmt.Fprintln(t.out, removedStyle.Render(line))
+				default:
+					fmt.Fprintln(t.out, line)
+				}
+			}
+		}
+	}
+
+	fmt.Fprintln(t.out)
 	return nil
 }
 
@@ -175,40 +261,6 @@ func (t *TerminalWriter) writeFieldChanges(result *diff.DiffResult, indent strin
 			fmt.Fprintf(t.out, "%s%s\n", indent, modifiedStyle.Render(fmt.Sprintf("~ %s:", change.Path)))
 			fmt.Fprintf(t.out, "%s  %s\n", indent, removedStyle.Render(fmt.Sprintf("- %v", change.OldValue)))
 			fmt.Fprintf(t.out, "%s  %s\n", indent, addedStyle.Render(fmt.Sprintf("+ %v", change.NewValue)))
-		}
-	}
-}
-
-// writeUnifiedDiff writes unified diff format output.
-func (t *TerminalWriter) writeUnifiedDiff(result *diff.ManifestSetDiff, indent string) {
-	diffs, err := GenerateManifestUnifiedDiffs(result, t.contextLines)
-	if err != nil {
-		fmt.Fprintf(t.out, "%s    %s\n", indent, errorStyle.Render("Error generating diff: "+err.Error()))
-		return
-	}
-
-	keys := GetSortedKeys(result)
-	for _, key := range keys {
-		if d, ok := diffs[key]; ok && d != "" {
-			// Print each line of the unified diff with appropriate coloring
-			lines := strings.Split(d, "\n")
-			for _, line := range lines {
-				if line == "" {
-					continue
-				}
-				switch {
-				case strings.HasPrefix(line, "+++") || strings.HasPrefix(line, "---"):
-					fmt.Fprintf(t.out, "%s    %s\n", indent, dimStyle.Render(line))
-				case strings.HasPrefix(line, "@@"):
-					fmt.Fprintf(t.out, "%s    %s\n", indent, dimStyle.Render(line))
-				case strings.HasPrefix(line, "+"):
-					fmt.Fprintf(t.out, "%s    %s\n", indent, addedStyle.Render(line))
-				case strings.HasPrefix(line, "-"):
-					fmt.Fprintf(t.out, "%s    %s\n", indent, removedStyle.Render(line))
-				default:
-					fmt.Fprintf(t.out, "%s    %s\n", indent, line)
-				}
-			}
 		}
 	}
 }
@@ -290,6 +342,11 @@ func (t *TerminalWriter) WriteTree(tree *diff.AppTree) error {
 
 // WriteSummary writes the summary.
 func (t *TerminalWriter) WriteSummary(summary Summary) error {
+	// For unified diff mode, output as comments
+	if t.unifiedDiff {
+		return t.writeSummaryUnified(summary)
+	}
+
 	fmt.Fprintln(t.out, summaryStyle.Render("Summary"))
 	fmt.Fprintln(t.out, strings.Repeat("-", 40))
 
@@ -317,6 +374,42 @@ func (t *TerminalWriter) WriteSummary(summary Summary) error {
 
 	if summary.NewApplications > 0 {
 		fmt.Fprintf(t.out, "New Application CRDs discovered: %s\n",
+			addedStyle.Render(fmt.Sprintf("%d", summary.NewApplications)))
+	}
+
+	return nil
+}
+
+// writeSummaryUnified writes the summary as comments for valid unified diff format.
+func (t *TerminalWriter) writeSummaryUnified(summary Summary) error {
+	// Use titleStyle instead of summaryStyle to avoid MarginTop adding a newline
+	fmt.Fprintf(t.out, "# %s\n", titleStyle.Render("Summary"))
+	fmt.Fprintf(t.out, "# %s\n", strings.Repeat("-", 40))
+
+	fmt.Fprintf(t.out, "# Applications affected: %d\n", summary.TotalApps)
+
+	if summary.AppsWithChanges > 0 {
+		fmt.Fprintf(t.out, "# Applications changed: %s\n",
+			modifiedStyle.Render(fmt.Sprintf("%d", summary.AppsWithChanges)))
+	} else {
+		fmt.Fprintln(t.out, "# Applications changed: 0")
+	}
+
+	// Resources line (always show if there are any changes)
+	if summary.TotalAdded > 0 || summary.TotalRemoved > 0 || summary.TotalModified > 0 {
+		fmt.Fprintf(t.out, "# Resources: %s, %s, %s\n",
+			addedStyle.Render(fmt.Sprintf("+%d added", summary.TotalAdded)),
+			removedStyle.Render(fmt.Sprintf("-%d removed", summary.TotalRemoved)),
+			modifiedStyle.Render(fmt.Sprintf("~%d modified", summary.TotalModified)))
+	}
+
+	if summary.AppsWithErrors > 0 {
+		fmt.Fprintf(t.out, "# Errors: %s\n",
+			errorStyle.Render(fmt.Sprintf("%d", summary.AppsWithErrors)))
+	}
+
+	if summary.NewApplications > 0 {
+		fmt.Fprintf(t.out, "# New Application CRDs discovered: %s\n",
 			addedStyle.Render(fmt.Sprintf("%d", summary.NewApplications)))
 	}
 
