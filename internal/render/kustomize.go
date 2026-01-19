@@ -7,10 +7,16 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+
+	"sigs.k8s.io/yaml"
 
 	"github.com/rgeraskin/argocdf/internal/cluster"
 	"github.com/rgeraskin/argocdf/internal/types"
 )
+
+// KustomizationNames contains the known kustomization file names.
+var KustomizationNames = []string{"kustomization.yaml", "kustomization.yml", "Kustomization"}
 
 // KustomizeRenderer renders Kustomize directories using the kustomize binary.
 type KustomizeRenderer struct {
@@ -28,6 +34,8 @@ func (r *KustomizeRenderer) SourceType() types.SourceType {
 }
 
 // Render renders a Kustomize directory.
+// Following ArgoCD's approach, this uses `kustomize edit` commands to apply
+// Application-level overrides before running `kustomize build`.
 func (r *KustomizeRenderer) Render(app *cluster.Application, source *cluster.ApplicationSource, repoPath string) ([]byte, error) {
 	kustomizePath := filepath.Join(repoPath, source.Path)
 
@@ -37,14 +45,15 @@ func (r *KustomizeRenderer) Render(app *cluster.Application, source *cluster.App
 		return r.renderPlainYAML(kustomizePath)
 	}
 
-	args := []string{"build", kustomizePath}
-
-	// Add kustomize-specific options if present
+	// Apply kustomize-specific options using edit commands (modifies kustomization.yaml)
 	if source.Kustomize != nil {
-		args = r.addKustomizeOptions(args, source.Kustomize)
+		if err := r.applyKustomizeEdits(kustomizePath, source.Kustomize); err != nil {
+			return nil, fmt.Errorf("failed to apply kustomize edits: %w", err)
+		}
 	}
 
-	cmd := exec.Command("kustomize", args...)
+	// Run kustomize build
+	cmd := exec.Command("kustomize", "build", kustomizePath)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -56,20 +65,205 @@ func (r *KustomizeRenderer) Render(app *cluster.Application, source *cluster.App
 	return stdout.Bytes(), nil
 }
 
-// hasKustomization checks if a kustomization.yaml exists in the directory.
-func (r *KustomizeRenderer) hasKustomization(path string) bool {
-	kustomizationFiles := []string{
-		"kustomization.yaml",
-		"kustomization.yml",
-		"Kustomization",
-	}
-
-	for _, f := range kustomizationFiles {
-		if _, err := os.Stat(filepath.Join(path, f)); err == nil {
-			return true
+// applyKustomizeEdits applies Application-level kustomize options using `kustomize edit` commands.
+// This modifies the kustomization.yaml in place (changes are uncommitted and will be
+// discarded on the next git operation).
+func (r *KustomizeRenderer) applyKustomizeEdits(kustomizePath string, opts *cluster.ApplicationSourceKustomize) error {
+	// NamePrefix
+	if opts.NamePrefix != "" {
+		if err := r.runKustomizeEdit(kustomizePath, "set", "nameprefix", "--", opts.NamePrefix); err != nil {
+			return fmt.Errorf("failed to set nameprefix: %w", err)
 		}
 	}
-	return false
+
+	// NameSuffix
+	if opts.NameSuffix != "" {
+		if err := r.runKustomizeEdit(kustomizePath, "set", "namesuffix", "--", opts.NameSuffix); err != nil {
+			return fmt.Errorf("failed to set namesuffix: %w", err)
+		}
+	}
+
+	// Images
+	if len(opts.Images) > 0 {
+		args := []string{"set", "image"}
+		for _, img := range opts.Images {
+			args = append(args, string(img))
+		}
+		if err := r.runKustomizeEdit(kustomizePath, args...); err != nil {
+			return fmt.Errorf("failed to set images: %w", err)
+		}
+	}
+
+	// Replicas
+	if len(opts.Replicas) > 0 {
+		args := []string{"set", "replicas"}
+		for _, replica := range opts.Replicas {
+			count, err := replica.GetIntCount()
+			if err != nil {
+				return fmt.Errorf("failed to get replica count for %s: %w", replica.Name, err)
+			}
+			args = append(args, fmt.Sprintf("%s=%d", replica.Name, count))
+		}
+		if err := r.runKustomizeEdit(kustomizePath, args...); err != nil {
+			return fmt.Errorf("failed to set replicas: %w", err)
+		}
+	}
+
+	// CommonLabels
+	if len(opts.CommonLabels) > 0 {
+		args := []string{"add", "label"}
+		if opts.ForceCommonLabels {
+			args = append(args, "--force")
+		}
+		if opts.LabelWithoutSelector {
+			args = append(args, "--without-selector")
+		}
+		args = append(args, mapToEditAddArgs(opts.CommonLabels)...)
+		if err := r.runKustomizeEdit(kustomizePath, args...); err != nil {
+			return fmt.Errorf("failed to add labels: %w", err)
+		}
+	}
+
+	// CommonAnnotations
+	if len(opts.CommonAnnotations) > 0 {
+		args := []string{"add", "annotation"}
+		if opts.ForceCommonAnnotations {
+			args = append(args, "--force")
+		}
+		args = append(args, mapToEditAddArgs(opts.CommonAnnotations)...)
+		if err := r.runKustomizeEdit(kustomizePath, args...); err != nil {
+			return fmt.Errorf("failed to add annotations: %w", err)
+		}
+	}
+
+	// Namespace
+	if opts.Namespace != "" {
+		if err := r.runKustomizeEdit(kustomizePath, "set", "namespace", "--", opts.Namespace); err != nil {
+			return fmt.Errorf("failed to set namespace: %w", err)
+		}
+	}
+
+	// Components
+	if len(opts.Components) > 0 {
+		args := []string{"add", "component"}
+		args = append(args, opts.Components...)
+		if err := r.runKustomizeEdit(kustomizePath, args...); err != nil {
+			return fmt.Errorf("failed to add components: %w", err)
+		}
+	}
+
+	// Patches - requires direct kustomization.yaml modification (no kustomize edit command)
+	if len(opts.Patches) > 0 {
+		if err := r.applyPatches(kustomizePath, opts.Patches); err != nil {
+			return fmt.Errorf("failed to apply patches: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// runKustomizeEdit runs a `kustomize edit` command in the given directory.
+func (r *KustomizeRenderer) runKustomizeEdit(dir string, args ...string) error {
+	cmdArgs := append([]string{"edit"}, args...)
+	cmd := exec.Command("kustomize", cmdArgs...)
+	cmd.Dir = dir
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("kustomize edit %v failed: %v\nstderr: %s", args, err, stderr.String())
+	}
+	return nil
+}
+
+// mapToEditAddArgs converts a map to kustomize edit add arguments.
+// Format: key:value for each entry.
+func mapToEditAddArgs(m map[string]string) []string {
+	// Sort keys for deterministic ordering
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	args := make([]string, 0, len(m))
+	for _, k := range keys {
+		args = append(args, fmt.Sprintf("%s:%s", k, m[k]))
+	}
+	return args
+}
+
+// applyPatches adds patches to the kustomization.yaml file.
+// This is done by reading, modifying, and writing the file directly
+// since there's no `kustomize edit` command for patches.
+func (r *KustomizeRenderer) applyPatches(kustomizePath string, patches []cluster.KustomizePatch) error {
+	kustFile := r.findKustomizationFile(kustomizePath)
+	if kustFile == "" {
+		return fmt.Errorf("kustomization file not found")
+	}
+
+	kustomizationFilePath := filepath.Join(kustomizePath, kustFile)
+
+	// Read existing kustomization
+	content, err := os.ReadFile(kustomizationFilePath)
+	if err != nil {
+		return fmt.Errorf("failed to read kustomization file: %w", err)
+	}
+
+	var kustomization map[string]interface{}
+	if err := yaml.Unmarshal(content, &kustomization); err != nil {
+		return fmt.Errorf("failed to parse kustomization file: %w", err)
+	}
+
+	// Convert patches to interface slice for YAML
+	patchesInterface := make([]interface{}, len(patches))
+	for i, p := range patches {
+		patchesInterface[i] = p
+	}
+
+	// Append to existing patches or create new
+	if existingPatches, ok := kustomization["patches"]; ok {
+		if patchesList, ok := existingPatches.([]interface{}); ok {
+			kustomization["patches"] = append(patchesList, patchesInterface...)
+		} else {
+			kustomization["patches"] = patchesInterface
+		}
+	} else {
+		kustomization["patches"] = patchesInterface
+	}
+
+	// Write back
+	updatedContent, err := yaml.Marshal(kustomization)
+	if err != nil {
+		return fmt.Errorf("failed to marshal kustomization: %w", err)
+	}
+
+	info, err := os.Stat(kustomizationFilePath)
+	if err != nil {
+		return fmt.Errorf("failed to stat kustomization file: %w", err)
+	}
+
+	if err := os.WriteFile(kustomizationFilePath, updatedContent, info.Mode()); err != nil {
+		return fmt.Errorf("failed to write kustomization file: %w", err)
+	}
+
+	return nil
+}
+
+// findKustomizationFile returns the name of the kustomization file in the directory.
+func (r *KustomizeRenderer) findKustomizationFile(dir string) string {
+	for _, name := range KustomizationNames {
+		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+			return name
+		}
+	}
+	return ""
+}
+
+// hasKustomization checks if a kustomization.yaml exists in the directory.
+func (r *KustomizeRenderer) hasKustomization(path string) bool {
+	return r.findKustomizationFile(path) != ""
 }
 
 // renderPlainYAML renders plain YAML files when no kustomization exists.
@@ -110,25 +304,6 @@ func (r *KustomizeRenderer) renderPlainYAML(dirPath string) ([]byte, error) {
 func isYAMLFile(name string) bool {
 	ext := filepath.Ext(name)
 	return ext == ".yaml" || ext == ".yml"
-}
-
-// addKustomizeOptions adds Kustomize-specific options to the build command.
-func (r *KustomizeRenderer) addKustomizeOptions(args []string, kustomize *cluster.ApplicationSourceKustomize) []string {
-	// Add name prefix
-	if kustomize.NamePrefix != "" {
-		args = append(args, "--name-prefix", kustomize.NamePrefix)
-	}
-
-	// Add name suffix
-	if kustomize.NameSuffix != "" {
-		args = append(args, "--name-suffix", kustomize.NameSuffix)
-	}
-
-	// Note: Images, labels, and annotations are typically handled in the kustomization.yaml
-	// or through kustomize edit commands. The kustomize build command doesn't support
-	// all these as flags, so we'd need to modify the kustomization.yaml file for those.
-
-	return args
 }
 
 // CanRender checks if the kustomize binary is available.

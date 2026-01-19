@@ -110,25 +110,48 @@ IgnoredFields: map[string]bool{
 
 | Aspect | ArgoCD | argocdf |
 |--------|--------|---------|
+| **NamePrefix/NameSuffix** | Full support | ✅ Supported (via `kustomize edit`) |
+| **Images override** | Full support | ✅ Supported (via `kustomize edit set image`) |
+| **Replicas** | Full support | ✅ Supported (via `kustomize edit set replicas`) |
+| **CommonLabels** | Full support with force/without-selector | ✅ Supported (via `kustomize edit add label`) |
+| **CommonAnnotations** | Full support with force | ✅ Supported (via `kustomize edit add annotation`) |
+| **Namespace** | Full support | ✅ Supported (via `kustomize edit set namespace`) |
+| **Components** | Full support | ✅ Supported (via `kustomize edit add component`) |
+| **Patches** | Full support | ✅ Supported (direct kustomization.yaml modification) |
 | **`--enable-helm`** | Configurable globally or per-app | Not supported |
-| **Build options** | Configurable via `kustomize.buildOptions` | Only `--name-prefix` and `--name-suffix` |
-| **Images override** | `--images` flag support | Not supported |
-| **Labels/annotations** | `--common-labels`, `--common-annotations` | Not supported |
+| **Build options** | Configurable via `kustomize.buildOptions` | Not supported |
 | **Load restrictor** | Configurable | Not supported |
 
-### Missing Kustomize features:
+### Implementation approach:
+
+argocdf uses `kustomize edit` commands to apply Application-level overrides before running `kustomize build`, matching ArgoCD's approach. This modifies the kustomization.yaml in place (changes are uncommitted and discarded on git operations).
 
 ```yaml
-# ArgoCD supports these via Application spec:
+# Fully supported via Application spec:
 spec:
   source:
     kustomize:
+      namePrefix: "prod-"
+      nameSuffix: "-v2"
       images:
         - nginx:1.21
+      replicas:
+        - name: deployment
+          count: 3
       commonLabels:
         app: myapp
       commonAnnotations:
         team: platform
+      namespace: production
+      components:
+        - ../components/monitoring
+      patches:
+        - patch: |-
+            - op: replace
+              path: /spec/replicas
+              value: 5
+          target:
+            kind: Deployment
 ```
 
 ## 7. Multi-Source Applications

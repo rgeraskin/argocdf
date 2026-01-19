@@ -23,14 +23,23 @@ var ApplicationGVR = schema.GroupVersionResource{
 
 // Type aliases for ArgoCD types - provides cleaner imports for consumers.
 type (
-	Application               = argoapp.Application
-	ApplicationSpec           = argoapp.ApplicationSpec
-	ApplicationSource         = argoapp.ApplicationSource
-	ApplicationSourceHelm     = argoapp.ApplicationSourceHelm
-	HelmParameter             = argoapp.HelmParameter
-	HelmFileParameter         = argoapp.HelmFileParameter
+	Application                = argoapp.Application
+	ApplicationSpec            = argoapp.ApplicationSpec
+	ApplicationSource          = argoapp.ApplicationSource
+	ApplicationSourceHelm      = argoapp.ApplicationSourceHelm
+	HelmParameter              = argoapp.HelmParameter
+	HelmFileParameter          = argoapp.HelmFileParameter
 	ApplicationSourceKustomize = argoapp.ApplicationSourceKustomize
-	ApplicationDestination    = argoapp.ApplicationDestination
+	ApplicationDestination     = argoapp.ApplicationDestination
+
+	// Kustomize-related types
+	KustomizePatch    = argoapp.KustomizePatch
+	KustomizePatches  = argoapp.KustomizePatches
+	KustomizeReplica  = argoapp.KustomizeReplica
+	KustomizeReplicas = argoapp.KustomizeReplicas
+	KustomizeImage    = argoapp.KustomizeImage
+	KustomizeImages   = argoapp.KustomizeImages
+	KustomizeSelector = argoapp.KustomizeSelector
 )
 
 // ApplicationService provides operations on ArgoCD Applications.
