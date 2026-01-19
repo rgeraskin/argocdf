@@ -31,6 +31,11 @@ type RenderOptions struct {
 
 	// RefSources maps ref names to cloned repository paths for multi-source apps
 	RefSources map[string]string
+
+	// Kustomize build options (defaults from CLI)
+	KustomizeEnableHelm     bool
+	KustomizeBuildOptions   string
+	KustomizeLoadRestrictor string
 }
 
 // RenderResult contains the result of rendering an application.

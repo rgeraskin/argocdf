@@ -34,6 +34,11 @@ var (
 	noRecursive    bool
 	maxDepth       int
 	unifiedContext int
+
+	// Kustomize build options
+	kustomizeEnableHelm     bool
+	kustomizeBuildOptions   string
+	kustomizeLoadRestrictor string
 )
 
 func main() {
@@ -98,6 +103,14 @@ Examples:
 	// Rendering flags
 	rootCmd.Flags().StringVar(&kubeVersion, "kube-version", "", "Kubernetes version for rendering (auto-detected)")
 
+	// Kustomize build options
+	rootCmd.Flags().BoolVar(&kustomizeEnableHelm, "kustomize-enable-helm", false,
+		"Enable Helm chart inflation via kustomize --enable-helm")
+	rootCmd.Flags().StringVar(&kustomizeBuildOptions, "kustomize-build-options", "",
+		"Additional kustomize build options (space-separated)")
+	rootCmd.Flags().StringVar(&kustomizeLoadRestrictor, "kustomize-load-restrictor", "",
+		"Load restrictor mode (e.g., 'LoadRestrictionsNone')")
+
 	// Output flags
 	rootCmd.Flags().StringVar(&stdoutFormat, "stdout", config.DefaultStdoutFormat,
 		"Terminal output format: fields, summary, unified, none (set ARGOCDF_EXTERNAL_DIFF for side-by-side)")
@@ -161,20 +174,23 @@ func runMain(cmd *cobra.Command, args []string) error {
 
 	// Build configuration
 	cfg := &config.Config{
-		KubeconfigPath: kubeconfigPath,
-		Context:        kubeContext,
-		Namespace:      namespace,
-		AllNamespaces:  allNamespaces,
-		RepoPath:       repoPath,
-		RepoURL:        repoURL,
-		BaseBranch:     baseBranch,
-		TargetBranch:   targetBranch,
-		KubeVersion:    kubeVersion,
-		StdoutFormat:   stdoutFormat,
-		FileOutputs:    parsedFileOutputs,
-		NoRecursive:    noRecursive,
-		MaxDepth:       maxDepth,
-		UnifiedContext: unifiedContext,
+		KubeconfigPath:          kubeconfigPath,
+		Context:                 kubeContext,
+		Namespace:               namespace,
+		AllNamespaces:           allNamespaces,
+		RepoPath:                repoPath,
+		RepoURL:                 repoURL,
+		BaseBranch:              baseBranch,
+		TargetBranch:            targetBranch,
+		KubeVersion:             kubeVersion,
+		StdoutFormat:            stdoutFormat,
+		FileOutputs:             parsedFileOutputs,
+		NoRecursive:             noRecursive,
+		MaxDepth:                maxDepth,
+		UnifiedContext:          unifiedContext,
+		KustomizeEnableHelm:     kustomizeEnableHelm,
+		KustomizeBuildOptions:   kustomizeBuildOptions,
+		KustomizeLoadRestrictor: kustomizeLoadRestrictor,
 	}
 
 	// Auto-detect missing values

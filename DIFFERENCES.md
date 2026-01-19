@@ -118,9 +118,9 @@ IgnoredFields: map[string]bool{
 | **Namespace** | Full support | ✅ Supported (via `kustomize edit set namespace`) |
 | **Components** | Full support | ✅ Supported (via `kustomize edit add component`) |
 | **Patches** | Full support | ✅ Supported (direct kustomization.yaml modification) |
-| **`--enable-helm`** | Configurable globally or per-app | Not supported |
-| **Build options** | Configurable via `kustomize.buildOptions` | Not supported |
-| **Load restrictor** | Configurable | Not supported |
+| **`--enable-helm`** | Configurable globally or per-app | ✅ Supported via `--kustomize-enable-helm` CLI flag |
+| **Build options** | Configurable via `kustomize.buildOptions` | ✅ Supported via `--kustomize-build-options` CLI flag |
+| **Load restrictor** | Configurable | ✅ Supported via `--kustomize-load-restrictor` CLI flag |
 
 ### Implementation approach:
 
@@ -265,7 +265,6 @@ argocdf only does two-way diff (base branch vs target branch), missing this nuan
 | CMP support | Medium | High |
 | ApplicationSet | Medium | High |
 | Helm hook filtering | Low | Low |
-| Kustomize `--enable-helm` | Low | Low |
 | Retry logic | Low | Low |
 
 ## 13. Implementation Approach: Reuse vs Reimplementation

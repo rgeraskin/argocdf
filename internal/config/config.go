@@ -50,6 +50,11 @@ type Config struct {
 
 	// Unified diff settings
 	UnifiedContext int // Number of context lines in unified diff output
+
+	// Kustomize build options (CLI defaults)
+	KustomizeEnableHelm     bool
+	KustomizeBuildOptions   string
+	KustomizeLoadRestrictor string
 }
 
 // ParseFileOutput parses a "format:path" string into a FileOutput.

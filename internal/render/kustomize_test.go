@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -613,5 +614,82 @@ spec:
 	// Verify labels were applied
 	if !strings.Contains(content, "env: production") {
 		t.Errorf("labels not applied, got:\n%s", content)
+	}
+}
+
+func TestBuildKustomizeArgs(t *testing.T) {
+	tests := []struct {
+		name     string
+		opts     RenderOptions
+		path     string
+		expected []string
+	}{
+		{
+			name:     "no options",
+			opts:     RenderOptions{},
+			path:     "/path/to/kustomize",
+			expected: []string{"build", "/path/to/kustomize"},
+		},
+		{
+			name: "enable helm",
+			opts: RenderOptions{
+				KustomizeEnableHelm: true,
+			},
+			path:     "/path/to/kustomize",
+			expected: []string{"build", "/path/to/kustomize", "--enable-helm"},
+		},
+		{
+			name: "load restrictor",
+			opts: RenderOptions{
+				KustomizeLoadRestrictor: "LoadRestrictionsNone",
+			},
+			path:     "/path/to/kustomize",
+			expected: []string{"build", "/path/to/kustomize", "--load-restrictor", "LoadRestrictionsNone"},
+		},
+		{
+			name: "single build option",
+			opts: RenderOptions{
+				KustomizeBuildOptions: "--reorder none",
+			},
+			path:     "/path/to/kustomize",
+			expected: []string{"build", "/path/to/kustomize", "--reorder", "none"},
+		},
+		{
+			name: "multiple build options",
+			opts: RenderOptions{
+				KustomizeBuildOptions: "--reorder none --enable-alpha-plugins",
+			},
+			path:     "/path/to/kustomize",
+			expected: []string{"build", "/path/to/kustomize", "--reorder", "none", "--enable-alpha-plugins"},
+		},
+		{
+			name: "all options combined",
+			opts: RenderOptions{
+				KustomizeEnableHelm:     true,
+				KustomizeLoadRestrictor: "LoadRestrictionsNone",
+				KustomizeBuildOptions:   "--reorder none",
+			},
+			path:     "/path/to/kustomize",
+			expected: []string{"build", "/path/to/kustomize", "--enable-helm", "--load-restrictor", "LoadRestrictionsNone", "--reorder", "none"},
+		},
+		{
+			name: "build options with extra spaces",
+			opts: RenderOptions{
+				KustomizeBuildOptions: "  --reorder   none  ",
+			},
+			path:     "/path/to/kustomize",
+			expected: []string{"build", "/path/to/kustomize", "--reorder", "none"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			renderer := NewKustomizeRenderer(tt.opts)
+			result := renderer.buildKustomizeArgs(tt.path)
+
+			if !reflect.DeepEqual(result, tt.expected) {
+				t.Errorf("buildKustomizeArgs() = %v, want %v", result, tt.expected)
+			}
+		})
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"sigs.k8s.io/yaml"
 
@@ -53,7 +54,7 @@ func (r *KustomizeRenderer) Render(app *cluster.Application, source *cluster.App
 	}
 
 	// Run kustomize build
-	cmd := exec.Command("kustomize", "build", kustomizePath)
+	cmd := exec.Command("kustomize", r.buildKustomizeArgs(kustomizePath)...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -160,6 +161,23 @@ func (r *KustomizeRenderer) applyKustomizeEdits(kustomizePath string, opts *clus
 	}
 
 	return nil
+}
+
+// buildKustomizeArgs constructs the arguments for kustomize build.
+func (r *KustomizeRenderer) buildKustomizeArgs(path string) []string {
+	args := []string{"build", path}
+
+	if r.opts.KustomizeEnableHelm {
+		args = append(args, "--enable-helm")
+	}
+	if r.opts.KustomizeLoadRestrictor != "" {
+		args = append(args, "--load-restrictor", r.opts.KustomizeLoadRestrictor)
+	}
+	if r.opts.KustomizeBuildOptions != "" {
+		args = append(args, strings.Fields(r.opts.KustomizeBuildOptions)...)
+	}
+
+	return args
 }
 
 // runKustomizeEdit runs a `kustomize edit` command in the given directory.

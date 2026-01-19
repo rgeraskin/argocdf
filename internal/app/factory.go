@@ -44,8 +44,11 @@ func (f *Factory) CreateRepository() (*git.Repository, error) {
 // CreateRenderFactory creates a render factory.
 func (f *Factory) CreateRenderFactory(kubeVersion string) *render.Factory {
 	opts := render.RenderOptions{
-		RepoPath:    f.config.RepoPath,
-		KubeVersion: kubeVersion,
+		RepoPath:                f.config.RepoPath,
+		KubeVersion:             kubeVersion,
+		KustomizeEnableHelm:     f.config.KustomizeEnableHelm,
+		KustomizeBuildOptions:   f.config.KustomizeBuildOptions,
+		KustomizeLoadRestrictor: f.config.KustomizeLoadRestrictor,
 	}
 	return render.NewFactory(opts)
 }
