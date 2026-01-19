@@ -599,6 +599,256 @@ spec:
 	}
 }
 
+// TestParseApplicationSpec_HelmConfig verifies that all Helm config fields are correctly parsed.
+// This is a regression test for the bug where parameters and fileParameters were not being parsed.
+func TestParseApplicationSpec_HelmConfig(t *testing.T) {
+	discoverer := NewAppDiscoverer()
+
+	content := `apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: helm-app
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/example/repo.git
+    path: charts/my-app
+    targetRevision: HEAD
+    helm:
+      releaseName: my-release
+      version: "1.2.3"
+      valueFiles:
+        - values.yaml
+        - values-prod.yaml
+      values: |
+        replicaCount: 3
+      parameters:
+        - name: image.tag
+          value: v1.0.0
+        - name: service.port
+          value: "8080"
+          forceString: true
+      fileParameters:
+        - name: config.data
+          path: config.json
+        - name: secrets.data
+          path: secrets.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: default
+`
+
+	apps, err := discoverer.DiscoverApplications(content)
+	if err != nil {
+		t.Fatalf("DiscoverApplications() error = %v", err)
+	}
+	if len(apps) != 1 {
+		t.Fatalf("DiscoverApplications() got %d apps, want 1", len(apps))
+	}
+
+	app := apps[0]
+	if app.Spec.Source == nil {
+		t.Fatal("Spec.Source is nil")
+	}
+	if app.Spec.Source.Helm == nil {
+		t.Fatal("Spec.Source.Helm is nil")
+	}
+
+	helm := app.Spec.Source.Helm
+
+	// Check releaseName
+	if helm.ReleaseName != "my-release" {
+		t.Errorf("Helm.ReleaseName = %s, want my-release", helm.ReleaseName)
+	}
+
+	// Check version
+	if helm.Version != "1.2.3" {
+		t.Errorf("Helm.Version = %s, want 1.2.3", helm.Version)
+	}
+
+	// Check valueFiles
+	if len(helm.ValueFiles) != 2 {
+		t.Errorf("Helm.ValueFiles length = %d, want 2", len(helm.ValueFiles))
+	} else {
+		if helm.ValueFiles[0] != "values.yaml" {
+			t.Errorf("Helm.ValueFiles[0] = %s, want values.yaml", helm.ValueFiles[0])
+		}
+		if helm.ValueFiles[1] != "values-prod.yaml" {
+			t.Errorf("Helm.ValueFiles[1] = %s, want values-prod.yaml", helm.ValueFiles[1])
+		}
+	}
+
+	// Check inline values
+	if helm.Values == "" {
+		t.Error("Helm.Values is empty")
+	}
+
+	// Check parameters (this was the bug!)
+	if len(helm.Parameters) != 2 {
+		t.Errorf("Helm.Parameters length = %d, want 2", len(helm.Parameters))
+	} else {
+		if helm.Parameters[0].Name != "image.tag" || helm.Parameters[0].Value != "v1.0.0" {
+			t.Errorf("Helm.Parameters[0] = {%s, %s}, want {image.tag, v1.0.0}",
+				helm.Parameters[0].Name, helm.Parameters[0].Value)
+		}
+		if helm.Parameters[1].Name != "service.port" || helm.Parameters[1].Value != "8080" {
+			t.Errorf("Helm.Parameters[1] = {%s, %s}, want {service.port, 8080}",
+				helm.Parameters[1].Name, helm.Parameters[1].Value)
+		}
+		if !helm.Parameters[1].ForceString {
+			t.Error("Helm.Parameters[1].ForceString should be true")
+		}
+	}
+
+	// Check fileParameters (this was also the bug!)
+	if len(helm.FileParameters) != 2 {
+		t.Errorf("Helm.FileParameters length = %d, want 2", len(helm.FileParameters))
+	} else {
+		if helm.FileParameters[0].Name != "config.data" || helm.FileParameters[0].Path != "config.json" {
+			t.Errorf("Helm.FileParameters[0] = {%s, %s}, want {config.data, config.json}",
+				helm.FileParameters[0].Name, helm.FileParameters[0].Path)
+		}
+		if helm.FileParameters[1].Name != "secrets.data" || helm.FileParameters[1].Path != "secrets.yaml" {
+			t.Errorf("Helm.FileParameters[1] = {%s, %s}, want {secrets.data, secrets.yaml}",
+				helm.FileParameters[1].Name, helm.FileParameters[1].Path)
+		}
+	}
+}
+
+// TestParseApplicationSpec_KustomizeConfig verifies that Kustomize config is correctly parsed.
+func TestParseApplicationSpec_KustomizeConfig(t *testing.T) {
+	discoverer := NewAppDiscoverer()
+
+	content := `apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kustomize-app
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/example/repo.git
+    path: overlays/prod
+    targetRevision: HEAD
+    kustomize:
+      namePrefix: prod-
+      nameSuffix: -v1
+      images:
+        - nginx:1.21
+        - redis:6.2
+      commonLabels:
+        env: production
+        team: platform
+      commonAnnotations:
+        owner: devops
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: default
+`
+
+	apps, err := discoverer.DiscoverApplications(content)
+	if err != nil {
+		t.Fatalf("DiscoverApplications() error = %v", err)
+	}
+	if len(apps) != 1 {
+		t.Fatalf("DiscoverApplications() got %d apps, want 1", len(apps))
+	}
+
+	app := apps[0]
+	if app.Spec.Source == nil {
+		t.Fatal("Spec.Source is nil")
+	}
+	if app.Spec.Source.Kustomize == nil {
+		t.Fatal("Spec.Source.Kustomize is nil")
+	}
+
+	kust := app.Spec.Source.Kustomize
+
+	if kust.NamePrefix != "prod-" {
+		t.Errorf("Kustomize.NamePrefix = %s, want prod-", kust.NamePrefix)
+	}
+	if kust.NameSuffix != "-v1" {
+		t.Errorf("Kustomize.NameSuffix = %s, want -v1", kust.NameSuffix)
+	}
+	if len(kust.Images) != 2 {
+		t.Errorf("Kustomize.Images length = %d, want 2", len(kust.Images))
+	}
+	if len(kust.CommonLabels) != 2 {
+		t.Errorf("Kustomize.CommonLabels length = %d, want 2", len(kust.CommonLabels))
+	}
+	if kust.CommonLabels["env"] != "production" {
+		t.Errorf("Kustomize.CommonLabels[env] = %s, want production", kust.CommonLabels["env"])
+	}
+}
+
+// TestParseApplicationSpec_MultiSource verifies that multi-source applications are correctly parsed.
+func TestParseApplicationSpec_MultiSource(t *testing.T) {
+	discoverer := NewAppDiscoverer()
+
+	content := `apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: multi-source-app
+  namespace: argocd
+spec:
+  project: default
+  sources:
+    - repoURL: https://github.com/example/repo.git
+      path: base
+      targetRevision: HEAD
+      ref: values
+    - repoURL: https://charts.example.com
+      chart: my-chart
+      targetRevision: 1.0.0
+      helm:
+        releaseName: my-release
+        valueFiles:
+          - $values/values.yaml
+        parameters:
+          - name: env
+            value: prod
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: default
+`
+
+	apps, err := discoverer.DiscoverApplications(content)
+	if err != nil {
+		t.Fatalf("DiscoverApplications() error = %v", err)
+	}
+	if len(apps) != 1 {
+		t.Fatalf("DiscoverApplications() got %d apps, want 1", len(apps))
+	}
+
+	app := apps[0]
+	if len(app.Spec.Sources) != 2 {
+		t.Fatalf("Spec.Sources length = %d, want 2", len(app.Spec.Sources))
+	}
+
+	// Check first source (ref source)
+	src1 := app.Spec.Sources[0]
+	if src1.Ref != "values" {
+		t.Errorf("Sources[0].Ref = %s, want values", src1.Ref)
+	}
+
+	// Check second source (helm chart)
+	src2 := app.Spec.Sources[1]
+	if src2.Chart != "my-chart" {
+		t.Errorf("Sources[1].Chart = %s, want my-chart", src2.Chart)
+	}
+	if src2.Helm == nil {
+		t.Fatal("Sources[1].Helm is nil")
+	}
+	if len(src2.Helm.Parameters) != 1 {
+		t.Errorf("Sources[1].Helm.Parameters length = %d, want 1", len(src2.Helm.Parameters))
+	}
+	if src2.Helm.Parameters[0].Name != "env" || src2.Helm.Parameters[0].Value != "prod" {
+		t.Errorf("Sources[1].Helm.Parameters[0] = {%s, %s}, want {env, prod}",
+			src2.Helm.Parameters[0].Name, src2.Helm.Parameters[0].Value)
+	}
+}
+
 func TestAppDiffQueue(t *testing.T) {
 	t.Run("basic queue operations", func(t *testing.T) {
 		queue := NewAppDiffQueue(10)

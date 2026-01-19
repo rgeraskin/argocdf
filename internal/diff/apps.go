@@ -2,6 +2,7 @@
 package diff
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -63,75 +64,21 @@ func (d *AppDiscoverer) DiscoverApplications(content string) ([]DiscoveredApplic
 	return apps, nil
 }
 
-// parseApplicationSpec parses a spec map into ApplicationSpec.
+// parseApplicationSpec parses a spec map into ApplicationSpec using JSON round-trip.
+// This approach automatically handles all fields (including nested Helm/Kustomize configs)
+// without needing to manually extract each field.
 func parseApplicationSpec(specMap map[string]interface{}) cluster.ApplicationSpec {
 	spec := cluster.ApplicationSpec{}
 
-	// Parse destination
-	if dest, ok := specMap["destination"].(map[string]interface{}); ok {
-		spec.Destination = cluster.ApplicationDest{
-			Server:    getStringFromMap(dest, "server"),
-			Namespace: getStringFromMap(dest, "namespace"),
-			Name:      getStringFromMap(dest, "name"),
-		}
+	// Marshal the map to JSON, then unmarshal into the typed struct
+	// This handles all fields automatically, including nested structures
+	data, err := json.Marshal(specMap)
+	if err != nil {
+		return spec
 	}
-
-	// Parse source (single)
-	if source, ok := specMap["source"].(map[string]interface{}); ok {
-		src := parseSource(source)
-		spec.Source = &src
-	}
-
-	// Parse sources (multiple)
-	if sources, ok := specMap["sources"].([]interface{}); ok {
-		for _, s := range sources {
-			if srcMap, ok := s.(map[string]interface{}); ok {
-				spec.Sources = append(spec.Sources, parseSource(srcMap))
-			}
-		}
-	}
-
-	spec.Project = getStringFromMap(specMap, "project")
+	_ = json.Unmarshal(data, &spec)
 
 	return spec
-}
-
-// parseSource parses a source map into ApplicationSource.
-func parseSource(srcMap map[string]interface{}) cluster.ApplicationSource {
-	src := cluster.ApplicationSource{
-		RepoURL:        getStringFromMap(srcMap, "repoURL"),
-		Path:           getStringFromMap(srcMap, "path"),
-		TargetRevision: getStringFromMap(srcMap, "targetRevision"),
-		Chart:          getStringFromMap(srcMap, "chart"),
-		Ref:            getStringFromMap(srcMap, "ref"),
-	}
-
-	// Parse helm config if present
-	if helm, ok := srcMap["helm"].(map[string]interface{}); ok {
-		src.Helm = &cluster.ApplicationSourceHelm{
-			ReleaseName: getStringFromMap(helm, "releaseName"),
-			Values:      getStringFromMap(helm, "values"),
-		}
-		if valueFiles, ok := helm["valueFiles"].([]interface{}); ok {
-			for _, vf := range valueFiles {
-				if s, ok := vf.(string); ok {
-					src.Helm.ValueFiles = append(src.Helm.ValueFiles, s)
-				}
-			}
-		}
-	}
-
-	return src
-}
-
-// getStringFromMap safely extracts a string from a map.
-func getStringFromMap(m map[string]interface{}, key string) string {
-	if v, ok := m[key]; ok {
-		if s, ok := v.(string); ok {
-			return s
-		}
-	}
-	return ""
 }
 
 // FindNewApplications compares old and new manifests to find newly added Applications.
