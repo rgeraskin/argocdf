@@ -3,6 +3,7 @@ package render
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -27,7 +28,8 @@ func NewMultiSourceRenderer(factory *Factory, repoPath string) *MultiSourceRende
 }
 
 // RenderMultiSource renders an application with multiple sources.
-func (r *MultiSourceRenderer) RenderMultiSource(app *cluster.Application) ([]byte, error) {
+// The context can be used to cancel long-running render operations.
+func (r *MultiSourceRenderer) RenderMultiSource(ctx context.Context, app *cluster.Application) ([]byte, error) {
 	sources := app.Spec.GetSources()
 	if len(sources) == 0 {
 		return nil, fmt.Errorf("no sources defined for application")
@@ -47,13 +49,20 @@ func (r *MultiSourceRenderer) RenderMultiSource(app *cluster.Application) ([]byt
 	// Second pass: render non-ref sources
 	var allManifests bytes.Buffer
 	for i, source := range sources {
+		// Check context before each render
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
 		// Skip ref sources - they don't produce manifests
 		if source.IsRef() {
 			continue
 		}
 
 		renderer := r.factory.GetRenderer(&sources[i], r.repoPath)
-		manifests, err := renderer.Render(app, &sources[i], r.repoPath)
+		manifests, err := renderer.Render(ctx, app, &sources[i], r.repoPath)
 		if err != nil {
 			return nil, fmt.Errorf("failed to render source %d: %w", i, err)
 		}

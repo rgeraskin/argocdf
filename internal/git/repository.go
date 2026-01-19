@@ -2,7 +2,6 @@
 package git
 
 import (
-	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -33,22 +32,12 @@ func (r *Repository) Path() string {
 
 // run executes a git command and returns stdout.
 func (r *Repository) run(args ...string) (string, error) {
-	cmd := exec.Command("git", append([]string{"-C", r.path}, args...)...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("git %s failed: %v\nstderr: %s", args[0], err, stderr.String())
-	}
-
-	return strings.TrimSpace(stdout.String()), nil
+	return runGitCommand(r.path, args...)
 }
 
 // runSilent executes a git command and returns whether it succeeded.
 func (r *Repository) runSilent(args ...string) bool {
-	cmd := exec.Command("git", append([]string{"-C", r.path}, args...)...)
-	return cmd.Run() == nil
+	return runGitCommandBool(r.path, args...)
 }
 
 // Head returns the current HEAD commit hash.

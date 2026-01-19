@@ -224,7 +224,7 @@ func (q *AppDiffQueue) ProcessedCount() int {
 // AppTree structures the diff results into a tree based on parent-child relationships.
 type AppTree struct {
 	Root     []*AppTreeNode
-	AllNodes map[string]*AppTreeNode
+	allNodes map[string]*AppTreeNode
 }
 
 // AppTreeNode represents a node in the application tree.
@@ -237,13 +237,13 @@ type AppTreeNode struct {
 func NewAppTree(diffs []*types.AppDiff) *AppTree {
 	tree := &AppTree{
 		Root:     make([]*AppTreeNode, 0),
-		AllNodes: make(map[string]*AppTreeNode),
+		allNodes: make(map[string]*AppTreeNode),
 	}
 
 	// Create nodes for all apps
 	for _, d := range diffs {
 		key := fmt.Sprintf("%s/%s", d.Namespace, d.Name)
-		tree.AllNodes[key] = &AppTreeNode{
+		tree.allNodes[key] = &AppTreeNode{
 			AppDiff:  d,
 			Children: make([]*AppTreeNode, 0),
 		}
@@ -252,21 +252,20 @@ func NewAppTree(diffs []*types.AppDiff) *AppTree {
 	// Build parent-child relationships
 	for _, d := range diffs {
 		key := fmt.Sprintf("%s/%s", d.Namespace, d.Name)
-		node := tree.AllNodes[key]
+		node := tree.allNodes[key]
 
 		if d.ParentAppName == "" {
 			// Root node
 			tree.Root = append(tree.Root, node)
 		} else {
 			// Find parent and add as child
-			for parentKey, parentNode := range tree.AllNodes {
+			for _, parentNode := range tree.allNodes {
 				if parentAppDiff, ok := parentNode.AppDiff.(*types.AppDiff); ok {
 					if parentAppDiff.Name == d.ParentAppName {
 						parentNode.Children = append(parentNode.Children, node)
 						break
 					}
 				}
-				_ = parentKey // unused
 			}
 		}
 	}

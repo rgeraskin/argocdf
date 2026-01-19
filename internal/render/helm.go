@@ -3,6 +3,7 @@ package render
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -30,9 +31,17 @@ func (r *HelmRenderer) SourceType() types.SourceType {
 }
 
 // Render renders a Helm chart source.
-func (r *HelmRenderer) Render(app *cluster.Application, source *cluster.ApplicationSource, repoPath string) ([]byte, error) {
+// The context can be used to cancel long-running helm template operations.
+func (r *HelmRenderer) Render(ctx context.Context, app *cluster.Application, source *cluster.ApplicationSource, repoPath string) ([]byte, error) {
+	// Check context before starting
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+
 	// Determine chart location and build args
-	args, tempDir, err := r.buildArgs(app, source, repoPath)
+	args, tempDir, err := r.buildArgs(ctx, app, source, repoPath)
 	if err != nil {
 		return nil, err
 	}
@@ -44,18 +53,21 @@ func (r *HelmRenderer) Render(app *cluster.Application, source *cluster.Applicat
 	// For local charts, ensure dependencies are built
 	if source.Path != "" {
 		chartPath := filepath.Join(repoPath, source.Path)
-		if err := r.ensureDependencies(chartPath); err != nil {
+		if err := r.ensureDependencies(ctx, chartPath); err != nil {
 			return nil, fmt.Errorf("failed to build dependencies: %w", err)
 		}
 	}
 
-	// Run helm template
-	cmd := exec.Command("helm", args...)
+	// Run helm template with context
+	cmd := exec.CommandContext(ctx, "helm", args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, fmt.Errorf("helm template failed: %v\nstderr: %s", err, stderr.String())
 	}
 
@@ -63,7 +75,7 @@ func (r *HelmRenderer) Render(app *cluster.Application, source *cluster.Applicat
 }
 
 // buildArgs builds the helm template command arguments.
-func (r *HelmRenderer) buildArgs(app *cluster.Application, source *cluster.ApplicationSource, repoPath string) ([]string, string, error) {
+func (r *HelmRenderer) buildArgs(ctx context.Context, app *cluster.Application, source *cluster.ApplicationSource, repoPath string) ([]string, string, error) {
 	var tempDir string
 
 	// Determine release name
@@ -77,7 +89,7 @@ func (r *HelmRenderer) buildArgs(app *cluster.Application, source *cluster.Appli
 	// Determine chart location
 	if source.Chart != "" {
 		// Remote chart from repository
-		chartRef, tempDirPath, err := r.handleRemoteChart(source)
+		chartRef, tempDirPath, err := r.handleRemoteChart(ctx, source)
 		if err != nil {
 			return nil, "", err
 		}
@@ -115,7 +127,7 @@ func (r *HelmRenderer) buildArgs(app *cluster.Application, source *cluster.Appli
 }
 
 // handleRemoteChart handles fetching a chart from a remote repository.
-func (r *HelmRenderer) handleRemoteChart(source *cluster.ApplicationSource) (string, string, error) {
+func (r *HelmRenderer) handleRemoteChart(ctx context.Context, source *cluster.ApplicationSource) (string, string, error) {
 	repoURL := source.RepoURL
 
 	if strings.HasPrefix(repoURL, "oci://") {
@@ -137,9 +149,9 @@ func (r *HelmRenderer) handleRemoteChart(source *cluster.ApplicationSource) (str
 	// Generate a unique repo name
 	repoName := "argocdf-temp-" + source.Chart
 
-	// Add the repo
+	// Add the repo with context
 	addArgs := []string{"repo", "add", repoName, repoURL, "--force-update"}
-	addCmd := exec.Command("helm", addArgs...)
+	addCmd := exec.CommandContext(ctx, "helm", addArgs...)
 	addCmd.Env = append(os.Environ(),
 		"HELM_CACHE_HOME="+filepath.Join(tempDir, "cache"),
 		"HELM_CONFIG_HOME="+filepath.Join(tempDir, "config"),
@@ -147,15 +159,21 @@ func (r *HelmRenderer) handleRemoteChart(source *cluster.ApplicationSource) (str
 	)
 	if output, err := addCmd.CombinedOutput(); err != nil {
 		os.RemoveAll(tempDir)
+		if ctx.Err() != nil {
+			return "", "", ctx.Err()
+		}
 		return "", "", fmt.Errorf("failed to add helm repo: %v\noutput: %s", err, output)
 	}
 
-	// Update the repo
+	// Update the repo with context
 	updateArgs := []string{"repo", "update", repoName}
-	updateCmd := exec.Command("helm", updateArgs...)
+	updateCmd := exec.CommandContext(ctx, "helm", updateArgs...)
 	updateCmd.Env = addCmd.Env
 	if output, err := updateCmd.CombinedOutput(); err != nil {
 		os.RemoveAll(tempDir)
+		if ctx.Err() != nil {
+			return "", "", ctx.Err()
+		}
 		return "", "", fmt.Errorf("failed to update helm repo: %v\noutput: %s", err, output)
 	}
 
@@ -273,7 +291,7 @@ func ParseKubeVersion(version string) (major, minor string, err error) {
 // It runs `helm dependency build` if:
 // 1. Chart.yaml exists with a dependencies section
 // 2. The charts/ directory is missing or empty
-func (r *HelmRenderer) ensureDependencies(chartPath string) error {
+func (r *HelmRenderer) ensureDependencies(ctx context.Context, chartPath string) error {
 	// Check if Chart.yaml exists
 	chartYamlPath := filepath.Join(chartPath, "Chart.yaml")
 	if _, err := os.Stat(chartYamlPath); os.IsNotExist(err) {
@@ -302,12 +320,15 @@ func (r *HelmRenderer) ensureDependencies(chartPath string) error {
 		return nil
 	}
 
-	// Run helm dependency build
-	cmd := exec.Command("helm", "dependency", "build", chartPath)
+	// Run helm dependency build with context
+	cmd := exec.CommandContext(ctx, "helm", "dependency", "build", chartPath)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return fmt.Errorf("helm dependency build failed: %v\nstderr: %s", err, stderr.String())
 	}
 

@@ -2,13 +2,9 @@
 package diff
 
 import (
-	"bytes"
 	"fmt"
 	"reflect"
 	"sort"
-	"strings"
-
-	"gopkg.in/yaml.v3"
 )
 
 // DiffResult contains the result of comparing two Kubernetes objects.
@@ -198,43 +194,5 @@ func (d *Differ) compareSlices(path string, oldSlice, newSlice []interface{}, re
 		}
 
 		d.compareValues(indexPath, oldVal, newVal, result)
-	}
-}
-
-// FormatASCIIDiff formats the diff result as a human-readable string.
-func FormatASCIIDiff(result *DiffResult) string {
-	if !result.Modified {
-		return ""
-	}
-
-	var buf bytes.Buffer
-	for _, change := range result.Changes {
-		switch change.Type {
-		case ChangeTypeAdded:
-			buf.WriteString(fmt.Sprintf("+ %s: %v\n", change.Path, formatValue(change.NewValue)))
-		case ChangeTypeRemoved:
-			buf.WriteString(fmt.Sprintf("- %s: %v\n", change.Path, formatValue(change.OldValue)))
-		case ChangeTypeModified:
-			buf.WriteString(fmt.Sprintf("~ %s:\n", change.Path))
-			buf.WriteString(fmt.Sprintf("  - %v\n", formatValue(change.OldValue)))
-			buf.WriteString(fmt.Sprintf("  + %v\n", formatValue(change.NewValue)))
-		}
-	}
-	return buf.String()
-}
-
-// formatValue formats a value for display.
-func formatValue(v interface{}) string {
-	switch val := v.(type) {
-	case string:
-		if strings.Contains(val, "\n") {
-			return fmt.Sprintf("%q", val)
-		}
-		return val
-	case map[string]interface{}, []interface{}:
-		data, _ := yaml.Marshal(val)
-		return strings.TrimSpace(string(data))
-	default:
-		return fmt.Sprintf("%v", val)
 	}
 }

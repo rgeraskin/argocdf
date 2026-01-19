@@ -1,6 +1,7 @@
 package render
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -414,7 +415,7 @@ resources: []
 	}
 
 	// Run kustomize edit set nameprefix
-	err = renderer.runKustomizeEdit(tempDir, "set", "nameprefix", "--", "test-")
+	err = renderer.runKustomizeEdit(context.Background(), tempDir, "set", "nameprefix", "--", "test-")
 	if err != nil {
 		t.Fatalf("runKustomizeEdit() error = %v", err)
 	}
@@ -451,7 +452,7 @@ resources: []
 	}
 
 	// Run kustomize edit set image
-	err = renderer.runKustomizeEdit(tempDir, "set", "image", "nginx=nginx:1.21")
+	err = renderer.runKustomizeEdit(context.Background(), tempDir, "set", "image", "nginx=nginx:1.21")
 	if err != nil {
 		t.Fatalf("runKustomizeEdit() error = %v", err)
 	}
@@ -488,7 +489,7 @@ resources: []
 	}
 
 	// Run kustomize edit add label
-	err = renderer.runKustomizeEdit(tempDir, "add", "label", "app:myapp")
+	err = renderer.runKustomizeEdit(context.Background(), tempDir, "add", "label", "app:myapp")
 	if err != nil {
 		t.Fatalf("runKustomizeEdit() error = %v", err)
 	}
@@ -525,7 +526,7 @@ resources: []
 	}
 
 	// Run kustomize edit set namespace
-	err = renderer.runKustomizeEdit(tempDir, "set", "namespace", "--", "production")
+	err = renderer.runKustomizeEdit(context.Background(), tempDir, "set", "namespace", "--", "production")
 	if err != nil {
 		t.Fatalf("runKustomizeEdit() error = %v", err)
 	}
@@ -599,7 +600,7 @@ spec:
 	}
 
 	// Render
-	result, err := renderer.Render(app, source, tempDir)
+	result, err := renderer.Render(context.Background(), app, source, tempDir)
 	if err != nil {
 		t.Fatalf("Render() error = %v", err)
 	}

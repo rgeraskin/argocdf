@@ -300,7 +300,7 @@ func (a *App) processOneApp(ctx context.Context, queuedApp *diff.QueuedApp) (*ty
 	// Render from base branch using old spec
 	var renderedOld []byte
 	err := a.repo.WithBranch(a.cfg.BaseBranch, func() error {
-		result, err := a.renderer.RenderApplication(appOld, a.repo.Path())
+		result, err := a.renderer.RenderApplication(ctx, appOld, a.repo.Path())
 		if err != nil {
 			return err
 		}
@@ -315,7 +315,7 @@ func (a *App) processOneApp(ctx context.Context, queuedApp *diff.QueuedApp) (*ty
 	// Render from target branch using new spec
 	var renderedNew []byte
 	err = a.repo.WithBranch(a.cfg.TargetBranch, func() error {
-		result, err := a.renderer.RenderApplication(appNew, a.repo.Path())
+		result, err := a.renderer.RenderApplication(ctx, appNew, a.repo.Path())
 		if err != nil {
 			return err
 		}

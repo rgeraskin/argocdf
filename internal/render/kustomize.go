@@ -3,6 +3,7 @@ package render
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -37,7 +38,15 @@ func (r *KustomizeRenderer) SourceType() types.SourceType {
 // Render renders a Kustomize directory.
 // Following ArgoCD's approach, this uses `kustomize edit` commands to apply
 // Application-level overrides before running `kustomize build`.
-func (r *KustomizeRenderer) Render(app *cluster.Application, source *cluster.ApplicationSource, repoPath string) ([]byte, error) {
+// The context can be used to cancel long-running kustomize operations.
+func (r *KustomizeRenderer) Render(ctx context.Context, app *cluster.Application, source *cluster.ApplicationSource, repoPath string) ([]byte, error) {
+	// Check context before starting
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+
 	kustomizePath := filepath.Join(repoPath, source.Path)
 
 	// Verify kustomization.yaml exists
@@ -48,18 +57,21 @@ func (r *KustomizeRenderer) Render(app *cluster.Application, source *cluster.App
 
 	// Apply kustomize-specific options using edit commands (modifies kustomization.yaml)
 	if source.Kustomize != nil {
-		if err := r.applyKustomizeEdits(kustomizePath, source.Kustomize); err != nil {
+		if err := r.applyKustomizeEdits(ctx, kustomizePath, source.Kustomize); err != nil {
 			return nil, fmt.Errorf("failed to apply kustomize edits: %w", err)
 		}
 	}
 
-	// Run kustomize build
-	cmd := exec.Command("kustomize", r.buildKustomizeArgs(kustomizePath)...)
+	// Run kustomize build with context
+	cmd := exec.CommandContext(ctx, "kustomize", r.buildKustomizeArgs(kustomizePath)...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, fmt.Errorf("kustomize build failed: %v\nstderr: %s", err, stderr.String())
 	}
 
@@ -69,17 +81,17 @@ func (r *KustomizeRenderer) Render(app *cluster.Application, source *cluster.App
 // applyKustomizeEdits applies Application-level kustomize options using `kustomize edit` commands.
 // This modifies the kustomization.yaml in place (changes are uncommitted and will be
 // discarded on the next git operation).
-func (r *KustomizeRenderer) applyKustomizeEdits(kustomizePath string, opts *cluster.ApplicationSourceKustomize) error {
+func (r *KustomizeRenderer) applyKustomizeEdits(ctx context.Context, kustomizePath string, opts *cluster.ApplicationSourceKustomize) error {
 	// NamePrefix
 	if opts.NamePrefix != "" {
-		if err := r.runKustomizeEdit(kustomizePath, "set", "nameprefix", "--", opts.NamePrefix); err != nil {
+		if err := r.runKustomizeEdit(ctx, kustomizePath, "set", "nameprefix", "--", opts.NamePrefix); err != nil {
 			return fmt.Errorf("failed to set nameprefix: %w", err)
 		}
 	}
 
 	// NameSuffix
 	if opts.NameSuffix != "" {
-		if err := r.runKustomizeEdit(kustomizePath, "set", "namesuffix", "--", opts.NameSuffix); err != nil {
+		if err := r.runKustomizeEdit(ctx, kustomizePath, "set", "namesuffix", "--", opts.NameSuffix); err != nil {
 			return fmt.Errorf("failed to set namesuffix: %w", err)
 		}
 	}
@@ -90,7 +102,7 @@ func (r *KustomizeRenderer) applyKustomizeEdits(kustomizePath string, opts *clus
 		for _, img := range opts.Images {
 			args = append(args, string(img))
 		}
-		if err := r.runKustomizeEdit(kustomizePath, args...); err != nil {
+		if err := r.runKustomizeEdit(ctx, kustomizePath, args...); err != nil {
 			return fmt.Errorf("failed to set images: %w", err)
 		}
 	}
@@ -105,7 +117,7 @@ func (r *KustomizeRenderer) applyKustomizeEdits(kustomizePath string, opts *clus
 			}
 			args = append(args, fmt.Sprintf("%s=%d", replica.Name, count))
 		}
-		if err := r.runKustomizeEdit(kustomizePath, args...); err != nil {
+		if err := r.runKustomizeEdit(ctx, kustomizePath, args...); err != nil {
 			return fmt.Errorf("failed to set replicas: %w", err)
 		}
 	}
@@ -120,7 +132,7 @@ func (r *KustomizeRenderer) applyKustomizeEdits(kustomizePath string, opts *clus
 			args = append(args, "--without-selector")
 		}
 		args = append(args, mapToEditAddArgs(opts.CommonLabels)...)
-		if err := r.runKustomizeEdit(kustomizePath, args...); err != nil {
+		if err := r.runKustomizeEdit(ctx, kustomizePath, args...); err != nil {
 			return fmt.Errorf("failed to add labels: %w", err)
 		}
 	}
@@ -132,14 +144,14 @@ func (r *KustomizeRenderer) applyKustomizeEdits(kustomizePath string, opts *clus
 			args = append(args, "--force")
 		}
 		args = append(args, mapToEditAddArgs(opts.CommonAnnotations)...)
-		if err := r.runKustomizeEdit(kustomizePath, args...); err != nil {
+		if err := r.runKustomizeEdit(ctx, kustomizePath, args...); err != nil {
 			return fmt.Errorf("failed to add annotations: %w", err)
 		}
 	}
 
 	// Namespace
 	if opts.Namespace != "" {
-		if err := r.runKustomizeEdit(kustomizePath, "set", "namespace", "--", opts.Namespace); err != nil {
+		if err := r.runKustomizeEdit(ctx, kustomizePath, "set", "namespace", "--", opts.Namespace); err != nil {
 			return fmt.Errorf("failed to set namespace: %w", err)
 		}
 	}
@@ -148,7 +160,7 @@ func (r *KustomizeRenderer) applyKustomizeEdits(kustomizePath string, opts *clus
 	if len(opts.Components) > 0 {
 		args := []string{"add", "component"}
 		args = append(args, opts.Components...)
-		if err := r.runKustomizeEdit(kustomizePath, args...); err != nil {
+		if err := r.runKustomizeEdit(ctx, kustomizePath, args...); err != nil {
 			return fmt.Errorf("failed to add components: %w", err)
 		}
 	}
@@ -181,15 +193,18 @@ func (r *KustomizeRenderer) buildKustomizeArgs(path string) []string {
 }
 
 // runKustomizeEdit runs a `kustomize edit` command in the given directory.
-func (r *KustomizeRenderer) runKustomizeEdit(dir string, args ...string) error {
+func (r *KustomizeRenderer) runKustomizeEdit(ctx context.Context, dir string, args ...string) error {
 	cmdArgs := append([]string{"edit"}, args...)
-	cmd := exec.Command("kustomize", cmdArgs...)
+	cmd := exec.CommandContext(ctx, "kustomize", cmdArgs...)
 	cmd.Dir = dir
 
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return fmt.Errorf("kustomize edit %v failed: %v\nstderr: %s", args, err, stderr.String())
 	}
 	return nil

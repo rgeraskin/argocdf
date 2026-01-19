@@ -2,6 +2,7 @@
 package render
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 
@@ -12,7 +13,8 @@ import (
 // Renderer defines the interface for rendering ArgoCD application manifests.
 type Renderer interface {
 	// Render renders the manifests for an application source.
-	Render(app *cluster.Application, source *cluster.ApplicationSource, repoPath string) ([]byte, error)
+	// The context can be used to cancel long-running render operations.
+	Render(ctx context.Context, app *cluster.Application, source *cluster.ApplicationSource, repoPath string) ([]byte, error)
 
 	// SourceType returns the type of source this renderer handles.
 	SourceType() types.SourceType
@@ -86,7 +88,8 @@ func (f *Factory) GetRenderer(source *cluster.ApplicationSource, repoPath string
 }
 
 // RenderApplication renders all sources for an application and combines the output.
-func (f *Factory) RenderApplication(app *cluster.Application, repoPath string) (*RenderResult, error) {
+// The context can be used to cancel long-running render operations.
+func (f *Factory) RenderApplication(ctx context.Context, app *cluster.Application, repoPath string) (*RenderResult, error) {
 	sources := app.Spec.GetSources()
 	if len(sources) == 0 {
 		return &RenderResult{
@@ -97,7 +100,7 @@ func (f *Factory) RenderApplication(app *cluster.Application, repoPath string) (
 	// For single source apps, render directly
 	if len(sources) == 1 && !sources[0].IsRef() {
 		renderer := f.GetRenderer(&sources[0], repoPath)
-		manifests, err := renderer.Render(app, &sources[0], repoPath)
+		manifests, err := renderer.Render(ctx, app, &sources[0], repoPath)
 		return &RenderResult{
 			Manifests:  manifests,
 			SourceType: renderer.SourceType(),
@@ -107,7 +110,7 @@ func (f *Factory) RenderApplication(app *cluster.Application, repoPath string) (
 
 	// For multi-source apps, we need to handle ref sources
 	msRenderer := NewMultiSourceRenderer(f, repoPath)
-	manifests, err := msRenderer.RenderMultiSource(app)
+	manifests, err := msRenderer.RenderMultiSource(ctx, app)
 	return &RenderResult{
 		Manifests:  manifests,
 		SourceType: types.SourceTypeHelm, // Multi-source typically uses Helm

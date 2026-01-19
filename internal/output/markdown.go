@@ -25,7 +25,7 @@ const (
 
 // MarkdownWriter writes diff output as GitHub-compatible markdown.
 type MarkdownWriter struct {
-	file         *os.File
+	baseFileWriter
 	format       MarkdownFormat
 	summaryOnly  bool
 	contextLines int // for unified diff context in md-unified format
@@ -42,9 +42,9 @@ func NewMarkdownWriter(filePath string, format MarkdownFormat, contextLines int)
 	}
 
 	return &MarkdownWriter{
-		file:         file,
-		format:       format,
-		contextLines: contextLines,
+		baseFileWriter: baseFileWriter{file: file},
+		format:         format,
+		contextLines:   contextLines,
 	}, nil
 }
 
@@ -329,10 +329,5 @@ func (m *MarkdownWriter) WriteFooter() error {
 
 // Flush flushes and closes the file.
 func (m *MarkdownWriter) Flush() error {
-	return m.file.Close()
-}
-
-// write is a helper to write strings.
-func (m *MarkdownWriter) write(s string) {
-	io.WriteString(m.file, s)
+	return m.close()
 }

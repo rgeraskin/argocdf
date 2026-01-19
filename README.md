@@ -44,46 +44,82 @@ argocdf --context my-cluster
 # Scan all namespaces for ArgoCD applications
 argocdf --all-namespaces
 
-# Generate HTML report
-argocdf --output both --html-file report.html
+# Quiet mode with markdown file output
+argocdf -q -f md-fields:pr-comment.md
 
-# Show only summary (no detailed diff)
-argocdf --summary-only
+# Multiple file outputs
+argocdf -f md-fields:pr.md -f html-side-by-side:report.html
 
-# Side-by-side diff using external tool
-export KUBECTL_EXTERNAL_DIFF="delta --side-by-side --hunk-header-style=omit --file-style=omit"
-argocdf --side-by-side
+# Unified diff for patch workflows
+argocdf --stdout unified
+argocdf -f unified:changes.patch
 
-# Generate GitHub-compatible output for PR comments
-argocdf --output html --github --html-file diff.md
+# Summary only in terminal
+argocdf --stdout summary
+
+# Use external diff tool for side-by-side view
+ARGOCDF_EXTERNAL_DIFF="delta --side-by-side" argocdf
 ```
 
 ## Flags
 
+### Kubernetes Flags
+
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
 | `--kubeconfig` | `-k` | Path to kubeconfig file | `~/.kube/config` |
-| `--context` | | Kubernetes context | `pp-admin-aws` |
+| `--context` | | Kubernetes context to use | (from kubeconfig) |
 | `--namespace` | `-n` | ArgoCD namespace to search | `argocd` |
 | `--all-namespaces` | `-A` | Search all namespaces | `false` |
-| `--repo` | `-r` | Path to git repository | Current directory |
+
+### Git Flags
+
+| Flag | Short | Description | Default |
+|------|-------|-------------|---------|
+| `--repo-dir` | `-r` | Path to git repository | Current directory |
+| `--repo-url` | | Repository URL for matching ArgoCD apps | Auto-detected |
 | `--base` | | Base branch for comparison | `main` or `master` |
 | `--target` | | Target branch for comparison | Current HEAD |
-| `--kube-version` | | Kubernetes version for rendering | Auto-detected |
-| `--output` | `-o` | Output format: terminal, html, both | `terminal` |
-| `--html-file` | | HTML output file path | `argocdf-report.html` |
-| `--no-recursive` | | Disable apps-of-apps recursion | `false` |
-| `--max-depth` | | Maximum recursion depth | `10` |
-| `--side-by-side` | | Show side-by-side YAML diff | `false` |
-| `--summary-only` | | Show only affected apps without detailed diff | `false` |
-| `--github` | | Output GitHub-compatible markdown (pasteable to PR comments) | `false` |
 
-## GitHub PR Comments
+### Rendering Flags
 
-Use the `--github` flag to generate output that can be pasted directly into GitHub PR comments:
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--kube-version` | Kubernetes version for rendering | Auto-detected |
+| `--kustomize-enable-helm` | Enable Helm chart inflation via kustomize | `false` |
+| `--kustomize-build-options` | Additional kustomize build options (space-separated) | (none) |
+| `--kustomize-load-restrictor` | Load restrictor mode (e.g., `LoadRestrictionsNone`) | (none) |
+
+### Output Flags
+
+| Flag | Short | Description | Default |
+|------|-------|-------------|---------|
+| `--stdout` | | Terminal output format: `fields`, `summary`, `unified`, `none` | `fields` |
+| `--file` | `-f` | File output in `format:path` (can be repeated) | (none) |
+| `--quiet` | `-q` | Suppress terminal output (same as `--stdout none`) | `false` |
+| `--context-lines` | `-U` | Number of context lines in unified diff output (-1 for unlimited) | `3` |
+
+**File output formats:**
+- `md-fields` - GitHub-flavored markdown with field-level diffs
+- `md-unified` - Markdown with unified diff format
+- `html-side-by-side` - Interactive HTML with side-by-side diff
+- `unified` - Patch-compatible unified diff
+
+### Recursion Flags
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--no-recursive` | Disable apps-of-apps recursion | `false` |
+| `--max-depth` | Maximum recursion depth | `10` |
+
+## Output Examples
+
+### GitHub PR Comments
+
+Generate markdown output for GitHub PR comments:
 
 ```bash
-argocdf --output html --github --html-file diff.md
+argocdf -q -f md-fields:diff.md
 cat diff.md  # Copy and paste into GitHub PR comment
 ```
 
@@ -91,37 +127,29 @@ The output uses:
 - GitHub-flavored markdown with collapsible `<details>` sections
 - Emoji badges for change types (🟢 added, 🔴 removed, 🟡 modified)
 - `diff` code blocks for syntax-highlighted changes
-- Markdown tables for the summary
 
-## Side-by-Side Diff
+### Side-by-Side Diff
 
-The `--side-by-side` flag enables a side-by-side diff view similar to the ArgoCD web UI.
-
-### Terminal Output
-
-For terminal output, argocdf uses the `KUBECTL_EXTERNAL_DIFF` environment variable (following kubectl's convention). Set this to your preferred diff tool:
+For terminal side-by-side diff, set the `ARGOCDF_EXTERNAL_DIFF` environment variable to your preferred diff tool:
 
 **Recommended setup with [delta](https://github.com/dandavison/delta):**
 ```bash
-export KUBECTL_EXTERNAL_DIFF="delta --side-by-side --hunk-header-style=omit --file-style=omit"
+export ARGOCDF_EXTERNAL_DIFF="delta --side-by-side --hunk-header-style=omit --file-style=omit"
+argocdf
 ```
 
 **Alternative with [difftastic](https://github.com/Wilfred/difftastic):**
 ```bash
-export KUBECTL_EXTERNAL_DIFF="difft --display side-by-side-show-both"
-```
-
-Then run:
-```bash
-argocdf --side-by-side
+export ARGOCDF_EXTERNAL_DIFF="difft --display side-by-side-show-both"
+argocdf
 ```
 
 ### HTML Output
 
-For HTML output, `--side-by-side` uses [diff2html](https://diff2html.xyz/) to render GitHub-style side-by-side diffs with syntax highlighting:
+Generate an interactive HTML report with side-by-side diffs:
 
 ```bash
-argocdf --output html --side-by-side --html-file report.html
+argocdf -f html-side-by-side:report.html
 ```
 
 ## How It Works

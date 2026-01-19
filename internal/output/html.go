@@ -15,10 +15,9 @@ import (
 
 // HTMLWriter writes diff output as an HTML report.
 type HTMLWriter struct {
-	file        *os.File
+	baseFileWriter
 	sideBySide  bool
 	summaryOnly bool
-	diffCount   int // Counter for unique diff IDs
 }
 
 // NewHTMLWriter creates a new HTMLWriter.
@@ -32,9 +31,9 @@ func NewHTMLWriter(filePath string, sideBySide, summaryOnly, _ bool) (*HTMLWrite
 	}
 
 	return &HTMLWriter{
-		file:        file,
-		sideBySide:  sideBySide,
-		summaryOnly: summaryOnly,
+		baseFileWriter: baseFileWriter{file: file},
+		sideBySide:     sideBySide,
+		summaryOnly:    summaryOnly,
 	}, nil
 }
 
@@ -457,10 +456,5 @@ func (h *HTMLWriter) WriteFooter() error {
 
 // Flush flushes and closes the file.
 func (h *HTMLWriter) Flush() error {
-	return h.file.Close()
-}
-
-// write is a helper to write strings.
-func (h *HTMLWriter) write(s string) {
-	io.WriteString(h.file, s)
+	return h.close()
 }

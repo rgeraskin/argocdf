@@ -2,7 +2,6 @@
 package config
 
 import (
-	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,26 +10,6 @@ import (
 
 	"github.com/rgeraskin/argocdf/internal/git"
 )
-
-// runGit executes a git command in the specified directory.
-func runGit(dir string, args ...string) (string, error) {
-	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("git %s failed: %v\nstderr: %s", args[0], err, stderr.String())
-	}
-
-	return strings.TrimSpace(stdout.String()), nil
-}
-
-// runGitSilent executes a git command and returns whether it succeeded.
-func runGitSilent(dir string, args ...string) bool {
-	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-	return cmd.Run() == nil
-}
 
 // DetectRepoPath attempts to find the git repository root from the current directory.
 func DetectRepoPath() (string, error) {
@@ -55,13 +34,13 @@ func DetectBaseBranch(repoPath string) (string, error) {
 	branchNames := []string{"main", "master"}
 
 	for _, name := range branchNames {
-		if runGitSilent(repoPath, "rev-parse", "--verify", "refs/heads/"+name) {
+		if git.RunGitCommandBool(repoPath, "rev-parse", "--verify", "refs/heads/"+name) {
 			return name, nil
 		}
 	}
 
 	// Try to get default branch from remote
-	output, err := runGit(repoPath, "symbolic-ref", "refs/remotes/origin/HEAD")
+	output, err := git.RunGitCommand(repoPath, "symbolic-ref", "refs/remotes/origin/HEAD")
 	if err == nil {
 		// Output like: refs/remotes/origin/main
 		parts := strings.Split(output, "/")
@@ -76,13 +55,13 @@ func DetectBaseBranch(repoPath string) (string, error) {
 // DetectTargetBranch returns the current branch name (HEAD).
 func DetectTargetBranch(repoPath string) (string, error) {
 	// Try to get branch name
-	output, err := runGit(repoPath, "symbolic-ref", "--short", "HEAD")
+	output, err := git.RunGitCommand(repoPath, "symbolic-ref", "--short", "HEAD")
 	if err == nil {
 		return output, nil
 	}
 
 	// Detached HEAD - return short hash
-	output, err = runGit(repoPath, "rev-parse", "--short", "HEAD")
+	output, err = git.RunGitCommand(repoPath, "rev-parse", "--short", "HEAD")
 	if err != nil {
 		return "", fmt.Errorf("failed to get HEAD: %w", err)
 	}
@@ -92,7 +71,7 @@ func DetectTargetBranch(repoPath string) (string, error) {
 
 // DetectRepoURL attempts to find the remote URL for the repository.
 func DetectRepoURL(repoPath string) (string, error) {
-	output, err := runGit(repoPath, "remote", "get-url", "origin")
+	output, err := git.RunGitCommand(repoPath, "remote", "get-url", "origin")
 	if err != nil {
 		return "", fmt.Errorf("no remote URL found")
 	}

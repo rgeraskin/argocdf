@@ -15,7 +15,7 @@ import (
 // UnifiedWriter writes diff output in unified diff format to a file.
 // This format is compatible with patch(1) and can be used with diff viewers.
 type UnifiedWriter struct {
-	file         *os.File
+	baseFileWriter
 	contextLines int // Number of context lines for unified diff
 }
 
@@ -28,8 +28,8 @@ func NewUnifiedWriter(filePath string, contextLines int) (*UnifiedWriter, error)
 	}
 
 	return &UnifiedWriter{
-		file:         file,
-		contextLines: contextLines,
+		baseFileWriter: baseFileWriter{file: file},
+		contextLines:   contextLines,
 	}, nil
 }
 
@@ -119,10 +119,5 @@ func (u *UnifiedWriter) WriteFooter() error {
 
 // Flush flushes and closes the file.
 func (u *UnifiedWriter) Flush() error {
-	return u.file.Close()
-}
-
-// write is a helper to write strings.
-func (u *UnifiedWriter) write(s string) {
-	io.WriteString(u.file, s)
+	return u.close()
 }
