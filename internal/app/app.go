@@ -109,7 +109,7 @@ func (a *App) initialize(ctx context.Context) error {
 		kubeVersion, err = a.kubeClient.GetKubeVersion(ctx)
 		if err != nil {
 			a.logger.Warn("Failed to get cluster version, using default", "error", err)
-			kubeVersion = "1.29.0"
+			kubeVersion = config.DefaultKubeVersionFallback
 		}
 	}
 	a.logger.Debug("Using Kubernetes version", "version", kubeVersion)

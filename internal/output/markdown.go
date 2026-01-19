@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"html"
 	"io"
-	"os"
 	"strings"
 	"time"
 
@@ -36,13 +35,13 @@ type MarkdownWriter struct {
 // NewMarkdownWriter creates a new MarkdownWriter.
 // contextLines specifies the number of context lines for unified diff format (md-unified).
 func NewMarkdownWriter(filePath string, format MarkdownFormat, contextLines int) (*MarkdownWriter, error) {
-	file, err := os.Create(filePath)
+	base, err := newBaseFileWriter(filePath, "markdown")
 	if err != nil {
-		return nil, fmt.Errorf("failed to create markdown file: %w", err)
+		return nil, err
 	}
 
 	return &MarkdownWriter{
-		baseFileWriter: baseFileWriter{file: file},
+		baseFileWriter: base,
 		format:         format,
 		contextLines:   contextLines,
 	}, nil

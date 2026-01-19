@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"html"
 	"io"
-	"os"
 	"strings"
 	"time"
 
@@ -25,13 +24,13 @@ type HTMLWriter struct {
 // The summaryOnly parameter controls whether to show only summary without details.
 // The third parameter is kept for backward compatibility but is ignored (use MarkdownWriter for markdown).
 func NewHTMLWriter(filePath string, sideBySide, summaryOnly, _ bool) (*HTMLWriter, error) {
-	file, err := os.Create(filePath)
+	base, err := newBaseFileWriter(filePath, "HTML")
 	if err != nil {
-		return nil, fmt.Errorf("failed to create HTML file: %w", err)
+		return nil, err
 	}
 
 	return &HTMLWriter{
-		baseFileWriter: baseFileWriter{file: file},
+		baseFileWriter: base,
 		sideBySide:     sideBySide,
 		summaryOnly:    summaryOnly,
 	}, nil

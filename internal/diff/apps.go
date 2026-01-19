@@ -10,6 +10,11 @@ import (
 	"github.com/rgeraskin/argocdf/internal/types"
 )
 
+// appKey returns a unique key for an application in the format "namespace/name".
+func appKey(namespace, name string) string {
+	return fmt.Sprintf("%s/%s", namespace, name)
+}
+
 // AppDiscoverer discovers new applications from rendered manifests.
 type AppDiscoverer struct {
 	parser *ManifestParser
@@ -96,14 +101,14 @@ func (d *AppDiscoverer) FindNewApplications(oldContent, newContent string) ([]Di
 	// Build set of old app names
 	oldNames := make(map[string]bool)
 	for _, app := range oldApps {
-		key := fmt.Sprintf("%s/%s", app.Namespace, app.Name)
+		key := appKey(app.Namespace, app.Name)
 		oldNames[key] = true
 	}
 
 	// Find apps that are in new but not in old
 	var newlyAdded []DiscoveredApplication
 	for _, app := range newApps {
-		key := fmt.Sprintf("%s/%s", app.Namespace, app.Name)
+		key := appKey(app.Namespace, app.Name)
 		if !oldNames[key] {
 			newlyAdded = append(newlyAdded, app)
 		}
@@ -136,14 +141,14 @@ func (d *AppDiscoverer) FindModifiedApplications(oldContent, newContent string) 
 	// Build map of old apps by key
 	oldAppMap := make(map[string]DiscoveredApplication)
 	for _, app := range oldApps {
-		key := fmt.Sprintf("%s/%s", app.Namespace, app.Name)
+		key := appKey(app.Namespace, app.Name)
 		oldAppMap[key] = app
 	}
 
 	// Find apps that exist in both but have different raw YAML (indicating changes)
 	var modified []ModifiedApplication
 	for _, newApp := range newApps {
-		key := fmt.Sprintf("%s/%s", newApp.Namespace, newApp.Name)
+		key := appKey(newApp.Namespace, newApp.Name)
 		if oldApp, exists := oldAppMap[key]; exists {
 			// Compare raw YAML to detect any changes
 			if oldApp.RawYAML != newApp.RawYAML {
@@ -173,8 +178,8 @@ type QueuedApp struct {
 	Namespace string
 	Depth     int
 	ParentApp string
-	Spec      *cluster.ApplicationSpec    // Spec to use for target branch (also for base if OldSpec is nil)
-	OldSpec   *cluster.ApplicationSpec    // Optional: spec to use for base branch (for modified child apps)
+	Spec      *cluster.ApplicationSpec // Spec to use for target branch (also for base if OldSpec is nil)
+	OldSpec   *cluster.ApplicationSpec // Optional: spec to use for base branch (for modified child apps)
 }
 
 // NewAppDiffQueue creates a new AppDiffQueue.
@@ -188,7 +193,7 @@ func NewAppDiffQueue(maxDepth int) *AppDiffQueue {
 
 // Add adds an application to the queue if not already processed.
 func (q *AppDiffQueue) Add(app QueuedApp) bool {
-	key := fmt.Sprintf("%s/%s", app.Namespace, app.Name)
+	key := appKey(app.Namespace, app.Name)
 	if q.processed[key] {
 		return false
 	}
@@ -206,7 +211,7 @@ func (q *AppDiffQueue) Next() *QueuedApp {
 	}
 	app := q.pending[0]
 	q.pending = q.pending[1:]
-	key := fmt.Sprintf("%s/%s", app.Namespace, app.Name)
+	key := appKey(app.Namespace, app.Name)
 	q.processed[key] = true
 	return &app
 }
@@ -242,7 +247,7 @@ func NewAppTree(diffs []*types.AppDiff) *AppTree {
 
 	// Create nodes for all apps
 	for _, d := range diffs {
-		key := fmt.Sprintf("%s/%s", d.Namespace, d.Name)
+		key := appKey(d.Namespace, d.Name)
 		tree.allNodes[key] = &AppTreeNode{
 			AppDiff:  d,
 			Children: make([]*AppTreeNode, 0),
@@ -251,7 +256,7 @@ func NewAppTree(diffs []*types.AppDiff) *AppTree {
 
 	// Build parent-child relationships
 	for _, d := range diffs {
-		key := fmt.Sprintf("%s/%s", d.Namespace, d.Name)
+		key := appKey(d.Namespace, d.Name)
 		node := tree.allNodes[key]
 
 		if d.ParentAppName == "" {

@@ -53,9 +53,13 @@ func (p *ManifestParser) ParseManifests(content string) ([]Manifest, error) {
 			break
 		}
 		if err != nil {
-			continue // Skip invalid documents
+			// Skip invalid YAML documents silently.
+			// This commonly happens with empty documents or document separators (---).
+			// Debug logging would require propagating a logger through the parser.
+			continue
 		}
 		if rawObj == nil {
+			// Skip empty/null documents (e.g., just "---" or "---\n---")
 			continue
 		}
 
@@ -74,7 +78,8 @@ func (p *ManifestParser) ParseManifests(content string) ([]Manifest, error) {
 		}
 
 		// Skip if not a valid Kubernetes object
-		if manifest.APIVersion == "" || manifest.Kind == "" {
+		// Require apiVersion, kind, and name to be present
+		if manifest.APIVersion == "" || manifest.Kind == "" || manifest.Name == "" {
 			continue
 		}
 

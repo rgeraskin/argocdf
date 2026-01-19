@@ -4,7 +4,6 @@ package output
 import (
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"time"
 
@@ -22,13 +21,13 @@ type UnifiedWriter struct {
 // NewUnifiedWriter creates a new UnifiedWriter.
 // contextLines specifies the number of unchanged lines to show around changes.
 func NewUnifiedWriter(filePath string, contextLines int) (*UnifiedWriter, error) {
-	file, err := os.Create(filePath)
+	base, err := newBaseFileWriter(filePath, "unified diff")
 	if err != nil {
-		return nil, fmt.Errorf("failed to create unified diff file: %w", err)
+		return nil, err
 	}
 
 	return &UnifiedWriter{
-		baseFileWriter: baseFileWriter{file: file},
+		baseFileWriter: base,
 		contextLines:   contextLines,
 	}, nil
 }

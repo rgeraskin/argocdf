@@ -2,6 +2,7 @@
 package output
 
 import (
+	"fmt"
 	"io"
 	"os"
 )
@@ -10,6 +11,16 @@ import (
 // Embed this in concrete writer types to avoid duplicating file operations.
 type baseFileWriter struct {
 	file *os.File
+}
+
+// newBaseFileWriter creates a new baseFileWriter for the given file path.
+// fileType is used in the error message to describe what kind of file (e.g., "HTML", "markdown").
+func newBaseFileWriter(filePath, fileType string) (baseFileWriter, error) {
+	file, err := os.Create(filePath)
+	if err != nil {
+		return baseFileWriter{}, fmt.Errorf("failed to create %s file: %w", fileType, err)
+	}
+	return baseFileWriter{file: file}, nil
 }
 
 // write is a helper to write strings to the file.

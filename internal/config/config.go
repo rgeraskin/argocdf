@@ -10,11 +10,17 @@ import (
 
 // Default values for configuration.
 const (
-	DefaultContext        = "pp-admin-aws"
+	// DefaultContext is empty to use kubectl's current context by default.
+	// This is more portable than hardcoding a specific context name.
+	DefaultContext        = ""
 	DefaultNamespace      = "argocd"
 	DefaultStdoutFormat   = "fields"
 	DefaultMaxDepth       = 10
 	DefaultUnifiedContext = 3 // Standard unified diff context lines
+
+	// DefaultKubeVersionFallback is the Kubernetes version used for Helm rendering
+	// when the cluster version cannot be detected.
+	DefaultKubeVersionFallback = "1.29.0"
 )
 
 // FileOutput represents a single file output specification.
@@ -85,7 +91,7 @@ func ParseFileOutput(spec string) (FileOutput, error) {
 // New creates a new Config with default values.
 func New() *Config {
 	return &Config{
-		Context:      DefaultContext,
+		// Context is left empty to use kubectl's current context
 		Namespace:    DefaultNamespace,
 		StdoutFormat: DefaultStdoutFormat,
 		MaxDepth:     DefaultMaxDepth,
@@ -135,9 +141,8 @@ func (c *Config) Validate() error {
 
 // WithDefaults fills in any missing values with sensible defaults.
 func (c *Config) WithDefaults() *Config {
-	if c.Context == "" {
-		c.Context = DefaultContext
-	}
+	// Note: Context is intentionally not defaulted here.
+	// Empty context means kubectl will use the current context from kubeconfig.
 	if c.Namespace == "" {
 		c.Namespace = DefaultNamespace
 	}

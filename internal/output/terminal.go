@@ -327,8 +327,20 @@ func (t *TerminalWriter) runExternalDiff(cmdParts []string, oldContent, newConte
 	cmd.Stdout = t.out
 	cmd.Stderr = os.Stderr
 
-	// Run the command (ignore exit code as diff returns non-zero when files differ)
-	cmd.Run()
+	// Run the command
+	// Exit code 0 = files identical, exit code 1 = files differ (both expected)
+	// Exit code >1 indicates an actual error
+	if err := cmd.Run(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			// Exit code 1 is expected when files differ
+			if exitErr.ExitCode() > 1 {
+				fmt.Fprintf(t.out, "%s      %s\n", indent, errorStyle.Render("External diff failed: "+err.Error()))
+			}
+		} else {
+			// Non-exit error (e.g., command not found)
+			fmt.Fprintf(t.out, "%s      %s\n", indent, errorStyle.Render("External diff failed: "+err.Error()))
+		}
+	}
 }
 
 // WriteTree writes the full application tree.

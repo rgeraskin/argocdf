@@ -14,6 +14,7 @@
       "Bash(go run:*)",
       "Bash(go test:*)",
       "Bash(go vet:*)",
+      "Bash(gofmt:*)",
       "Bash(grep:*)",
       "Bash(make:*)",
       "Bash(tee:*)",

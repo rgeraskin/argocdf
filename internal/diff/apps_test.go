@@ -10,11 +10,11 @@ func TestDiscoverApplications(t *testing.T) {
 	discoverer := NewAppDiscoverer()
 
 	tests := []struct {
-		name        string
-		content     string
-		wantCount   int
-		wantNames   []string
-		wantErr     bool
+		name      string
+		content   string
+		wantCount int
+		wantNames []string
+		wantErr   bool
 	}{
 		{
 			name:      "empty content",

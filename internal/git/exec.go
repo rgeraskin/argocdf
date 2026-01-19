@@ -31,13 +31,15 @@ func runGitCommandBool(dir string, args ...string) bool {
 }
 
 // RunGitCommand executes a git command in the specified directory and returns stdout.
-// This is the exported version for use by other packages.
+// This is the exported version for use by other packages (e.g., config/detect.go for
+// auto-detecting repository information like remote URL and branches).
 func RunGitCommand(dir string, args ...string) (string, error) {
 	return runGitCommand(dir, args...)
 }
 
 // RunGitCommandBool executes a git command and returns whether it succeeded.
-// This is the exported version for use by other packages.
+// This is the exported version for use by other packages (e.g., config/detect.go for
+// checking if a path is a git repository or if a branch exists).
 func RunGitCommandBool(dir string, args ...string) bool {
 	return runGitCommandBool(dir, args...)
 }

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -39,6 +40,8 @@ func (r *KustomizeRenderer) SourceType() types.SourceType {
 // Following ArgoCD's approach, this uses `kustomize edit` commands to apply
 // Application-level overrides before running `kustomize build`.
 // The context can be used to cancel long-running kustomize operations.
+// When Kustomize edits are needed, the directory is copied to a temp location
+// to prevent race conditions when multiple renders run concurrently.
 func (r *KustomizeRenderer) Render(ctx context.Context, app *cluster.Application, source *cluster.ApplicationSource, repoPath string) ([]byte, error) {
 	// Check context before starting
 	select {
@@ -55,15 +58,25 @@ func (r *KustomizeRenderer) Render(ctx context.Context, app *cluster.Application
 		return r.renderPlainYAML(kustomizePath)
 	}
 
-	// Apply kustomize-specific options using edit commands (modifies kustomization.yaml)
-	if source.Kustomize != nil {
-		if err := r.applyKustomizeEdits(ctx, kustomizePath, source.Kustomize); err != nil {
+	// If we need to apply kustomize edits, copy to a temp directory first
+	// This prevents race conditions when multiple goroutines render the same directory
+	workDir := kustomizePath
+	if r.needsKustomizeEdits(source.Kustomize) {
+		tempDir, err := r.copyToTemp(kustomizePath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to copy kustomize directory: %w", err)
+		}
+		defer os.RemoveAll(tempDir)
+		workDir = tempDir
+
+		// Apply kustomize-specific options using edit commands
+		if err := r.applyKustomizeEdits(ctx, workDir, source.Kustomize); err != nil {
 			return nil, fmt.Errorf("failed to apply kustomize edits: %w", err)
 		}
 	}
 
 	// Run kustomize build with context
-	cmd := exec.CommandContext(ctx, "kustomize", r.buildKustomizeArgs(kustomizePath)...)
+	cmd := exec.CommandContext(ctx, "kustomize", r.buildKustomizeArgs(workDir)...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -352,4 +365,97 @@ func (r *KustomizeRenderer) CanRender() error {
 func IsKustomizeDirectory(path string) bool {
 	r := &KustomizeRenderer{}
 	return r.hasKustomization(path)
+}
+
+// needsKustomizeEdits returns true if the Kustomize options require modifying kustomization.yaml.
+func (r *KustomizeRenderer) needsKustomizeEdits(opts *cluster.ApplicationSourceKustomize) bool {
+	if opts == nil {
+		return false
+	}
+	return opts.NamePrefix != "" ||
+		opts.NameSuffix != "" ||
+		len(opts.Images) > 0 ||
+		len(opts.Replicas) > 0 ||
+		len(opts.CommonLabels) > 0 ||
+		len(opts.CommonAnnotations) > 0 ||
+		opts.Namespace != "" ||
+		len(opts.Components) > 0 ||
+		len(opts.Patches) > 0
+}
+
+// copyToTemp copies the kustomize directory to a temp location.
+// This is used to prevent race conditions when modifying kustomization.yaml.
+func (r *KustomizeRenderer) copyToTemp(srcDir string) (string, error) {
+	tempDir, err := os.MkdirTemp("", "argocdf-kustomize-")
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp directory: %w", err)
+	}
+
+	if err := copyDir(srcDir, tempDir); err != nil {
+		os.RemoveAll(tempDir)
+		return "", err
+	}
+
+	return tempDir, nil
+}
+
+// copyDir recursively copies a directory tree.
+func copyDir(src, dst string) error {
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return fmt.Errorf("failed to read directory %s: %w", src, err)
+	}
+
+	for _, entry := range entries {
+		srcPath := filepath.Join(src, entry.Name())
+		dstPath := filepath.Join(dst, entry.Name())
+
+		if entry.IsDir() {
+			// Create the directory
+			info, err := entry.Info()
+			if err != nil {
+				return fmt.Errorf("failed to get info for %s: %w", srcPath, err)
+			}
+			if err := os.MkdirAll(dstPath, info.Mode()); err != nil {
+				return fmt.Errorf("failed to create directory %s: %w", dstPath, err)
+			}
+			// Recursively copy contents
+			if err := copyDir(srcPath, dstPath); err != nil {
+				return err
+			}
+		} else {
+			// Copy the file
+			if err := copyFile(srcPath, dstPath); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+// copyFile copies a single file.
+func copyFile(src, dst string) error {
+	srcFile, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("failed to open source file %s: %w", src, err)
+	}
+	defer srcFile.Close()
+
+	srcInfo, err := srcFile.Stat()
+	if err != nil {
+		return fmt.Errorf("failed to stat source file %s: %w", src, err)
+	}
+
+	dstFile, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, srcInfo.Mode())
+	if err != nil {
+		return fmt.Errorf("failed to create destination file %s: %w", dst, err)
+	}
+	defer dstFile.Close()
+
+	if _, err := io.Copy(dstFile, srcFile); err != nil {
+		return fmt.Errorf("failed to copy file content: %w", err)
+	}
+
+	return nil
 }

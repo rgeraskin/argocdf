@@ -140,10 +140,10 @@ func TestAddHelmOptionsValuesObject(t *testing.T) {
 	renderer := NewHelmRenderer(RenderOptions{})
 
 	tests := []struct {
-		name           string
-		helm           *cluster.ApplicationSourceHelm
-		wantValuesArg  bool
-		wantContains   string // substring expected in the temp values file
+		name          string
+		helm          *cluster.ApplicationSourceHelm
+		wantValuesArg bool
+		wantContains  string // substring expected in the temp values file
 	}{
 		{
 			name: "valuesObject creates values file",
@@ -171,7 +171,16 @@ func TestAddHelmOptionsValuesObject(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			args := renderer.addHelmOptions([]string{}, tt.helm, "/repo", "/repo/chart")
+			args, tempFiles, err := renderer.addHelmOptions([]string{}, tt.helm, "/repo", "/repo/chart")
+			if err != nil {
+				t.Fatalf("addHelmOptions failed: %v", err)
+			}
+			// Cleanup temp files after test
+			defer func() {
+				for _, f := range tempFiles {
+					os.Remove(f)
+				}
+			}()
 
 			// Check if --values argument was added
 			valuesArgIdx := -1

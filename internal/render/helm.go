@@ -41,13 +41,17 @@ func (r *HelmRenderer) Render(ctx context.Context, app *cluster.Application, sou
 	}
 
 	// Determine chart location and build args
-	args, tempDir, err := r.buildArgs(ctx, app, source, repoPath)
+	args, tempDir, tempFiles, err := r.buildArgs(ctx, app, source, repoPath)
 	if err != nil {
 		return nil, err
 	}
 
+	// Cleanup temp resources after helm command completes
 	if tempDir != "" {
 		defer os.RemoveAll(tempDir)
+	}
+	for _, f := range tempFiles {
+		defer os.Remove(f)
 	}
 
 	// For local charts, ensure dependencies are built
@@ -75,8 +79,10 @@ func (r *HelmRenderer) Render(ctx context.Context, app *cluster.Application, sou
 }
 
 // buildArgs builds the helm template command arguments.
-func (r *HelmRenderer) buildArgs(ctx context.Context, app *cluster.Application, source *cluster.ApplicationSource, repoPath string) ([]string, string, error) {
+// Returns args, tempDir (for remote chart cleanup), tempFiles (for inline values cleanup), and error.
+func (r *HelmRenderer) buildArgs(ctx context.Context, app *cluster.Application, source *cluster.ApplicationSource, repoPath string) ([]string, string, []string, error) {
 	var tempDir string
+	var tempFiles []string
 
 	// Determine release name
 	releaseName := app.ObjectMeta.Name
@@ -91,7 +97,7 @@ func (r *HelmRenderer) buildArgs(ctx context.Context, app *cluster.Application, 
 		// Remote chart from repository
 		chartRef, tempDirPath, err := r.handleRemoteChart(ctx, source)
 		if err != nil {
-			return nil, "", err
+			return nil, "", nil, err
 		}
 		tempDir = tempDirPath
 		args = append(args, chartRef)
@@ -100,7 +106,7 @@ func (r *HelmRenderer) buildArgs(ctx context.Context, app *cluster.Application, 
 		chartPath := filepath.Join(repoPath, source.Path)
 		args = append(args, chartPath)
 	} else {
-		return nil, "", fmt.Errorf("no chart or path specified in source")
+		return nil, "", nil, fmt.Errorf("no chart or path specified in source")
 	}
 
 	// Add namespace
@@ -120,10 +126,21 @@ func (r *HelmRenderer) buildArgs(ctx context.Context, app *cluster.Application, 
 		if source.Path != "" {
 			chartDir = filepath.Join(repoPath, source.Path)
 		}
-		args = r.addHelmOptions(args, source.Helm, repoPath, chartDir)
+		var err error
+		args, tempFiles, err = r.addHelmOptions(args, source.Helm, repoPath, chartDir)
+		if err != nil {
+			// Cleanup any temp files created before the error
+			for _, f := range tempFiles {
+				os.Remove(f)
+			}
+			if tempDir != "" {
+				os.RemoveAll(tempDir)
+			}
+			return nil, "", nil, err
+		}
 	}
 
-	return args, tempDir, nil
+	return args, tempDir, tempFiles, nil
 }
 
 // handleRemoteChart handles fetching a chart from a remote repository.
@@ -183,7 +200,10 @@ func (r *HelmRenderer) handleRemoteChart(ctx context.Context, source *cluster.Ap
 
 // addHelmOptions adds Helm-specific options to the command arguments.
 // repoPath is the repository root, chartDir is the chart directory (for relative path resolution).
-func (r *HelmRenderer) addHelmOptions(args []string, helm *cluster.ApplicationSourceHelm, repoPath, chartDir string) []string {
+// Returns the updated args, a list of temp files to cleanup, and any error.
+func (r *HelmRenderer) addHelmOptions(args []string, helm *cluster.ApplicationSourceHelm, repoPath, chartDir string) ([]string, []string, error) {
+	var tempFiles []string
+
 	// Add value files
 	for _, valueFile := range helm.ValueFiles {
 		// Handle $ref references in value files
@@ -195,12 +215,17 @@ func (r *HelmRenderer) addHelmOptions(args []string, helm *cluster.ApplicationSo
 	if helm.Values != "" {
 		// Write inline values to a temp file
 		tmpFile, err := os.CreateTemp("", "values-*.yaml")
-		if err == nil {
-			tmpFile.WriteString(helm.Values)
-			tmpFile.Close()
-			args = append(args, "--values", tmpFile.Name())
-			// Note: temp file will be cleaned up by OS eventually
+		if err != nil {
+			return nil, tempFiles, fmt.Errorf("failed to create temp file for inline values: %w", err)
 		}
+		if _, err := tmpFile.WriteString(helm.Values); err != nil {
+			tmpFile.Close()
+			os.Remove(tmpFile.Name())
+			return nil, tempFiles, fmt.Errorf("failed to write inline values: %w", err)
+		}
+		tmpFile.Close()
+		tempFiles = append(tempFiles, tmpFile.Name())
+		args = append(args, "--values", tmpFile.Name())
 	}
 
 	// Add inline values object (structured)
@@ -208,14 +233,21 @@ func (r *HelmRenderer) addHelmOptions(args []string, helm *cluster.ApplicationSo
 	if helm.ValuesObject != nil && len(helm.ValuesObject.Raw) > 0 {
 		// Convert JSON to YAML and write to a temp file
 		valuesYAML, err := yaml.JSONToYAML(helm.ValuesObject.Raw)
-		if err == nil {
-			tmpFile, err := os.CreateTemp("", "values-object-*.yaml")
-			if err == nil {
-				tmpFile.Write(valuesYAML)
-				tmpFile.Close()
-				args = append(args, "--values", tmpFile.Name())
-			}
+		if err != nil {
+			return nil, tempFiles, fmt.Errorf("failed to convert values object to YAML: %w", err)
 		}
+		tmpFile, err := os.CreateTemp("", "values-object-*.yaml")
+		if err != nil {
+			return nil, tempFiles, fmt.Errorf("failed to create temp file for values object: %w", err)
+		}
+		if _, err := tmpFile.Write(valuesYAML); err != nil {
+			tmpFile.Close()
+			os.Remove(tmpFile.Name())
+			return nil, tempFiles, fmt.Errorf("failed to write values object: %w", err)
+		}
+		tmpFile.Close()
+		tempFiles = append(tempFiles, tmpFile.Name())
+		args = append(args, "--values", tmpFile.Name())
 	}
 
 	// Add parameter overrides
@@ -238,7 +270,7 @@ func (r *HelmRenderer) addHelmOptions(args []string, helm *cluster.ApplicationSo
 		args = append(args, "--version", helm.Version)
 	}
 
-	return args
+	return args, tempFiles, nil
 }
 
 // resolveValueFilePath resolves a value file path, handling $ref references.
