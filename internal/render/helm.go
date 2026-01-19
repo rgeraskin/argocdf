@@ -186,9 +186,10 @@ func (r *HelmRenderer) addHelmOptions(args []string, helm *cluster.ApplicationSo
 	}
 
 	// Add inline values object (structured)
-	if len(helm.ValuesObject) > 0 {
-		// Serialize the map to YAML and write to a temp file
-		valuesYAML, err := yaml.Marshal(helm.ValuesObject)
+	// ValuesObject is a runtime.RawExtension containing JSON bytes
+	if helm.ValuesObject != nil && len(helm.ValuesObject.Raw) > 0 {
+		// Convert JSON to YAML and write to a temp file
+		valuesYAML, err := yaml.JSONToYAML(helm.ValuesObject.Raw)
 		if err == nil {
 			tmpFile, err := os.CreateTemp("", "values-object-*.yaml")
 			if err == nil {

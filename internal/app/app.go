@@ -155,7 +155,7 @@ func (a *App) filterAffectedApps(apps []cluster.Application, changed *git.Change
 	var affected []cluster.Application
 
 	for _, app := range apps {
-		sources := app.GetSources()
+		sources := app.Spec.GetSources()
 		for _, source := range sources {
 			normalizedSourceURL := git.NormalizeRepoURL(source.RepoURL)
 			// Check if this source uses our repo

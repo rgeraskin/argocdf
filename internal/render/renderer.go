@@ -62,10 +62,11 @@ func NewFactory(opts RenderOptions) *Factory {
 // GetRenderer returns the appropriate renderer for the given source.
 // repoPath is used to detect Helm charts by checking for Chart.yaml in the source path.
 func (f *Factory) GetRenderer(source *cluster.ApplicationSource, repoPath string) Renderer {
-	if source.IsHelm() {
+	// Check for Helm: either Chart field is set or Helm config is present
+	if source.IsHelm() || source.Helm != nil {
 		return f.helmRenderer
 	}
-	if source.IsKustomize() {
+	if source.Kustomize != nil {
 		return f.kustomizeRenderer
 	}
 	// Check if the path contains a Chart.yaml (ArgoCD auto-detection)
@@ -81,7 +82,7 @@ func (f *Factory) GetRenderer(source *cluster.ApplicationSource, repoPath string
 
 // RenderApplication renders all sources for an application and combines the output.
 func (f *Factory) RenderApplication(app *cluster.Application, repoPath string) (*RenderResult, error) {
-	sources := app.GetSources()
+	sources := app.Spec.GetSources()
 	if len(sources) == 0 {
 		return &RenderResult{
 			SourceType: types.SourceTypeUnknown,

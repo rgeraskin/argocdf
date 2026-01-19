@@ -28,7 +28,7 @@ func NewMultiSourceRenderer(factory *Factory, repoPath string) *MultiSourceRende
 
 // RenderMultiSource renders an application with multiple sources.
 func (r *MultiSourceRenderer) RenderMultiSource(app *cluster.Application) ([]byte, error) {
-	sources := app.GetSources()
+	sources := app.Spec.GetSources()
 	if len(sources) == 0 {
 		return nil, fmt.Errorf("no sources defined for application")
 	}

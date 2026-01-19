@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/rgeraskin/argocdf/internal/cluster"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 func TestGetRenderer(t *testing.T) {
@@ -147,12 +148,8 @@ func TestAddHelmOptionsValuesObject(t *testing.T) {
 		{
 			name: "valuesObject creates values file",
 			helm: &cluster.ApplicationSourceHelm{
-				ValuesObject: map[string]any{
-					"cronjob": map[string]any{
-						"image": map[string]any{
-							"tag": "qwe",
-						},
-					},
+				ValuesObject: &runtime.RawExtension{
+					Raw: []byte(`{"cronjob":{"image":{"tag":"qwe"}}}`),
 				},
 			},
 			wantValuesArg: true,
@@ -161,7 +158,7 @@ func TestAddHelmOptionsValuesObject(t *testing.T) {
 		{
 			name: "empty valuesObject skipped",
 			helm: &cluster.ApplicationSourceHelm{
-				ValuesObject: map[string]any{},
+				ValuesObject: &runtime.RawExtension{Raw: []byte{}},
 			},
 			wantValuesArg: false,
 		},
