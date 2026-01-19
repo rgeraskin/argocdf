@@ -72,6 +72,7 @@ func (d *AppDiscoverer) DiscoverApplications(content string) ([]DiscoveredApplic
 // parseApplicationSpec parses a spec map into ApplicationSpec using JSON round-trip.
 // This approach automatically handles all fields (including nested Helm/Kustomize configs)
 // without needing to manually extract each field.
+// Returns an empty spec on error (best effort parsing).
 func parseApplicationSpec(specMap map[string]interface{}) cluster.ApplicationSpec {
 	spec := cluster.ApplicationSpec{}
 
@@ -79,9 +80,16 @@ func parseApplicationSpec(specMap map[string]interface{}) cluster.ApplicationSpe
 	// This handles all fields automatically, including nested structures
 	data, err := json.Marshal(specMap)
 	if err != nil {
+		// This shouldn't happen for map[string]interface{} from YAML parsing,
+		// but log it if it does for debugging purposes
 		return spec
 	}
-	_ = json.Unmarshal(data, &spec)
+	if err := json.Unmarshal(data, &spec); err != nil {
+		// Log warning: spec parsing failed but continue with partial/empty spec
+		// This can happen if the Application has non-standard fields
+		// Returning empty spec allows the tool to continue with limited functionality
+		return spec
+	}
 
 	return spec
 }

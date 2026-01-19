@@ -135,6 +135,14 @@ func (m *MultiWriter) Flush() error {
 }
 
 // ComputeSummary computes summary information from a list of app diffs.
+// It aggregates statistics including:
+//   - Total number of applications processed
+//   - Number of applications with changes, errors, or no changes
+//   - Total resources added, removed, and modified across all apps
+//   - Count of new Application CRDs (for apps-of-apps pattern detection)
+//
+// Applications with errors are counted separately and don't contribute to
+// resource change counts.
 func ComputeSummary(diffs []*types.AppDiff) Summary {
 	summary := Summary{
 		TotalApps: len(diffs),

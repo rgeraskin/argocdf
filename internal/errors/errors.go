@@ -126,38 +126,3 @@ func NewConfigError(field string, err error) *ConfigError {
 		Err:   err,
 	}
 }
-
-// MultiError collects multiple errors that occurred during processing.
-type MultiError struct {
-	Errors []error
-}
-
-func (e *MultiError) Error() string {
-	if len(e.Errors) == 0 {
-		return "no errors"
-	}
-	if len(e.Errors) == 1 {
-		return e.Errors[0].Error()
-	}
-	return fmt.Sprintf("%d errors occurred; first: %v", len(e.Errors), e.Errors[0])
-}
-
-// Add appends an error to the MultiError.
-func (e *MultiError) Add(err error) {
-	if err != nil {
-		e.Errors = append(e.Errors, err)
-	}
-}
-
-// HasErrors returns true if any errors were collected.
-func (e *MultiError) HasErrors() bool {
-	return len(e.Errors) > 0
-}
-
-// ToError returns nil if no errors, otherwise returns the MultiError.
-func (e *MultiError) ToError() error {
-	if !e.HasErrors() {
-		return nil
-	}
-	return e
-}

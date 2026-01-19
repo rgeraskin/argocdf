@@ -223,10 +223,10 @@ func TestDiffObjectsChangeTypes(t *testing.T) {
 	}
 }
 
-func TestCompareSlicesOrdering(t *testing.T) {
+func TestCompareSlicesOrdering_Scalars(t *testing.T) {
 	d := NewDiffer()
 
-	// Slices are compared by index, so reordering is detected as changes
+	// Slices of scalars (no name field) are compared by index
 	oldObj := map[string]interface{}{
 		"items": []interface{}{"first", "second", "third"},
 	}
@@ -237,13 +237,168 @@ func TestCompareSlicesOrdering(t *testing.T) {
 
 	result := d.DiffObjects(oldObj, newObj)
 
-	// Items at index 0 and 1 should be detected as modified
+	// Items at index 0 and 1 should be detected as modified (index-based comparison)
 	if !result.Modified {
 		t.Error("Expected changes when slice elements are reordered")
 	}
 	if len(result.Changes) != 2 {
 		t.Errorf("Expected 2 changes for reordered elements, got %d", len(result.Changes))
 	}
+}
+
+func TestCompareSlices_NameBasedMatching(t *testing.T) {
+	d := NewDiffer()
+
+	t.Run("reordered named items - no changes", func(t *testing.T) {
+		// Items with "name" field should be matched by name, not index
+		oldObj := map[string]interface{}{
+			"containers": []interface{}{
+				map[string]interface{}{"name": "app", "image": "app:v1"},
+				map[string]interface{}{"name": "sidecar", "image": "sidecar:v1"},
+			},
+		}
+
+		newObj := map[string]interface{}{
+			"containers": []interface{}{
+				map[string]interface{}{"name": "sidecar", "image": "sidecar:v1"}, // reordered
+				map[string]interface{}{"name": "app", "image": "app:v1"},
+			},
+		}
+
+		result := d.DiffObjects(oldObj, newObj)
+
+		// No actual changes - just reordering
+		if result.Modified {
+			t.Error("Expected no changes when named items are just reordered")
+			for _, c := range result.Changes {
+				t.Logf("  Unexpected change: %s (%s)", c.Path, c.Type)
+			}
+		}
+	})
+
+	t.Run("named item modified", func(t *testing.T) {
+		oldObj := map[string]interface{}{
+			"containers": []interface{}{
+				map[string]interface{}{"name": "app", "image": "app:v1"},
+			},
+		}
+
+		newObj := map[string]interface{}{
+			"containers": []interface{}{
+				map[string]interface{}{"name": "app", "image": "app:v2"}, // image changed
+			},
+		}
+
+		result := d.DiffObjects(oldObj, newObj)
+
+		if !result.Modified {
+			t.Error("Expected changes when named item is modified")
+		}
+		if len(result.Changes) != 1 {
+			t.Errorf("Expected 1 change, got %d", len(result.Changes))
+		}
+		// Check path uses name-based addressing
+		if len(result.Changes) > 0 && result.Changes[0].Path != "containers[name=app].image" {
+			t.Errorf("Expected path 'containers[name=app].image', got '%s'", result.Changes[0].Path)
+		}
+	})
+
+	t.Run("named item added", func(t *testing.T) {
+		oldObj := map[string]interface{}{
+			"containers": []interface{}{
+				map[string]interface{}{"name": "app", "image": "app:v1"},
+			},
+		}
+
+		newObj := map[string]interface{}{
+			"containers": []interface{}{
+				map[string]interface{}{"name": "app", "image": "app:v1"},
+				map[string]interface{}{"name": "sidecar", "image": "sidecar:v1"},
+			},
+		}
+
+		result := d.DiffObjects(oldObj, newObj)
+
+		if !result.Modified {
+			t.Error("Expected changes when named item is added")
+		}
+		// Should detect the new container
+		found := false
+		for _, c := range result.Changes {
+			if c.Path == "containers[name=sidecar]" && c.Type == ChangeTypeAdded {
+				found = true
+			}
+		}
+		if !found {
+			t.Error("Expected to find added container")
+			for _, c := range result.Changes {
+				t.Logf("  Change: %s (%s)", c.Path, c.Type)
+			}
+		}
+	})
+
+	t.Run("named item removed", func(t *testing.T) {
+		oldObj := map[string]interface{}{
+			"containers": []interface{}{
+				map[string]interface{}{"name": "app", "image": "app:v1"},
+				map[string]interface{}{"name": "sidecar", "image": "sidecar:v1"},
+			},
+		}
+
+		newObj := map[string]interface{}{
+			"containers": []interface{}{
+				map[string]interface{}{"name": "app", "image": "app:v1"},
+			},
+		}
+
+		result := d.DiffObjects(oldObj, newObj)
+
+		if !result.Modified {
+			t.Error("Expected changes when named item is removed")
+		}
+		// Should detect the removed container
+		found := false
+		for _, c := range result.Changes {
+			if c.Path == "containers[name=sidecar]" && c.Type == ChangeTypeRemoved {
+				found = true
+			}
+		}
+		if !found {
+			t.Error("Expected to find removed container")
+			for _, c := range result.Changes {
+				t.Logf("  Change: %s (%s)", c.Path, c.Type)
+			}
+		}
+	})
+
+	t.Run("port-based matching", func(t *testing.T) {
+		oldObj := map[string]interface{}{
+			"ports": []interface{}{
+				map[string]interface{}{"containerPort": 8080, "protocol": "TCP"},
+				map[string]interface{}{"containerPort": 9090, "protocol": "TCP"},
+			},
+		}
+
+		newObj := map[string]interface{}{
+			"ports": []interface{}{
+				map[string]interface{}{"containerPort": 9090, "protocol": "TCP"}, // reordered
+				map[string]interface{}{"containerPort": 8080, "protocol": "UDP"}, // protocol changed
+			},
+		}
+
+		result := d.DiffObjects(oldObj, newObj)
+
+		// Should detect only the protocol change on port 8080
+		if !result.Modified {
+			t.Error("Expected changes")
+		}
+		if len(result.Changes) != 1 {
+			t.Errorf("Expected 1 change (protocol), got %d", len(result.Changes))
+			for _, c := range result.Changes {
+				t.Logf("  Change: %s (%s)", c.Path, c.Type)
+			}
+		}
+	})
 }
 
 func TestDiffObjectsNestedSliceOfMaps(t *testing.T) {
@@ -267,10 +422,11 @@ func TestDiffObjectsNestedSliceOfMaps(t *testing.T) {
 		t.Error("Expected changes when nested map in slice is modified")
 	}
 
-	// Should detect the image change
+	// Should detect the image change using name-based addressing
 	found := false
 	for _, c := range result.Changes {
-		if c.Path == "containers[0].image" && c.Type == ChangeTypeModified {
+		// With name-based matching, path will be containers[name=app].image
+		if c.Path == "containers[name=app].image" && c.Type == ChangeTypeModified {
 			found = true
 			if c.OldValue != "app:v1" || c.NewValue != "app:v2" {
 				t.Errorf("Expected image change v1->v2, got %v->%v", c.OldValue, c.NewValue)
@@ -278,6 +434,9 @@ func TestDiffObjectsNestedSliceOfMaps(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Error("Expected to find containers[0].image change")
+		t.Error("Expected to find containers[name=app].image change")
+		for _, c := range result.Changes {
+			t.Logf("  Found: %s (%s)", c.Path, c.Type)
+		}
 	}
 }

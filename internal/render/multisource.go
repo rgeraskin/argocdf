@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/rgeraskin/argocdf/internal/cluster"
 	"github.com/rgeraskin/argocdf/internal/git"
@@ -29,6 +28,8 @@ func NewMultiSourceRenderer(factory *Factory, repoPath string) *MultiSourceRende
 
 // RenderMultiSource renders an application with multiple sources.
 // The context can be used to cancel long-running render operations.
+// This method is safe for concurrent use - it creates per-request renderers
+// instead of mutating shared factory state.
 func (r *MultiSourceRenderer) RenderMultiSource(ctx context.Context, app *cluster.Application) ([]byte, error) {
 	sources := app.Spec.GetSources()
 	if len(sources) == 0 {
@@ -42,9 +43,15 @@ func (r *MultiSourceRenderer) RenderMultiSource(ctx context.Context, app *cluste
 	}
 	defer cleanup()
 
-	// Update factory options with ref sources
-	r.factory.helmRenderer.opts.RefSources = refSources
-	r.factory.kustomizeRenderer.opts.RefSources = refSources
+	// Create per-request renderers with refSources configured
+	// This avoids mutating shared factory state and prevents race conditions
+	helmOpts := r.factory.helmRenderer.opts
+	helmOpts.RefSources = refSources
+	helmRenderer := NewHelmRenderer(helmOpts)
+
+	kustomizeOpts := r.factory.kustomizeRenderer.opts
+	kustomizeOpts.RefSources = refSources
+	kustomizeRenderer := NewKustomizeRenderer(kustomizeOpts)
 
 	// Second pass: render non-ref sources
 	var allManifests bytes.Buffer
@@ -61,7 +68,14 @@ func (r *MultiSourceRenderer) RenderMultiSource(ctx context.Context, app *cluste
 			continue
 		}
 
-		renderer := r.factory.GetRenderer(&sources[i], r.repoPath)
+		// Select the appropriate renderer for this source
+		var renderer Renderer
+		if source.IsHelm() || source.Helm != nil {
+			renderer = helmRenderer
+		} else {
+			renderer = kustomizeRenderer
+		}
+
 		manifests, err := renderer.Render(ctx, app, &sources[i], r.repoPath)
 		if err != nil {
 			return nil, fmt.Errorf("failed to render source %d: %w", i, err)
@@ -83,7 +97,7 @@ func (r *MultiSourceRenderer) prepareRefSources(sources []cluster.ApplicationSou
 
 	cleanup := func() {
 		for _, dir := range tempDirs {
-			os.RemoveAll(dir)
+			SafeRemoveAll(dir)
 		}
 	}
 
@@ -110,107 +124,15 @@ func (r *MultiSourceRenderer) prepareRefSources(sources []cluster.ApplicationSou
 		refPath := tempDir
 		if source.Path != "" {
 			refPath = filepath.Join(tempDir, source.Path)
+			// Validate that the path stays within the cloned directory
+			if err := ValidatePathContainment(tempDir, refPath); err != nil {
+				cleanup()
+				return nil, nil, fmt.Errorf("invalid ref source path for %s: %w", source.Ref, err)
+			}
 		}
 
 		refSources[source.Ref] = refPath
 	}
 
 	return refSources, cleanup, nil
-}
-
-// MergeManifests merges multiple manifest outputs, deduplicating by resource key.
-// For duplicates, later sources win.
-func MergeManifests(manifests ...[]byte) ([]byte, []string) {
-	var result bytes.Buffer
-	seen := make(map[string]bool)
-	var warnings []string
-
-	for _, m := range manifests {
-		// Split by YAML document separator
-		docs := splitYAMLDocuments(m)
-
-		for _, doc := range docs {
-			key := extractResourceKey(doc)
-			if key == "" {
-				// Can't extract key, just include it
-				if result.Len() > 0 {
-					result.WriteString("---\n")
-				}
-				result.Write(doc)
-				continue
-			}
-
-			if seen[key] {
-				warnings = append(warnings, fmt.Sprintf("duplicate resource: %s (using later definition)", key))
-			}
-			seen[key] = true
-
-			if result.Len() > 0 {
-				result.WriteString("---\n")
-			}
-			result.Write(doc)
-		}
-	}
-
-	return result.Bytes(), warnings
-}
-
-// splitYAMLDocuments splits a multi-document YAML into individual documents.
-func splitYAMLDocuments(data []byte) [][]byte {
-	var docs [][]byte
-	lines := strings.Split(string(data), "\n")
-	var current bytes.Buffer
-
-	for _, line := range lines {
-		if line == "---" {
-			if current.Len() > 0 {
-				docs = append(docs, bytes.TrimSpace(current.Bytes()))
-				current.Reset()
-			}
-			continue
-		}
-		current.WriteString(line)
-		current.WriteString("\n")
-	}
-
-	if current.Len() > 0 {
-		trimmed := bytes.TrimSpace(current.Bytes())
-		if len(trimmed) > 0 {
-			docs = append(docs, trimmed)
-		}
-	}
-
-	return docs
-}
-
-// extractResourceKey extracts a unique key for a Kubernetes resource from YAML.
-func extractResourceKey(data []byte) string {
-	// Simple parsing - look for apiVersion, kind, metadata.name, metadata.namespace
-	lines := strings.Split(string(data), "\n")
-
-	var apiVersion, kind, name, namespace string
-
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-
-		if val, found := strings.CutPrefix(line, "apiVersion:"); found {
-			apiVersion = strings.TrimSpace(val)
-		} else if val, found := strings.CutPrefix(line, "kind:"); found {
-			kind = strings.TrimSpace(val)
-		} else if val, found := strings.CutPrefix(line, "name:"); found && name == "" {
-			// First "name:" should be in metadata
-			name = strings.TrimSpace(val)
-		} else if val, found := strings.CutPrefix(line, "namespace:"); found && namespace == "" {
-			namespace = strings.TrimSpace(val)
-		}
-	}
-
-	if apiVersion == "" || kind == "" || name == "" {
-		return ""
-	}
-
-	if namespace != "" {
-		return fmt.Sprintf("%s/%s/%s/%s", apiVersion, kind, namespace, name)
-	}
-	return fmt.Sprintf("%s/%s/%s", apiVersion, kind, name)
 }

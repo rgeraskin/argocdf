@@ -48,7 +48,7 @@ func (r *HelmRenderer) Render(ctx context.Context, app *cluster.Application, sou
 
 	// Cleanup temp resources after helm command completes
 	if tempDir != "" {
-		defer os.RemoveAll(tempDir)
+		defer SafeRemoveAll(tempDir)
 	}
 	for _, f := range tempFiles {
 		defer os.Remove(f)
@@ -134,7 +134,7 @@ func (r *HelmRenderer) buildArgs(ctx context.Context, app *cluster.Application, 
 				os.Remove(f)
 			}
 			if tempDir != "" {
-				os.RemoveAll(tempDir)
+				SafeRemoveAll(tempDir)
 			}
 			return nil, "", nil, err
 		}
@@ -175,7 +175,7 @@ func (r *HelmRenderer) handleRemoteChart(ctx context.Context, source *cluster.Ap
 		"HELM_DATA_HOME="+filepath.Join(tempDir, "data"),
 	)
 	if output, err := addCmd.CombinedOutput(); err != nil {
-		os.RemoveAll(tempDir)
+		SafeRemoveAll(tempDir)
 		if ctx.Err() != nil {
 			return "", "", ctx.Err()
 		}
@@ -187,7 +187,7 @@ func (r *HelmRenderer) handleRemoteChart(ctx context.Context, source *cluster.Ap
 	updateCmd := exec.CommandContext(ctx, "helm", updateArgs...)
 	updateCmd.Env = addCmd.Env
 	if output, err := updateCmd.CombinedOutput(); err != nil {
-		os.RemoveAll(tempDir)
+		SafeRemoveAll(tempDir)
 		if ctx.Err() != nil {
 			return "", "", ctx.Err()
 		}
@@ -207,7 +207,10 @@ func (r *HelmRenderer) addHelmOptions(args []string, helm *cluster.ApplicationSo
 	// Add value files
 	for _, valueFile := range helm.ValueFiles {
 		// Handle $ref references in value files
-		resolvedPath := r.resolveValueFilePath(valueFile, repoPath, chartDir)
+		resolvedPath, err := r.resolveValueFilePath(valueFile, repoPath, chartDir)
+		if err != nil {
+			return nil, tempFiles, fmt.Errorf("failed to resolve value file %q: %w", valueFile, err)
+		}
 		args = append(args, "--values", resolvedPath)
 	}
 
@@ -261,7 +264,10 @@ func (r *HelmRenderer) addHelmOptions(args []string, helm *cluster.ApplicationSo
 
 	// Add file parameters
 	for _, fileParam := range helm.FileParameters {
-		resolvedPath := r.resolveValueFilePath(fileParam.Path, repoPath, chartDir)
+		resolvedPath, err := r.resolveValueFilePath(fileParam.Path, repoPath, chartDir)
+		if err != nil {
+			return nil, tempFiles, fmt.Errorf("failed to resolve file parameter %q: %w", fileParam.Path, err)
+		}
 		args = append(args, "--set-file", fmt.Sprintf("%s=%s", fileParam.Name, resolvedPath))
 	}
 
@@ -276,7 +282,8 @@ func (r *HelmRenderer) addHelmOptions(args []string, helm *cluster.ApplicationSo
 // resolveValueFilePath resolves a value file path, handling $ref references.
 // repoPath is the repository root, chartDir is the chart directory.
 // Relative paths are resolved relative to chartDir (matching ArgoCD behavior).
-func (r *HelmRenderer) resolveValueFilePath(path, repoPath, chartDir string) string {
+// Returns an error if the resolved path escapes the allowed directory boundaries.
+func (r *HelmRenderer) resolveValueFilePath(path, repoPath, chartDir string) (string, error) {
 	// Check if path uses a $ref reference
 	if strings.HasPrefix(path, "$") {
 		// Format: $refname/path/to/file.yaml
@@ -284,17 +291,33 @@ func (r *HelmRenderer) resolveValueFilePath(path, repoPath, chartDir string) str
 		if len(parts) == 2 {
 			refName := strings.TrimPrefix(parts[0], "$")
 			if refPath, ok := r.opts.RefSources[refName]; ok {
-				return filepath.Join(refPath, parts[1])
+				resolved := filepath.Join(refPath, parts[1])
+				// Validate that the resolved path stays within the ref source directory
+				if err := ValidatePathContainment(refPath, resolved); err != nil {
+					return "", fmt.Errorf("invalid ref path %q: %w", path, err)
+				}
+				return resolved, nil
 			}
 		}
+		// If ref not found, return path as-is (let helm handle the error)
+		return path, nil
 	}
 
 	// Regular path - make absolute if needed
 	// Relative paths are resolved relative to the chart directory
+	var resolved string
 	if !filepath.IsAbs(path) {
-		return filepath.Join(chartDir, path)
+		resolved = filepath.Join(chartDir, path)
+	} else {
+		resolved = path
 	}
-	return path
+
+	// Validate that the resolved path stays within the repository
+	if err := ValidatePathContainment(repoPath, resolved); err != nil {
+		return "", fmt.Errorf("invalid value file path %q: %w", path, err)
+	}
+
+	return resolved, nil
 }
 
 // CanRender checks if the helm binary is available.

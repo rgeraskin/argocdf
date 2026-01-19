@@ -9,8 +9,10 @@ import (
 
 // baseFileWriter provides common file writing functionality.
 // Embed this in concrete writer types to avoid duplicating file operations.
+// Write errors are accumulated and returned when Close() is called.
 type baseFileWriter struct {
-	file *os.File
+	file     *os.File
+	writeErr error // First write error encountered
 }
 
 // newBaseFileWriter creates a new baseFileWriter for the given file path.
@@ -24,11 +26,24 @@ func newBaseFileWriter(filePath, fileType string) (baseFileWriter, error) {
 }
 
 // write is a helper to write strings to the file.
+// Errors are accumulated and returned when close() is called.
+// This allows callers to write without checking errors on each call.
 func (b *baseFileWriter) write(s string) {
-	io.WriteString(b.file, s)
+	if b.writeErr != nil {
+		return // Stop writing after first error
+	}
+	_, err := io.WriteString(b.file, s)
+	if err != nil {
+		b.writeErr = err
+	}
 }
 
-// close closes the underlying file.
+// close closes the underlying file and returns any write errors that occurred.
+// Returns the first write error if any, otherwise returns the close error.
 func (b *baseFileWriter) close() error {
-	return b.file.Close()
+	closeErr := b.file.Close()
+	if b.writeErr != nil {
+		return fmt.Errorf("write error: %w", b.writeErr)
+	}
+	return closeErr
 }

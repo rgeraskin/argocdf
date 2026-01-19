@@ -66,7 +66,7 @@ func (r *KustomizeRenderer) Render(ctx context.Context, app *cluster.Application
 		if err != nil {
 			return nil, fmt.Errorf("failed to copy kustomize directory: %w", err)
 		}
-		defer os.RemoveAll(tempDir)
+		defer SafeRemoveAll(tempDir)
 		workDir = tempDir
 
 		// Apply kustomize-specific options using edit commands
@@ -392,7 +392,7 @@ func (r *KustomizeRenderer) copyToTemp(srcDir string) (string, error) {
 	}
 
 	if err := copyDir(srcDir, tempDir); err != nil {
-		os.RemoveAll(tempDir)
+		SafeRemoveAll(tempDir)
 		return "", err
 	}
 

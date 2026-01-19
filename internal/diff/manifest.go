@@ -42,6 +42,12 @@ func NewManifestParser() *ManifestParser {
 }
 
 // ParseManifests parses a multi-document YAML into Manifests.
+// Invalid YAML documents are skipped (not treated as errors) because:
+// - Empty documents and bare separators (---) are common in rendered output
+// - Helm/Kustomize may produce documents with only comments
+// - Continuing with valid documents provides a better user experience
+// Only documents that can be parsed as valid Kubernetes objects (with apiVersion,
+// kind, and metadata.name) are included in the result.
 func (p *ManifestParser) ParseManifests(content string) ([]Manifest, error) {
 	decoder := yaml.NewDecoder(strings.NewReader(content))
 	var manifests []Manifest
@@ -53,9 +59,12 @@ func (p *ManifestParser) ParseManifests(content string) ([]Manifest, error) {
 			break
 		}
 		if err != nil {
-			// Skip invalid YAML documents silently.
-			// This commonly happens with empty documents or document separators (---).
-			// Debug logging would require propagating a logger through the parser.
+			// Skip invalid YAML documents.
+			// This commonly happens with:
+			// - Empty documents or document separators (---)
+			// - Documents with only comments
+			// - Malformed YAML from rendering issues
+			// We continue processing other documents rather than failing the entire parse.
 			continue
 		}
 		if rawObj == nil {

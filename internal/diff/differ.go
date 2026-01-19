@@ -173,10 +173,105 @@ func (d *Differ) compareMaps(path string, oldMap, newMap map[string]interface{},
 	}
 }
 
-// compareSlices compares two slices.
+// compareSlices compares two slices using name-based matching when possible.
+// This produces better diffs for Kubernetes resources where list items often have
+// a "name" field (containers, volumes, env vars, ports, etc.).
 func (d *Differ) compareSlices(path string, oldSlice, newSlice []interface{}, result *DiffResult) {
-	// For simplicity, compare slices by index
-	// A more sophisticated approach would match by name/key
+	// Try name-based matching first
+	oldByName, oldOrder := d.indexSliceByName(oldSlice)
+	newByName, newOrder := d.indexSliceByName(newSlice)
+
+	// If both slices have named items (at least some), use name-based comparison
+	if len(oldByName) > 0 || len(newByName) > 0 {
+		d.compareSlicesByName(path, oldByName, oldOrder, newByName, newOrder, result)
+		return
+	}
+
+	// Fall back to index-based comparison for slices without named items
+	d.compareSlicesByIndex(path, oldSlice, newSlice, result)
+}
+
+// indexSliceByName extracts items with a "name" field and returns them indexed by name.
+// Also returns the order of names for consistent output.
+// Items without names are not included in the map.
+func (d *Differ) indexSliceByName(slice []interface{}) (map[string]interface{}, []string) {
+	byName := make(map[string]interface{})
+	var order []string
+
+	for _, item := range slice {
+		if m, ok := item.(map[string]interface{}); ok {
+			if name, ok := d.extractItemName(m); ok {
+				byName[name] = item
+				order = append(order, name)
+			}
+		}
+	}
+
+	return byName, order
+}
+
+// extractItemName tries to extract a unique identifier from a slice item.
+// It looks for common Kubernetes naming patterns.
+func (d *Differ) extractItemName(item map[string]interface{}) (string, bool) {
+	// Try common name fields in order of preference
+	nameFields := []string{"name", "containerPort", "port", "key"}
+
+	for _, field := range nameFields {
+		if val, ok := item[field]; ok {
+			switch v := val.(type) {
+			case string:
+				if v != "" {
+					return v, true
+				}
+			case int, int64, float64:
+				// For numeric fields like containerPort
+				return fmt.Sprintf("%v", v), true
+			}
+		}
+	}
+
+	return "", false
+}
+
+// compareSlicesByName compares slices using name-based matching.
+func (d *Differ) compareSlicesByName(path string, oldByName map[string]interface{}, oldOrder []string,
+	newByName map[string]interface{}, newOrder []string, result *DiffResult) {
+
+	// Track which names we've processed
+	processed := make(map[string]bool)
+
+	// First, process items in the old slice order
+	for _, name := range oldOrder {
+		processed[name] = true
+		oldItem := oldByName[name]
+		newItem, existsInNew := newByName[name]
+
+		itemPath := fmt.Sprintf("%s[name=%s]", path, name)
+
+		if !existsInNew {
+			// Item was removed
+			d.compareValues(itemPath, oldItem, nil, result)
+		} else {
+			// Item exists in both - compare them
+			d.compareValues(itemPath, oldItem, newItem, result)
+		}
+	}
+
+	// Then, process items that only exist in the new slice
+	for _, name := range newOrder {
+		if processed[name] {
+			continue
+		}
+		newItem := newByName[name]
+		itemPath := fmt.Sprintf("%s[name=%s]", path, name)
+		// Item was added
+		d.compareValues(itemPath, nil, newItem, result)
+	}
+}
+
+// compareSlicesByIndex compares slices element by element using index positions.
+// This is the fallback when items don't have identifiable names.
+func (d *Differ) compareSlicesByIndex(path string, oldSlice, newSlice []interface{}, result *DiffResult) {
 	maxLen := len(oldSlice)
 	if len(newSlice) > maxLen {
 		maxLen = len(newSlice)
