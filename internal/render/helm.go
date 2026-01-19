@@ -11,6 +11,7 @@ import (
 
 	"github.com/rgeraskin/argocdf/internal/cluster"
 	"github.com/rgeraskin/argocdf/internal/types"
+	"sigs.k8s.io/yaml"
 )
 
 // HelmRenderer renders Helm charts using the helm binary.
@@ -172,7 +173,7 @@ func (r *HelmRenderer) addHelmOptions(args []string, helm *cluster.ApplicationSo
 		args = append(args, "--values", resolvedPath)
 	}
 
-	// Add inline values
+	// Add inline values (string)
 	if helm.Values != "" {
 		// Write inline values to a temp file
 		tmpFile, err := os.CreateTemp("", "values-*.yaml")
@@ -181,6 +182,20 @@ func (r *HelmRenderer) addHelmOptions(args []string, helm *cluster.ApplicationSo
 			tmpFile.Close()
 			args = append(args, "--values", tmpFile.Name())
 			// Note: temp file will be cleaned up by OS eventually
+		}
+	}
+
+	// Add inline values object (structured)
+	if len(helm.ValuesObject) > 0 {
+		// Serialize the map to YAML and write to a temp file
+		valuesYAML, err := yaml.Marshal(helm.ValuesObject)
+		if err == nil {
+			tmpFile, err := os.CreateTemp("", "values-object-*.yaml")
+			if err == nil {
+				tmpFile.Write(valuesYAML)
+				tmpFile.Close()
+				args = append(args, "--values", tmpFile.Name())
+			}
 		}
 	}
 

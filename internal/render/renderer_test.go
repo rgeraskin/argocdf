@@ -3,6 +3,7 @@ package render
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/rgeraskin/argocdf/internal/cluster"
@@ -129,6 +130,78 @@ func TestGetRenderer(t *testing.T) {
 
 			if gotRenderer != tt.wantRenderer {
 				t.Errorf("GetRenderer() = %s, want %s", gotRenderer, tt.wantRenderer)
+			}
+		})
+	}
+}
+
+func TestAddHelmOptionsValuesObject(t *testing.T) {
+	renderer := NewHelmRenderer(RenderOptions{})
+
+	tests := []struct {
+		name           string
+		helm           *cluster.ApplicationSourceHelm
+		wantValuesArg  bool
+		wantContains   string // substring expected in the temp values file
+	}{
+		{
+			name: "valuesObject creates values file",
+			helm: &cluster.ApplicationSourceHelm{
+				ValuesObject: map[string]any{
+					"cronjob": map[string]any{
+						"image": map[string]any{
+							"tag": "qwe",
+						},
+					},
+				},
+			},
+			wantValuesArg: true,
+			wantContains:  "tag: qwe",
+		},
+		{
+			name: "empty valuesObject skipped",
+			helm: &cluster.ApplicationSourceHelm{
+				ValuesObject: map[string]any{},
+			},
+			wantValuesArg: false,
+		},
+		{
+			name:          "nil valuesObject skipped",
+			helm:          &cluster.ApplicationSourceHelm{},
+			wantValuesArg: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			args := renderer.addHelmOptions([]string{}, tt.helm, "/repo", "/repo/chart")
+
+			// Check if --values argument was added
+			valuesArgIdx := -1
+			for i, arg := range args {
+				if arg == "--values" && i+1 < len(args) {
+					// Check if this is from valuesObject (contains "values-object" in path)
+					if strings.Contains(args[i+1], "values-object") {
+						valuesArgIdx = i
+						break
+					}
+				}
+			}
+
+			hasValuesArg := valuesArgIdx >= 0
+			if hasValuesArg != tt.wantValuesArg {
+				t.Errorf("valuesObject handling: got --values=%v, want %v", hasValuesArg, tt.wantValuesArg)
+			}
+
+			// If we expect a values file, check its contents
+			if tt.wantValuesArg && tt.wantContains != "" && valuesArgIdx >= 0 {
+				valuesFile := args[valuesArgIdx+1]
+				content, err := os.ReadFile(valuesFile)
+				if err != nil {
+					t.Errorf("failed to read values file: %v", err)
+				} else if !strings.Contains(string(content), tt.wantContains) {
+					t.Errorf("values file content = %q, want to contain %q", string(content), tt.wantContains)
+				}
 			}
 		})
 	}

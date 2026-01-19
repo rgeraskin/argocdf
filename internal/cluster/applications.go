@@ -53,6 +53,7 @@ type ApplicationSourceHelm struct {
 	ReleaseName     string              `json:"releaseName,omitempty"`
 	ValueFiles      []string            `json:"valueFiles,omitempty"`
 	Values          string              `json:"values,omitempty"`
+	ValuesObject    map[string]any      `json:"valuesObject,omitempty"`
 	Parameters      []HelmParameter     `json:"parameters,omitempty"`
 	FileParameters  []HelmFileParameter `json:"fileParameters,omitempty"`
 	Version         string              `json:"version,omitempty"`
