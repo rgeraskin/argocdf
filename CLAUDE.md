@@ -47,11 +47,25 @@ The tool follows a pipeline architecture orchestrated by `internal/app/app.go`:
 | `cmd/argocdf` | CLI entry point (Cobra) |
 | `internal/app` | Main orchestrator and factory |
 | `internal/config` | Configuration and auto-detection |
-| `internal/cluster` | K8s client, ArgoCD Application operations |
-| `internal/git` | Repository operations, change detection |
+| `internal/cluster` | K8s client, ArgoCD Application types (via type aliases) |
+| `internal/git` | Repository operations, change detection, URL normalization |
 | `internal/render` | Helm/Kustomize manifest rendering |
 | `internal/diff` | Manifest comparison, apps-of-apps discovery |
 | `internal/output` | Output writers (terminal, markdown, HTML, unified) |
+
+### ArgoCD Types Dependency
+
+The `internal/cluster` package uses ArgoCD's official types from `github.com/argoproj/argo-cd/v2/pkg/apis/application/v1alpha1` via type aliases. This ensures automatic compatibility with all ArgoCD Application fields and eliminates field drift bugs.
+
+```go
+// Type aliases in internal/cluster/applications.go
+type Application = argoapp.Application
+type ApplicationSource = argoapp.ApplicationSource
+type ApplicationSourceHelm = argoapp.ApplicationSourceHelm
+// ... etc
+```
+
+Trade-off: This adds ~35MB to the binary size but eliminates maintenance burden of keeping custom structs in sync with ArgoCD's schema.
 
 ### Design Patterns
 

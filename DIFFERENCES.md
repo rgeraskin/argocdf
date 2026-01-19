@@ -245,6 +245,34 @@ argocdf only does two-way diff (base branch vs target branch), missing this nuan
 | Kustomize `--enable-helm` | Low | Low |
 | Retry logic | Low | Low |
 
+## 13. Implementation Approach: Reuse vs Reimplementation
+
+argocdf deliberately reimplements some functionality rather than importing ArgoCD's libraries directly. This table documents these decisions:
+
+| Area | argocdf Approach | ArgoCD Alternative | Rationale |
+|------|------------------|-------------------|-----------|
+| **Application Types** | Uses ArgoCD types via aliases | Same | Ensures field compatibility, no drift |
+| **Helm Rendering** | `exec.Command("helm", ...)` | gitops-engine | Simpler, uses user's installed helm version |
+| **Kustomize Rendering** | `exec.Command("kustomize", ...)` | gitops-engine | Simpler, uses user's installed kustomize |
+| **Git Operations** | `exec.Command("git", ...)` | gitops-engine / go-git | Simpler, no version mismatch concerns |
+| **Manifest Diffing** | Custom recursive comparison | gitops-engine diff | Lighter weight, tailored for preview use case |
+| **URL Normalization** | `git.NormalizeRepoURL()` | ArgoCD has similar | Small utility, consolidated in git package |
+
+### Why Not Use gitops-engine?
+
+ArgoCD's `gitops-engine` provides rendering and diffing, but:
+
+1. **Designed for controller context** - Expects ArgoCD repo-server architecture
+2. **Heavy abstraction layers** - Adds complexity for features argocdf doesn't need
+3. **Binary bloat** - Would significantly increase binary size
+4. **Version coupling** - Ties argocdf to specific ArgoCD internals
+
+The `exec.Command` approach for Helm/Kustomize is:
+- Simpler to understand and debug
+- Uses the exact binaries users have installed
+- No version mismatch between embedded vs system tools
+- More portable across environments
+
 ## References
 
 - [ArgoCD Diff Customization](https://argo-cd.readthedocs.io/en/stable/user-guide/diffing/)

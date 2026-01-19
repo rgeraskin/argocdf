@@ -156,10 +156,10 @@ func (r *Repository) ReadFile(relativePath string) ([]byte, error) {
 // NormalizeRepoURL normalizes a git URL for comparison.
 // It converts various URL formats to a consistent HTTPS format.
 func NormalizeRepoURL(url string) string {
-	// Remove .git suffix first
-	url = strings.TrimSuffix(url, ".git")
-	// Remove trailing slash
+	// Remove trailing slash first (before .git check)
 	url = strings.TrimSuffix(url, "/")
+	// Remove .git suffix
+	url = strings.TrimSuffix(url, ".git")
 
 	// Handle ssh://git@hostname/path format
 	// e.g., ssh://git@github.com/owner/repo -> https://github.com/owner/repo

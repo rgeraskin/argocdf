@@ -10,6 +10,8 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+
+	"github.com/rgeraskin/argocdf/internal/git"
 )
 
 // ArgoCD Application GVR (GroupVersionResource).
@@ -105,11 +107,12 @@ func (s *ApplicationService) convertOne(obj *unstructured.Unstructured) (*Applic
 // FilterByRepoURL filters applications that match the given repository URL.
 func FilterByRepoURL(apps []Application, repoURL string) []Application {
 	filtered := make([]Application, 0)
+	normalizedRepoURL := git.NormalizeRepoURL(repoURL)
 
 	for _, app := range apps {
 		sources := app.Spec.GetSources()
 		for _, source := range sources {
-			if normalizeRepoURL(source.RepoURL) == normalizeRepoURL(repoURL) {
+			if git.NormalizeRepoURL(source.RepoURL) == normalizedRepoURL {
 				filtered = append(filtered, app)
 				break
 			}
@@ -117,17 +120,4 @@ func FilterByRepoURL(apps []Application, repoURL string) []Application {
 	}
 
 	return filtered
-}
-
-// normalizeRepoURL normalizes a git URL for comparison.
-func normalizeRepoURL(url string) string {
-	// Remove trailing .git
-	if len(url) > 4 && url[len(url)-4:] == ".git" {
-		url = url[:len(url)-4]
-	}
-	// Remove trailing slash
-	if len(url) > 0 && url[len(url)-1] == '/' {
-		url = url[:len(url)-1]
-	}
-	return url
 }
