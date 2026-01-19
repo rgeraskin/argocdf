@@ -165,6 +165,54 @@ func (d *AppDiscoverer) FindNewApplications(oldContent, newContent string) ([]Di
 	return newlyAdded, nil
 }
 
+// ModifiedApplication represents a child app that exists in both old and new but has changes.
+type ModifiedApplication struct {
+	Name      string
+	Namespace string
+	OldSpec   cluster.ApplicationSpec
+	NewSpec   cluster.ApplicationSpec
+}
+
+// FindModifiedApplications compares old and new manifests to find Applications that exist
+// in both but have different specs (indicating the child app configuration changed).
+func (d *AppDiscoverer) FindModifiedApplications(oldContent, newContent string) ([]ModifiedApplication, error) {
+	oldApps, err := d.DiscoverApplications(oldContent)
+	if err != nil {
+		return nil, fmt.Errorf("failed to discover old applications: %w", err)
+	}
+
+	newApps, err := d.DiscoverApplications(newContent)
+	if err != nil {
+		return nil, fmt.Errorf("failed to discover new applications: %w", err)
+	}
+
+	// Build map of old apps by key
+	oldAppMap := make(map[string]DiscoveredApplication)
+	for _, app := range oldApps {
+		key := fmt.Sprintf("%s/%s", app.Namespace, app.Name)
+		oldAppMap[key] = app
+	}
+
+	// Find apps that exist in both but have different raw YAML (indicating changes)
+	var modified []ModifiedApplication
+	for _, newApp := range newApps {
+		key := fmt.Sprintf("%s/%s", newApp.Namespace, newApp.Name)
+		if oldApp, exists := oldAppMap[key]; exists {
+			// Compare raw YAML to detect any changes
+			if oldApp.RawYAML != newApp.RawYAML {
+				modified = append(modified, ModifiedApplication{
+					Name:      newApp.Name,
+					Namespace: newApp.Namespace,
+					OldSpec:   oldApp.Spec,
+					NewSpec:   newApp.Spec,
+				})
+			}
+		}
+	}
+
+	return modified, nil
+}
+
 // AppDiffQueue manages the queue of applications to process for apps-of-apps.
 type AppDiffQueue struct {
 	pending   []QueuedApp
@@ -178,7 +226,8 @@ type QueuedApp struct {
 	Namespace string
 	Depth     int
 	ParentApp string
-	Spec      *cluster.ApplicationSpec
+	Spec      *cluster.ApplicationSpec    // Spec to use for target branch (also for base if OldSpec is nil)
+	OldSpec   *cluster.ApplicationSpec    // Optional: spec to use for base branch (for modified child apps)
 }
 
 // NewAppDiffQueue creates a new AppDiffQueue.

@@ -221,12 +221,13 @@ func (a *App) processApplications(ctx context.Context, apps []cluster.Applicatio
 		}
 		results = append(results, appDiff)
 
-		// Look for new Application CRDs in the diff (apps-of-apps pattern)
+		// Look for new and modified Application CRDs in the diff (apps-of-apps pattern)
 		diffResult, _ := appDiff.DiffResult.(*diff.ManifestSetDiff)
 		if !a.cfg.NoRecursive && appDiff.Error == nil && diffResult != nil && diffResult.HasChanges {
+			// Find newly added child applications
 			newApps, err := a.discoverer.FindNewApplications(appDiff.RenderedOld, appDiff.RenderedNew)
 			if err != nil {
-				a.logger.Warn("Error discovering child apps", "parent", queuedApp.Name, "error", err)
+				a.logger.Warn("Error discovering new child apps", "parent", queuedApp.Name, "error", err)
 			} else {
 				for _, newApp := range newApps {
 					added := queue.Add(diff.QueuedApp{
@@ -237,8 +238,29 @@ func (a *App) processApplications(ctx context.Context, apps []cluster.Applicatio
 						Spec:      &newApp.Spec,
 					})
 					if added {
-						a.logger.Debug("Discovered child application", "parent", queuedApp.Name, "child", newApp.Name)
+						a.logger.Debug("Discovered new child application", "parent", queuedApp.Name, "child", newApp.Name)
 						appDiff.ChildAppNames = append(appDiff.ChildAppNames, newApp.Name)
+					}
+				}
+			}
+
+			// Find modified child applications (specs changed between branches)
+			modifiedApps, err := a.discoverer.FindModifiedApplications(appDiff.RenderedOld, appDiff.RenderedNew)
+			if err != nil {
+				a.logger.Warn("Error discovering modified child apps", "parent", queuedApp.Name, "error", err)
+			} else {
+				for _, modApp := range modifiedApps {
+					added := queue.Add(diff.QueuedApp{
+						Name:      modApp.Name,
+						Namespace: modApp.Namespace,
+						Depth:     queuedApp.Depth + 1,
+						ParentApp: queuedApp.Name,
+						Spec:      &modApp.NewSpec,
+						OldSpec:   &modApp.OldSpec,
+					})
+					if added {
+						a.logger.Debug("Discovered modified child application", "parent", queuedApp.Name, "child", modApp.Name)
+						appDiff.ChildAppNames = append(appDiff.ChildAppNames, modApp.Name)
 					}
 				}
 			}
@@ -256,17 +278,29 @@ func (a *App) processOneApp(ctx context.Context, queuedApp *diff.QueuedApp) (*ty
 		ParentAppName: queuedApp.ParentApp,
 	}
 
-	// Build a temporary Application object for rendering
-	app := &cluster.Application{
+	// Build Application objects for rendering
+	// For modified child apps, OldSpec differs from Spec
+	oldSpec := queuedApp.Spec
+	if queuedApp.OldSpec != nil {
+		oldSpec = queuedApp.OldSpec
+	}
+
+	appOld := &cluster.Application{
+		Spec: *oldSpec,
+	}
+	appOld.ObjectMeta.Name = queuedApp.Name
+	appOld.ObjectMeta.Namespace = queuedApp.Namespace
+
+	appNew := &cluster.Application{
 		Spec: *queuedApp.Spec,
 	}
-	app.ObjectMeta.Name = queuedApp.Name
-	app.ObjectMeta.Namespace = queuedApp.Namespace
+	appNew.ObjectMeta.Name = queuedApp.Name
+	appNew.ObjectMeta.Namespace = queuedApp.Namespace
 
-	// Render from base branch
+	// Render from base branch using old spec
 	var renderedOld []byte
 	err := a.repo.WithBranch(a.cfg.BaseBranch, func() error {
-		result, err := a.renderer.RenderApplication(app, a.repo.Path())
+		result, err := a.renderer.RenderApplication(appOld, a.repo.Path())
 		if err != nil {
 			return err
 		}
@@ -278,10 +312,10 @@ func (a *App) processOneApp(ctx context.Context, queuedApp *diff.QueuedApp) (*ty
 		return nil, fmt.Errorf("failed to render base branch: %w", err)
 	}
 
-	// Render from target branch
+	// Render from target branch using new spec
 	var renderedNew []byte
 	err = a.repo.WithBranch(a.cfg.TargetBranch, func() error {
-		result, err := a.renderer.RenderApplication(app, a.repo.Path())
+		result, err := a.renderer.RenderApplication(appNew, a.repo.Path())
 		if err != nil {
 			return err
 		}
