@@ -87,9 +87,54 @@ func (r *Repository) CommitHash(ref string) (string, error) {
 	return r.run("rev-parse", ref)
 }
 
+// GetWorktreeForBranch returns the worktree path for a branch if it's checked out in a worktree.
+// Returns empty string if the branch is not in any worktree.
+func (r *Repository) GetWorktreeForBranch(branchName string) (string, error) {
+	output, err := r.run("worktree", "list", "--porcelain")
+	if err != nil {
+		// If worktree command fails, assume worktrees aren't in use
+		return "", nil
+	}
+
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	var currentWorktreePath string
+
+	for _, line := range lines {
+		if strings.HasPrefix(line, "worktree ") {
+			currentWorktreePath = strings.TrimPrefix(line, "worktree ")
+		} else if strings.HasPrefix(line, "branch ") {
+			branch := strings.TrimPrefix(line, "branch ")
+			branch = strings.TrimPrefix(branch, "refs/heads/")
+			if branch == branchName {
+				return currentWorktreePath, nil
+			}
+		}
+	}
+
+	return "", nil
+}
+
 // WithBranch executes a function while checked out to the specified branch,
 // then restores the original position afterward.
+// If the branch is already checked out in another worktree, it uses that worktree path instead.
 func (r *Repository) WithBranch(branchName string, fn func() error) error {
+	// Check if the branch is already in a worktree
+	worktreePath, err := r.GetWorktreeForBranch(branchName)
+	if err != nil {
+		return fmt.Errorf("failed to check worktree status: %w", err)
+	}
+
+	if worktreePath != "" && worktreePath != r.path {
+		// Branch is in a different worktree - use that worktree's path
+		// Temporarily change the repository path for this operation
+		originalPath := r.path
+		r.path = worktreePath
+		fnErr := fn()
+		r.path = originalPath
+		return fnErr
+	}
+
+	// Branch is either in current worktree or not in any worktree - use standard checkout
 	// Save current position (branch name or commit hash)
 	originalBranch, _ := r.HeadBranch()
 	var originalRef string
