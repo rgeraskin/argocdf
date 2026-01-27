@@ -126,9 +126,22 @@ func (t *TerminalWriter) WriteAppDiff(appDiff *types.AppDiff, depth int) error {
 		return nil
 	}
 
+	// Show parse errors if present
+	if len(result.ParseErrors) > 0 {
+		fmt.Fprintf(t.out, "%s  %s\n", indent, errorStyle.Render(fmt.Sprintf("⚠ %d YAML parse error(s)", len(result.ParseErrors))))
+		if !t.summaryOnly {
+			for _, err := range result.ParseErrors {
+				fmt.Fprintf(t.out, "%s    %s\n", indent, dimStyle.Render("• "+err))
+			}
+		}
+	}
+
 	// No changes
 	if !result.HasChanges {
-		fmt.Fprintf(t.out, "%s  %s\n", indent, dimStyle.Render("No changes"))
+		// Don't show "No changes" if there were parse errors
+		if len(result.ParseErrors) == 0 {
+			fmt.Fprintf(t.out, "%s  %s\n", indent, dimStyle.Render("No changes"))
+		}
 		return nil
 	}
 
@@ -176,8 +189,27 @@ func (t *TerminalWriter) writeAppDiffUnified(appDiff *types.AppDiff) error {
 
 	// Type assert DiffResult
 	result, ok := appDiff.DiffResult.(*diff.ManifestSetDiff)
-	if !ok || result == nil || !result.HasChanges {
-		fmt.Fprintf(t.out, "# %s\n\n", dimStyle.Render("No changes"))
+	if !ok || result == nil {
+		fmt.Fprintf(t.out, "# %s\n\n", dimStyle.Render("No diff available"))
+		return nil
+	}
+
+	// Show parse errors if present
+	if len(result.ParseErrors) > 0 {
+		fmt.Fprintf(t.out, "# %s\n", errorStyle.Render(fmt.Sprintf("⚠ %d YAML parse error(s)", len(result.ParseErrors))))
+		for _, err := range result.ParseErrors {
+			fmt.Fprintf(t.out, "# %s\n", dimStyle.Render("  • "+err))
+		}
+	}
+
+	// No changes
+	if !result.HasChanges {
+		// Don't show "No changes" if there were parse errors
+		if len(result.ParseErrors) == 0 {
+			fmt.Fprintf(t.out, "# %s\n\n", dimStyle.Render("No changes"))
+		} else {
+			fmt.Fprintln(t.out) // Just add blank line after errors
+		}
 		return nil
 	}
 

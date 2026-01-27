@@ -128,15 +128,22 @@ func (h *HTMLWriter) writeAppDiffFull(appDiff *types.AppDiff, depth int) error {
 	// Badges
 	if appDiff.Error != nil {
 		h.write(`<span class="badge badge-error">Error</span>`)
-	} else if ok && result != nil && result.HasChanges {
-		if len(result.Added) > 0 {
-			h.write(fmt.Sprintf(`<span class="badge badge-added">+%d</span>`, len(result.Added)))
+	} else if ok && result != nil {
+		// Show parse errors
+		if len(result.ParseErrors) > 0 {
+			h.write(fmt.Sprintf(`<span class="badge badge-error">⚠ %d parse error(s)</span>`, len(result.ParseErrors)))
 		}
-		if len(result.Removed) > 0 {
-			h.write(fmt.Sprintf(`<span class="badge badge-removed">-%d</span>`, len(result.Removed)))
-		}
-		if len(result.Modified) > 0 {
-			h.write(fmt.Sprintf(`<span class="badge badge-modified">~%d</span>`, len(result.Modified)))
+		// Show changes
+		if result.HasChanges {
+			if len(result.Added) > 0 {
+				h.write(fmt.Sprintf(`<span class="badge badge-added">+%d</span>`, len(result.Added)))
+			}
+			if len(result.Removed) > 0 {
+				h.write(fmt.Sprintf(`<span class="badge badge-removed">-%d</span>`, len(result.Removed)))
+			}
+			if len(result.Modified) > 0 {
+				h.write(fmt.Sprintf(`<span class="badge badge-modified">~%d</span>`, len(result.Modified)))
+			}
 		}
 	}
 	h.write(`</div>`)
@@ -144,14 +151,31 @@ func (h *HTMLWriter) writeAppDiffFull(appDiff *types.AppDiff, depth int) error {
 	// Error message
 	if appDiff.Error != nil {
 		h.write(fmt.Sprintf(`<div class="error-message">%s</div>`, html.EscapeString(appDiff.Error.Error())))
-	} else if !ok || result == nil || !result.HasChanges {
-		h.write(`<p class="no-changes">No changes</p>`)
-	} else if !h.summaryOnly {
-		// Show detailed diff unless summaryOnly is set
-		if h.sideBySide {
-			h.writeDetailedDiffSideBySide(result)
-		} else {
-			h.writeDetailedDiff(result)
+	} else if !ok || result == nil {
+		h.write(`<p class="no-changes">No diff available</p>`)
+	} else {
+		// Show parse errors if present
+		if len(result.ParseErrors) > 0 {
+			h.write(fmt.Sprintf(`<div class="error-message"><strong>⚠ %d YAML parse error(s):</strong><ul>`, len(result.ParseErrors)))
+			for _, err := range result.ParseErrors {
+				h.write(fmt.Sprintf(`<li>%s</li>`, html.EscapeString(err)))
+			}
+			h.write(`</ul></div>`)
+		}
+
+		// Show changes
+		if !result.HasChanges {
+			// Don't show "No changes" if there were parse errors
+			if len(result.ParseErrors) == 0 {
+				h.write(`<p class="no-changes">No changes</p>`)
+			}
+		} else if !h.summaryOnly {
+			// Show detailed diff unless summaryOnly is set
+			if h.sideBySide {
+				h.writeDetailedDiffSideBySide(result)
+			} else {
+				h.writeDetailedDiff(result)
+			}
 		}
 	}
 

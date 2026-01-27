@@ -55,8 +55,27 @@ func (u *UnifiedWriter) WriteAppDiff(appDiff *types.AppDiff, _ int) error {
 
 	// Type assert DiffResult
 	result, ok := appDiff.DiffResult.(*diff.ManifestSetDiff)
-	if !ok || result == nil || !result.HasChanges {
-		u.write("# No changes\n\n")
+	if !ok || result == nil {
+		u.write("# No diff available\n\n")
+		return nil
+	}
+
+	// Show parse errors if present
+	if len(result.ParseErrors) > 0 {
+		u.write(fmt.Sprintf("# ⚠ %d YAML parse error(s):\n", len(result.ParseErrors)))
+		for _, err := range result.ParseErrors {
+			u.write(fmt.Sprintf("#   • %s\n", err))
+		}
+	}
+
+	// No changes
+	if !result.HasChanges {
+		// Don't show "No changes" if there were parse errors
+		if len(result.ParseErrors) == 0 {
+			u.write("# No changes\n\n")
+		} else {
+			u.write("\n") // Just add blank line after errors
+		}
 		return nil
 	}
 

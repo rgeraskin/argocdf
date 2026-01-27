@@ -82,15 +82,22 @@ func (m *MarkdownWriter) writeAppDiffGitHub(appDiff *types.AppDiff, _ int) error
 	var badges []string
 	if appDiff.Error != nil {
 		badges = append(badges, "❌ Error")
-	} else if ok && result != nil && result.HasChanges {
-		if len(result.Added) > 0 {
-			badges = append(badges, fmt.Sprintf("🟢+%d", len(result.Added)))
+	} else if ok && result != nil {
+		// Show parse errors
+		if len(result.ParseErrors) > 0 {
+			badges = append(badges, fmt.Sprintf("⚠️ %d parse error(s)", len(result.ParseErrors)))
 		}
-		if len(result.Removed) > 0 {
-			badges = append(badges, fmt.Sprintf("🔴-%d", len(result.Removed)))
-		}
-		if len(result.Modified) > 0 {
-			badges = append(badges, fmt.Sprintf("🟡~%d", len(result.Modified)))
+		// Show changes
+		if result.HasChanges {
+			if len(result.Added) > 0 {
+				badges = append(badges, fmt.Sprintf("🟢+%d", len(result.Added)))
+			}
+			if len(result.Removed) > 0 {
+				badges = append(badges, fmt.Sprintf("🔴-%d", len(result.Removed)))
+			}
+			if len(result.Modified) > 0 {
+				badges = append(badges, fmt.Sprintf("🟡~%d", len(result.Modified)))
+			}
 		}
 	}
 
@@ -106,10 +113,27 @@ func (m *MarkdownWriter) writeAppDiffGitHub(appDiff *types.AppDiff, _ int) error
 	// Error message
 	if appDiff.Error != nil {
 		m.write(fmt.Sprintf("> ⚠️ %s\n\n", html.EscapeString(appDiff.Error.Error())))
-	} else if !ok || result == nil || !result.HasChanges {
-		m.write("_No changes_\n\n")
-	} else if !m.summaryOnly {
-		m.writeDetailedDiffGitHub(result)
+	} else if !ok || result == nil {
+		m.write("_No diff available_\n\n")
+	} else {
+		// Show parse errors if present
+		if len(result.ParseErrors) > 0 {
+			m.write(fmt.Sprintf("> ⚠️ **%d YAML parse error(s):**\n", len(result.ParseErrors)))
+			for _, err := range result.ParseErrors {
+				m.write(fmt.Sprintf("> - %s\n", html.EscapeString(err)))
+			}
+			m.write("\n")
+		}
+
+		// Show changes
+		if !result.HasChanges {
+			// Don't show "No changes" if there were parse errors
+			if len(result.ParseErrors) == 0 {
+				m.write("_No changes_\n\n")
+			}
+		} else if !m.summaryOnly {
+			m.writeDetailedDiffGitHub(result)
+		}
 	}
 
 	m.write("</details>\n\n")
@@ -130,15 +154,22 @@ func (m *MarkdownWriter) writeAppDiffAtlantis(appDiff *types.AppDiff, _ int) err
 	var badges []string
 	if appDiff.Error != nil {
 		badges = append(badges, "❌")
-	} else if ok && result != nil && result.HasChanges {
-		if len(result.Added) > 0 {
-			badges = append(badges, fmt.Sprintf("🟢+%d", len(result.Added)))
+	} else if ok && result != nil {
+		// Show parse errors
+		if len(result.ParseErrors) > 0 {
+			badges = append(badges, fmt.Sprintf("⚠️%d", len(result.ParseErrors)))
 		}
-		if len(result.Removed) > 0 {
-			badges = append(badges, fmt.Sprintf("🔴-%d", len(result.Removed)))
-		}
-		if len(result.Modified) > 0 {
-			badges = append(badges, fmt.Sprintf("🟡~%d", len(result.Modified)))
+		// Show changes
+		if result.HasChanges {
+			if len(result.Added) > 0 {
+				badges = append(badges, fmt.Sprintf("🟢+%d", len(result.Added)))
+			}
+			if len(result.Removed) > 0 {
+				badges = append(badges, fmt.Sprintf("🔴-%d", len(result.Removed)))
+			}
+			if len(result.Modified) > 0 {
+				badges = append(badges, fmt.Sprintf("🟡~%d", len(result.Modified)))
+			}
 		}
 	}
 
@@ -154,10 +185,27 @@ func (m *MarkdownWriter) writeAppDiffAtlantis(appDiff *types.AppDiff, _ int) err
 	// Error message
 	if appDiff.Error != nil {
 		m.write(fmt.Sprintf("> ⚠️ %s\n\n", html.EscapeString(appDiff.Error.Error())))
-	} else if !ok || result == nil || !result.HasChanges {
-		m.write("_No changes_\n\n")
-	} else if !m.summaryOnly {
-		m.writeDetailedDiffAtlantis(result)
+	} else if !ok || result == nil {
+		m.write("_No diff available_\n\n")
+	} else {
+		// Show parse errors if present
+		if len(result.ParseErrors) > 0 {
+			m.write(fmt.Sprintf("> ⚠️ **%d YAML parse error(s):**\n", len(result.ParseErrors)))
+			for _, err := range result.ParseErrors {
+				m.write(fmt.Sprintf("> - %s\n", html.EscapeString(err)))
+			}
+			m.write("\n")
+		}
+
+		// Show changes
+		if !result.HasChanges {
+			// Don't show "No changes" if there were parse errors
+			if len(result.ParseErrors) == 0 {
+				m.write("_No changes_\n\n")
+			}
+		} else if !m.summaryOnly {
+			m.writeDetailedDiffAtlantis(result)
+		}
 	}
 
 	m.write("</details>\n\n")
