@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/charmbracelet/log"
 	"gopkg.in/yaml.v3"
 )
 
@@ -41,6 +42,12 @@ func NewManifestParser() *ManifestParser {
 	return &ManifestParser{}
 }
 
+// ParseResult contains parsed manifests and any parse errors encountered.
+type ParseResult struct {
+	Manifests   []Manifest
+	ParseErrors []string
+}
+
 // ParseManifests parses a multi-document YAML into Manifests.
 // Invalid YAML documents are skipped (not treated as errors) because:
 // - Empty documents and bare separators (---) are common in rendered output
@@ -48,9 +55,10 @@ func NewManifestParser() *ManifestParser {
 // - Continuing with valid documents provides a better user experience
 // Only documents that can be parsed as valid Kubernetes objects (with apiVersion,
 // kind, and metadata.name) are included in the result.
-func (p *ManifestParser) ParseManifests(content string) ([]Manifest, error) {
+// Parse errors (e.g., duplicate YAML keys) are collected and returned in ParseResult.
+func (p *ManifestParser) ParseManifests(content string) ParseResult {
 	decoder := yaml.NewDecoder(strings.NewReader(content))
-	var manifests []Manifest
+	var result ParseResult
 
 	for {
 		var rawObj map[string]interface{}
@@ -59,12 +67,11 @@ func (p *ManifestParser) ParseManifests(content string) ([]Manifest, error) {
 			break
 		}
 		if err != nil {
-			// Skip invalid YAML documents.
-			// This commonly happens with:
-			// - Empty documents or document separators (---)
-			// - Documents with only comments
-			// - Malformed YAML from rendering issues
-			// We continue processing other documents rather than failing the entire parse.
+			// Collect YAML parse errors (e.g., duplicate keys, malformed YAML)
+			// These indicate issues in the source templates that should be fixed
+			errMsg := strings.ReplaceAll(fmt.Sprintf("%v", err), "\n", " ")
+			result.ParseErrors = append(result.ParseErrors, errMsg)
+			log.Errorf("Skipping invalid YAML document: %s", errMsg)
 			continue
 		}
 		if rawObj == nil {
@@ -92,10 +99,10 @@ func (p *ManifestParser) ParseManifests(content string) ([]Manifest, error) {
 			continue
 		}
 
-		manifests = append(manifests, manifest)
+		result.Manifests = append(result.Manifests, manifest)
 	}
 
-	return manifests, nil
+	return result
 }
 
 // getString safely extracts a string from a map.
@@ -148,6 +155,10 @@ type ManifestSetDiff struct {
 
 	// HasChanges is true if there are any differences
 	HasChanges bool
+
+	// ParseErrors contains YAML parse errors from both old and new content
+	// These indicate issues in the source templates (e.g., duplicate keys)
+	ParseErrors []string
 }
 
 // ManifestDiffer compares two sets of manifests.
@@ -166,17 +177,19 @@ func NewManifestDiffer() *ManifestDiffer {
 
 // DiffManifests compares two YAML manifest contents.
 func (d *ManifestDiffer) DiffManifests(oldContent, newContent string) (*ManifestSetDiff, error) {
-	oldManifests, err := d.parser.ParseManifests(oldContent)
+	oldResult := d.parser.ParseManifests(oldContent)
+	newResult := d.parser.ParseManifests(newContent)
+
+	result, err := d.DiffManifestSets(oldResult.Manifests, newResult.Manifests)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse old manifests: %w", err)
+		return nil, err
 	}
 
-	newManifests, err := d.parser.ParseManifests(newContent)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse new manifests: %w", err)
-	}
+	// Collect parse errors from both old and new content
+	result.ParseErrors = append(result.ParseErrors, oldResult.ParseErrors...)
+	result.ParseErrors = append(result.ParseErrors, newResult.ParseErrors...)
 
-	return d.DiffManifestSets(oldManifests, newManifests)
+	return result, nil
 }
 
 // DiffManifestSets compares two slices of manifests.

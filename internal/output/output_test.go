@@ -313,6 +313,63 @@ func TestComputeSummary(t *testing.T) {
 				TotalApps: 1,
 			},
 		},
+		{
+			name: "app with parse errors",
+			diffs: []*types.AppDiff{
+				{
+					Name: "app1",
+					DiffResult: &diff.ManifestSetDiff{
+						HasChanges:  false,
+						ParseErrors: []string{"yaml: duplicate key"},
+					},
+				},
+			},
+			want: Summary{
+				TotalApps:      1,
+				AppsWithErrors: 1,
+			},
+		},
+		{
+			name: "app with multiple parse errors counts as one errored app",
+			diffs: []*types.AppDiff{
+				{
+					Name: "app1",
+					DiffResult: &diff.ManifestSetDiff{
+						HasChanges: false,
+						ParseErrors: []string{
+							"yaml: duplicate key on line 10",
+							"yaml: duplicate key on line 20",
+							"yaml: duplicate key on line 30",
+						},
+					},
+				},
+			},
+			want: Summary{
+				TotalApps:      1,
+				AppsWithErrors: 1, // Should be 1, not 3
+			},
+		},
+		{
+			name: "app with both changes and parse errors",
+			diffs: []*types.AppDiff{
+				{
+					Name: "app1",
+					DiffResult: &diff.ManifestSetDiff{
+						HasChanges: true,
+						Added: []diff.Manifest{
+							{Kind: "ConfigMap", Name: "cm1"},
+						},
+						ParseErrors: []string{"yaml: duplicate key"},
+					},
+				},
+			},
+			want: Summary{
+				TotalApps:       1,
+				AppsWithChanges: 1,
+				AppsWithErrors:  1, // Counts in both
+				TotalAdded:      1,
+			},
+		},
 	}
 
 	for _, tt := range tests {

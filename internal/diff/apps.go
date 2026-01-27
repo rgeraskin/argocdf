@@ -37,14 +37,11 @@ type DiscoveredApplication struct {
 
 // DiscoverApplications finds Application CRDs in the given manifest content.
 func (d *AppDiscoverer) DiscoverApplications(content string) ([]DiscoveredApplication, error) {
-	manifests, err := d.parser.ParseManifests(content)
-	if err != nil {
-		return nil, err
-	}
+	result := d.parser.ParseManifests(content)
 
 	var apps []DiscoveredApplication
 
-	for _, m := range manifests {
+	for _, m := range result.Manifests {
 		if m.Kind != "Application" {
 			continue
 		}

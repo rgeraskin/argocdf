@@ -31,7 +31,7 @@ type Writer interface {
 type Summary struct {
 	TotalApps       int
 	AppsWithChanges int
-	AppsWithErrors  int
+	AppsWithErrors  int // Includes app-level errors AND YAML parse errors
 	TotalAdded      int
 	TotalRemoved    int
 	TotalModified   int
@@ -158,6 +158,11 @@ func ComputeSummary(diffs []*types.AppDiff) Summary {
 		result, ok := d.DiffResult.(*diff.ManifestSetDiff)
 		if !ok || result == nil {
 			continue
+		}
+
+		// Count apps with parse errors (e.g., duplicate YAML keys) as errored apps
+		if len(result.ParseErrors) > 0 {
+			summary.AppsWithErrors++
 		}
 
 		if result.HasChanges {

@@ -176,20 +176,17 @@ spec:
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			manifests, err := parser.ParseManifests(tt.content)
-			if err != nil {
-				t.Fatalf("ParseManifests() error = %v", err)
-			}
+			result := parser.ParseManifests(tt.content)
 
-			if len(manifests) != tt.wantCount {
-				t.Errorf("ParseManifests() returned %d manifests, want %d", len(manifests), tt.wantCount)
-				for i, m := range manifests {
+			if len(result.Manifests) != tt.wantCount {
+				t.Errorf("ParseManifests() returned %d manifests, want %d", len(result.Manifests), tt.wantCount)
+				for i, m := range result.Manifests {
 					t.Logf("  Manifest %d: %s %s/%s", i, m.APIVersion, m.Kind, m.Name)
 				}
 			}
 
-			if tt.wantFirst != nil && len(manifests) > 0 {
-				got := manifests[0]
+			if tt.wantFirst != nil && len(result.Manifests) > 0 {
+				got := result.Manifests[0]
 				if got.APIVersion != tt.wantFirst.APIVersion {
 					t.Errorf("First manifest APIVersion = %q, want %q", got.APIVersion, tt.wantFirst.APIVersion)
 				}
@@ -386,6 +383,71 @@ func TestGetString(t *testing.T) {
 			got := getString(m, tt.key)
 			if got != tt.want {
 				t.Errorf("getString(%q) = %q, want %q", tt.key, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseManifests_CollectsParseErrors(t *testing.T) {
+	parser := NewManifestParser()
+
+	tests := []struct {
+		name            string
+		content         string
+		wantManifests   int
+		wantParseErrors int
+	}{
+		{
+			name: "duplicate key error",
+			content: `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test
+  annotations:
+    key: value1
+    key: value2`,
+			wantManifests:   0, // Invalid YAML is skipped
+			wantParseErrors: 1,
+		},
+		{
+			name: "mixed valid and invalid documents",
+			content: `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: valid-config
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: invalid
+  labels:
+    app: test
+    app: duplicate`,
+			wantManifests:   1, // Only valid one is parsed
+			wantParseErrors: 1,
+		},
+		{
+			name: "no errors",
+			content: `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test
+data:
+  key: value`,
+			wantManifests:   1,
+			wantParseErrors: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := parser.ParseManifests(tt.content)
+
+			if len(result.Manifests) != tt.wantManifests {
+				t.Errorf("ParseManifests() manifests = %d, want %d", len(result.Manifests), tt.wantManifests)
+			}
+			if len(result.ParseErrors) != tt.wantParseErrors {
+				t.Errorf("ParseManifests() parseErrors = %d, want %d", len(result.ParseErrors), tt.wantParseErrors)
 			}
 		})
 	}
