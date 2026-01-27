@@ -3,12 +3,12 @@ package cluster
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	argoapp "github.com/argoproj/argo-cd/v2/pkg/apis/application/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/rgeraskin/argocdf/internal/git"
@@ -103,11 +103,19 @@ func (s *ApplicationService) convertList(list *unstructured.UnstructuredList) ([
 }
 
 // convertOne converts an unstructured object to a typed Application.
+// Uses JSON marshaling instead of reflection-based converter to avoid
+// Go 1.21+ strict reflection rules on unexported fields.
 func (s *ApplicationService) convertOne(obj *unstructured.Unstructured) (*Application, error) {
-	var app Application
-	err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, &app)
+	// Marshal to JSON and unmarshal to typed struct
+	// This avoids reflection issues with unexported fields in ArgoCD types
+	data, err := json.Marshal(obj.Object)
 	if err != nil {
-		return nil, fmt.Errorf("failed to convert unstructured to Application: %w", err)
+		return nil, fmt.Errorf("failed to marshal unstructured to JSON: %w", err)
+	}
+
+	var app Application
+	if err := json.Unmarshal(data, &app); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal JSON to Application: %w", err)
 	}
 
 	return &app, nil
