@@ -343,9 +343,8 @@ func ParseKubeVersion(version string) (major, minor string, err error) {
 }
 
 // ensureDependencies checks if the chart has dependencies and builds them if needed.
-// It runs `helm dependency build` if:
-// 1. Chart.yaml exists with a dependencies section
-// 2. The charts/ directory is missing or empty
+// It runs `helm dependency build` if Chart.yaml exists with a dependencies section.
+// Helm is smart enough to skip already-fetched dependencies.
 func (r *HelmRenderer) ensureDependencies(ctx context.Context, chartPath string) error {
 	// Check if Chart.yaml exists
 	chartYamlPath := filepath.Join(chartPath, "Chart.yaml")
@@ -369,11 +368,10 @@ func (r *HelmRenderer) ensureDependencies(ctx context.Context, chartPath string)
 	}
 
 	// Check if charts/ directory exists and has content
-	chartsDir := filepath.Join(chartPath, "charts")
-	if entries, err := os.ReadDir(chartsDir); err == nil && len(entries) > 0 {
-		// charts/ exists and has files, dependencies already built
-		return nil
-	}
+	// Note: We always run helm dependency build when dependencies are defined
+	// because just checking if charts/ has *any* content is not sufficient -
+	// some dependencies might be missing while others are present.
+	// Helm is smart enough to skip already-fetched dependencies.
 
 	// Run helm dependency build with context
 	cmd := exec.CommandContext(ctx, "helm", "dependency", "build", chartPath)

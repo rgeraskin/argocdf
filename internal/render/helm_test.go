@@ -269,41 +269,7 @@ version: 1.0.0
 	}
 }
 
-func TestEnsureDependencies_ChartsExists(t *testing.T) {
-	// Create a temp directory with Chart.yaml with dependencies and charts/ dir
-	tempDir, err := os.MkdirTemp("", "helm-deps-test-")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tempDir)
-
-	chartYaml := `
-apiVersion: v2
-name: test-chart
-version: 1.0.0
-dependencies:
-  - name: nginx
-    version: 1.0.0
-    repository: https://charts.bitnami.com/bitnami
-`
-	if err := os.WriteFile(filepath.Join(tempDir, "Chart.yaml"), []byte(chartYaml), 0644); err != nil {
-		t.Fatalf("failed to create Chart.yaml: %v", err)
-	}
-
-	// Create charts/ directory with content
-	chartsDir := filepath.Join(tempDir, "charts")
-	if err := os.MkdirAll(chartsDir, 0755); err != nil {
-		t.Fatalf("failed to create charts dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(chartsDir, "nginx-1.0.0.tgz"), []byte("fake chart"), 0644); err != nil {
-		t.Fatalf("failed to create chart file: %v", err)
-	}
-
-	r := NewHelmRenderer(RenderOptions{})
-
-	// Should succeed without running helm dependency build (charts already exist)
-	err = r.ensureDependencies(context.TODO(), tempDir)
-	if err != nil {
-		t.Errorf("ensureDependencies() error = %v, want nil", err)
-	}
-}
+// Note: TestEnsureDependencies_ChartsExists was removed because it tested the old
+// behavior where helm dependency build was skipped if charts/ had any content.
+// This was a bug - partial dependency presence caused failures.
+// Now we always run helm dependency build when dependencies are defined.

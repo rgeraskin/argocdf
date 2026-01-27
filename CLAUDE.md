@@ -94,9 +94,7 @@ Apps-of-apps pattern is handled via recursive discovery with configurable max de
 
 ### Automatic Helm Dependency Management
 
-When rendering local Helm charts, argocdf automatically runs `helm dependency build` if:
-1. The chart has a `Chart.yaml` with a `dependencies:` section
-2. The `charts/` subdirectory is missing or empty
+When rendering local Helm charts, argocdf automatically runs `helm dependency build` if the chart has a `Chart.yaml` with a `dependencies:` section. Helm is smart enough to skip already-fetched dependencies, so this is safe to run unconditionally.
 
 This ensures charts with dependencies (like umbrella charts) render correctly without manual setup.
 
