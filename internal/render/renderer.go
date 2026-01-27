@@ -38,6 +38,9 @@ type RenderOptions struct {
 	KustomizeEnableHelm     bool
 	KustomizeBuildOptions   string
 	KustomizeLoadRestrictor string
+
+	// Helm options
+	HelmSkipRefresh bool
 }
 
 // RenderResult contains the result of rendering an application.

@@ -374,7 +374,11 @@ func (r *HelmRenderer) ensureDependencies(ctx context.Context, chartPath string)
 	// Helm is smart enough to skip already-fetched dependencies.
 
 	// Run helm dependency build with context
-	cmd := exec.CommandContext(ctx, "helm", "dependency", "build", chartPath)
+	args := []string{"dependency", "build", chartPath}
+	if r.opts.HelmSkipRefresh {
+		args = append(args, "--skip-refresh")
+	}
+	cmd := exec.CommandContext(ctx, "helm", args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 

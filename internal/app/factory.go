@@ -49,6 +49,7 @@ func (f *Factory) CreateRenderFactory(kubeVersion string) *render.Factory {
 		KustomizeEnableHelm:     f.config.KustomizeEnableHelm,
 		KustomizeBuildOptions:   f.config.KustomizeBuildOptions,
 		KustomizeLoadRestrictor: f.config.KustomizeLoadRestrictor,
+		HelmSkipRefresh:         f.config.HelmSkipRefresh,
 	}
 	return render.NewFactory(opts)
 }

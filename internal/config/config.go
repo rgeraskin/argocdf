@@ -61,6 +61,9 @@ type Config struct {
 	KustomizeEnableHelm     bool
 	KustomizeBuildOptions   string
 	KustomizeLoadRestrictor string
+
+	// Helm options
+	HelmSkipRefresh bool
 }
 
 // ParseFileOutput parses a "format:path" string into a FileOutput.

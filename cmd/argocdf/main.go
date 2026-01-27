@@ -39,6 +39,9 @@ var (
 	kustomizeEnableHelm     bool
 	kustomizeBuildOptions   string
 	kustomizeLoadRestrictor string
+
+	// Helm options
+	helmSkipRefresh bool
 )
 
 func main() {
@@ -110,6 +113,10 @@ Examples:
 		"Additional kustomize build options (space-separated)")
 	rootCmd.Flags().StringVar(&kustomizeLoadRestrictor, "kustomize-load-restrictor", "",
 		"Load restrictor mode (e.g., 'LoadRestrictionsNone')")
+
+	// Helm options
+	rootCmd.Flags().BoolVar(&helmSkipRefresh, "helm-skip-refresh", true,
+		"Skip refreshing repository cache during helm dependency build")
 
 	// Output flags
 	rootCmd.Flags().StringVar(&stdoutFormat, "stdout", config.DefaultStdoutFormat,
@@ -191,6 +198,7 @@ func runMain(cmd *cobra.Command, args []string) error {
 		KustomizeEnableHelm:     kustomizeEnableHelm,
 		KustomizeBuildOptions:   kustomizeBuildOptions,
 		KustomizeLoadRestrictor: kustomizeLoadRestrictor,
+		HelmSkipRefresh:         helmSkipRefresh,
 	}
 
 	// Auto-detect missing values
