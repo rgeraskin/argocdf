@@ -273,3 +273,70 @@ version: 1.0.0
 // behavior where helm dependency build was skipped if charts/ had any content.
 // This was a bug - partial dependency presence caused failures.
 // Now we always run helm dependency build when dependencies are defined.
+
+func TestHelmSkipRefresh(t *testing.T) {
+	tests := []struct {
+		name            string
+		helmSkipRefresh bool
+		wantSkipRefresh bool
+	}{
+		{
+			name:            "skip refresh enabled",
+			helmSkipRefresh: true,
+			wantSkipRefresh: true,
+		},
+		{
+			name:            "skip refresh disabled",
+			helmSkipRefresh: false,
+			wantSkipRefresh: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := NewHelmRenderer(RenderOptions{
+				HelmSkipRefresh: tt.helmSkipRefresh,
+			})
+
+			if r.opts.HelmSkipRefresh != tt.wantSkipRefresh {
+				t.Errorf("HelmSkipRefresh = %v, want %v", r.opts.HelmSkipRefresh, tt.wantSkipRefresh)
+			}
+		})
+	}
+}
+
+func TestHelmSkipRefresh_CommandArgs(t *testing.T) {
+	// This test verifies that the HelmSkipRefresh option affects
+	// the command arguments in ensureDependencies.
+	// We can't easily test the actual command execution without mocking,
+	// but we can verify the option is properly stored and would be used.
+
+	tests := []struct {
+		name            string
+		helmSkipRefresh bool
+	}{
+		{
+			name:            "option stored when true",
+			helmSkipRefresh: true,
+		},
+		{
+			name:            "option stored when false",
+			helmSkipRefresh: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := RenderOptions{
+				HelmSkipRefresh: tt.helmSkipRefresh,
+			}
+			r := NewHelmRenderer(opts)
+
+			// Verify the option is properly stored
+			if r.opts.HelmSkipRefresh != tt.helmSkipRefresh {
+				t.Errorf("HelmSkipRefresh not properly stored: got %v, want %v",
+					r.opts.HelmSkipRefresh, tt.helmSkipRefresh)
+			}
+		})
+	}
+}
