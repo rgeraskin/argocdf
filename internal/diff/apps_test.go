@@ -937,4 +937,116 @@ func TestAppDiffQueue(t *testing.T) {
 			t.Errorf("OldSpec.Project = %s, want old-project", app.OldSpec.Project)
 		}
 	})
+
+	t.Run("UpdatePending updates existing pending app", func(t *testing.T) {
+		queue := NewAppDiffQueue(10)
+
+		// Add app with "old" spec (simulates cluster spec)
+		oldSpec := &cluster.ApplicationSpec{Project: "cluster-spec"}
+		queue.Add(QueuedApp{Name: "app1", Namespace: "ns1", Depth: 0, Spec: oldSpec})
+
+		// Update with "new" spec (simulates git spec discovered by parent)
+		newSpec := &cluster.ApplicationSpec{Project: "git-spec"}
+		gitOldSpec := &cluster.ApplicationSpec{Project: "git-old-spec"}
+		updated := queue.UpdatePending(QueuedApp{
+			Name:      "app1",
+			Namespace: "ns1",
+			Spec:      newSpec,
+			OldSpec:   gitOldSpec,
+			ParentApp: "parent-app",
+		})
+
+		if !updated {
+			t.Error("UpdatePending should return true for pending app")
+		}
+
+		// Verify spec was updated
+		app := queue.Next()
+		if app.Spec.Project != "git-spec" {
+			t.Errorf("Spec.Project = %s, want git-spec", app.Spec.Project)
+		}
+		if app.OldSpec.Project != "git-old-spec" {
+			t.Errorf("OldSpec.Project = %s, want git-old-spec", app.OldSpec.Project)
+		}
+		if app.ParentApp != "parent-app" {
+			t.Errorf("ParentApp = %s, want parent-app", app.ParentApp)
+		}
+	})
+
+	t.Run("UpdatePending returns false for processed app", func(t *testing.T) {
+		queue := NewAppDiffQueue(10)
+		queue.Add(QueuedApp{Name: "app1", Namespace: "ns1", Depth: 0})
+		queue.Next() // process it
+
+		updated := queue.UpdatePending(QueuedApp{Name: "app1", Namespace: "ns1"})
+		if updated {
+			t.Error("UpdatePending should return false for processed app")
+		}
+	})
+
+	t.Run("UpdatePending returns false for non-existent app", func(t *testing.T) {
+		queue := NewAppDiffQueue(10)
+
+		updated := queue.UpdatePending(QueuedApp{Name: "app1", Namespace: "ns1"})
+		if updated {
+			t.Error("UpdatePending should return false for non-existent app")
+		}
+	})
+
+	t.Run("RequeueProcessed requeues already-processed app", func(t *testing.T) {
+		queue := NewAppDiffQueue(10)
+
+		// Add and process app with cluster spec
+		clusterSpec := &cluster.ApplicationSpec{Project: "cluster"}
+		queue.Add(QueuedApp{Name: "app1", Namespace: "ns1", Depth: 0, Spec: clusterSpec})
+		queue.Next() // process it
+
+		// Requeue with git spec (simulates parent discovering spec change)
+		gitSpec := &cluster.ApplicationSpec{Project: "git"}
+		gitOldSpec := &cluster.ApplicationSpec{Project: "git-old"}
+		requeued := queue.RequeueProcessed(QueuedApp{
+			Name:      "app1",
+			Namespace: "ns1",
+			Depth:     1,
+			Spec:      gitSpec,
+			OldSpec:   gitOldSpec,
+			ParentApp: "parent",
+		})
+
+		if !requeued {
+			t.Error("RequeueProcessed should return true for processed app")
+		}
+
+		// Verify app is back in queue with new spec
+		if queue.IsEmpty() {
+			t.Fatal("queue should not be empty after requeue")
+		}
+
+		app := queue.Next()
+		if app.Spec.Project != "git" {
+			t.Errorf("Spec.Project = %s, want git", app.Spec.Project)
+		}
+		if app.OldSpec.Project != "git-old" {
+			t.Errorf("OldSpec.Project = %s, want git-old", app.OldSpec.Project)
+		}
+	})
+
+	t.Run("RequeueProcessed returns false for pending app", func(t *testing.T) {
+		queue := NewAppDiffQueue(10)
+		queue.Add(QueuedApp{Name: "app1", Namespace: "ns1", Depth: 0})
+
+		requeued := queue.RequeueProcessed(QueuedApp{Name: "app1", Namespace: "ns1"})
+		if requeued {
+			t.Error("RequeueProcessed should return false for pending (not processed) app")
+		}
+	})
+
+	t.Run("RequeueProcessed returns false for non-existent app", func(t *testing.T) {
+		queue := NewAppDiffQueue(10)
+
+		requeued := queue.RequeueProcessed(QueuedApp{Name: "app1", Namespace: "ns1"})
+		if requeued {
+			t.Error("RequeueProcessed should return false for non-existent app")
+		}
+	})
 }

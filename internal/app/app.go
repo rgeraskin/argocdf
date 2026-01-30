@@ -187,7 +187,7 @@ func (a *App) filterAffectedApps(apps []cluster.Application, changed *git.Change
 
 // processApplications processes all affected applications with recursion.
 func (a *App) processApplications(ctx context.Context, apps []cluster.Application) ([]*types.AppDiff, error) {
-	var results []*types.AppDiff
+	results := make(map[string]*types.AppDiff)
 	queue := a.factory.CreateAppQueue()
 
 	// Add initial apps to queue
@@ -219,7 +219,8 @@ func (a *App) processApplications(ctx context.Context, apps []cluster.Applicatio
 				Error:         err,
 			}
 		}
-		results = append(results, appDiff)
+		key := fmt.Sprintf("%s/%s", appDiff.Namespace, appDiff.Name)
+		results[key] = appDiff
 
 		// Look for new and modified Application CRDs in the diff (apps-of-apps pattern)
 		diffResult, _ := appDiff.DiffResult.(*diff.ManifestSetDiff)
@@ -250,16 +251,35 @@ func (a *App) processApplications(ctx context.Context, apps []cluster.Applicatio
 				a.logger.Warn("Error discovering modified child apps", "parent", queuedApp.Name, "error", err)
 			} else {
 				for _, modApp := range modifiedApps {
-					added := queue.Add(diff.QueuedApp{
+					childApp := diff.QueuedApp{
 						Name:      modApp.Name,
 						Namespace: modApp.Namespace,
 						Depth:     queuedApp.Depth + 1,
 						ParentApp: queuedApp.Name,
 						Spec:      &modApp.NewSpec,
 						OldSpec:   &modApp.OldSpec,
-					})
-					if added {
-						a.logger.Debug("Discovered modified child application", "parent", queuedApp.Name, "child", modApp.Name)
+					}
+
+					// Case 1: App is still pending - update its spec
+					if queue.UpdatePending(childApp) {
+						a.logger.Debug("Updated pending child application with git spec",
+							"parent", queuedApp.Name, "child", modApp.Name)
+						appDiff.ChildAppNames = append(appDiff.ChildAppNames, modApp.Name)
+						continue
+					}
+
+					// Case 2: App not in queue at all - add it (pure child discovery)
+					if queue.Add(childApp) {
+						a.logger.Debug("Discovered modified child application",
+							"parent", queuedApp.Name, "child", modApp.Name)
+						appDiff.ChildAppNames = append(appDiff.ChildAppNames, modApp.Name)
+						continue
+					}
+
+					// Case 3: App was already processed - requeue for re-processing
+					if queue.RequeueProcessed(childApp) {
+						a.logger.Info("Re-queuing already-processed child with git spec",
+							"parent", queuedApp.Name, "child", modApp.Name)
 						appDiff.ChildAppNames = append(appDiff.ChildAppNames, modApp.Name)
 					}
 				}
@@ -267,7 +287,12 @@ func (a *App) processApplications(ctx context.Context, apps []cluster.Applicatio
 		}
 	}
 
-	return results, nil
+	// Convert map to slice
+	var resultSlice []*types.AppDiff
+	for _, r := range results {
+		resultSlice = append(resultSlice, r)
+	}
+	return resultSlice, nil
 }
 
 // processOneApp processes a single application and returns its diff.

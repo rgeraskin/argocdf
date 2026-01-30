@@ -231,6 +231,48 @@ func (q *AppDiffQueue) ProcessedCount() int {
 	return len(q.processed)
 }
 
+// UpdatePending updates the spec of a pending app if it exists.
+// Returns true if the app was found in pending and updated.
+func (q *AppDiffQueue) UpdatePending(app QueuedApp) bool {
+	key := appKey(app.Namespace, app.Name)
+
+	// Can't update if already processed
+	if q.processed[key] {
+		return false
+	}
+
+	// Find and update in pending slice
+	for i := range q.pending {
+		if appKey(q.pending[i].Namespace, q.pending[i].Name) == key {
+			q.pending[i].Spec = app.Spec
+			q.pending[i].OldSpec = app.OldSpec
+			q.pending[i].ParentApp = app.ParentApp
+			return true
+		}
+	}
+	return false
+}
+
+// RequeueProcessed moves an already-processed app back to pending with new specs.
+// This handles the case where a child app was processed before its parent
+// discovered that the child's spec changed in git.
+// Re-processing is needed even if the first attempt succeeded - the "successful"
+// result is semantically wrong (both branches rendered with cluster spec instead
+// of old-git-spec → new-git-spec). Returns true if requeued.
+func (q *AppDiffQueue) RequeueProcessed(app QueuedApp) bool {
+	key := appKey(app.Namespace, app.Name)
+
+	// Only requeue if it was actually processed
+	if !q.processed[key] {
+		return false
+	}
+
+	// Remove from processed and add to pending
+	delete(q.processed, key)
+	q.pending = append(q.pending, app)
+	return true
+}
+
 // AppTree structures the diff results into a tree based on parent-child relationships.
 type AppTree struct {
 	Root     []*AppTreeNode
