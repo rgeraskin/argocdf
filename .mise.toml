@@ -1,0 +1,87 @@
+# argocdf mise configuration
+# Run tasks with: mise run <task>
+
+[env]
+BINARY_NAME = "argocdf"
+
+[tasks.build]
+description = "Build the binary"
+run = """
+VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo "dev")
+go build -ldflags "-X main.Version=$VERSION" -o $BINARY_NAME ./cmd/argocdf
+"""
+
+[tasks.build-all]
+description = "Build for multiple platforms"
+run = """
+VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo "dev")
+LDFLAGS="-X main.Version=$VERSION"
+GOOS=darwin GOARCH=amd64 go build -ldflags "$LDFLAGS" -o ${BINARY_NAME}-darwin-amd64 ./cmd/argocdf
+GOOS=darwin GOARCH=arm64 go build -ldflags "$LDFLAGS" -o ${BINARY_NAME}-darwin-arm64 ./cmd/argocdf
+GOOS=linux GOARCH=amd64 go build -ldflags "$LDFLAGS" -o ${BINARY_NAME}-linux-amd64 ./cmd/argocdf
+GOOS=linux GOARCH=arm64 go build -ldflags "$LDFLAGS" -o ${BINARY_NAME}-linux-arm64 ./cmd/argocdf
+"""
+
+[tasks.install]
+description = "Install to GOPATH/bin"
+run = """
+VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo "dev")
+go install -ldflags "-X main.Version=$VERSION" ./cmd/argocdf
+"""
+
+[tasks.test]
+description = "Run tests"
+run = "go test -v ./..."
+
+[tasks.test-coverage]
+alias = "coverage"
+description = "Run tests with coverage"
+run = """
+go test -coverprofile=coverage.out ./...
+go tool cover -html=coverage.out -o coverage.html
+"""
+
+[tasks.lint]
+description = "Run golangci-lint"
+run = "golangci-lint run ./..."
+
+[tasks.fmt]
+alias = "format"
+description = "Format code"
+run = """
+go fmt ./...
+goimports -w .
+"""
+
+[tasks.vet]
+description = "Run go vet"
+run = "go vet ./..."
+
+[tasks.deps]
+description = "Download dependencies"
+run = "go mod download"
+
+[tasks.tidy]
+description = "Tidy dependencies"
+run = "go mod tidy"
+
+[tasks.clean]
+description = "Clean build artifacts"
+run = """
+rm -f $BINARY_NAME
+rm -f ${BINARY_NAME}-*
+rm -f coverage.out coverage.html
+rm -f argocdf-report.html
+"""
+
+[tasks.dev]
+description = "Run in development mode"
+run = "go run ./cmd/argocdf"
+
+[tasks.check]
+alias = "ci"
+description = "Run all checks (vet, lint, test)"
+depends = ["vet", "lint", "test"]
+
+[tools]
+golangci-lint = "2.2.2"
