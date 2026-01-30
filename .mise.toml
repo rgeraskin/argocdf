@@ -1,5 +1,9 @@
-# argocdf mise configuration
-# Run tasks with: mise run <task>
+[tools]
+go = "1.25.5"
+golangci-lint = "2.2.2"
+kind = "0.31.0"
+kubectl = "1.31.1"
+yq = "4.44.3"
 
 [env]
 BINARY_NAME = "argocdf"
@@ -83,5 +87,25 @@ alias = "ci"
 description = "Run all checks (vet, lint, test)"
 depends = ["vet", "lint", "test"]
 
-[tools]
-golangci-lint = "2.2.2"
+[tasks."e2e:bootstrap"]
+description = "Bootstrap e2e test environment"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+
+git submodule update --init --recursive
+kind create cluster -n argocdf
+kubectl kustomize e2e/argocd | \
+    yq 'select(.kind == "CustomResourceDefinition")' | \
+    kubectl --context kind-argocdf apply -f -
+kubectl --context kind-argocdf apply -k e2e/argocd
+"""
+
+[tasks."e2e:clean"]
+description = "Destroy e2e test environment"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+
+kind delete cluster -n argocdf
+"""
