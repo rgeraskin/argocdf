@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/charmbracelet/log"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/rgeraskin/argocdf/internal/git"
 	"github.com/rgeraskin/argocdf/internal/output"
 	"github.com/rgeraskin/argocdf/internal/render"
+	"github.com/rgeraskin/argocdf/internal/rendercache"
 	"github.com/rgeraskin/argocdf/internal/types"
 )
 
@@ -30,6 +32,12 @@ type App struct {
 	differ     *diff.ManifestDiffer
 	discoverer *diff.AppDiscoverer
 	writer     output.Writer
+
+	// Render cache (nil when disabled or bypassed for this run)
+	cache       *rendercache.Cache
+	kubeVersion string
+	cacheHits   int
+	cacheMisses int
 }
 
 // New creates a new App with the given configuration.
@@ -115,6 +123,7 @@ func (a *App) initialize(ctx context.Context) error {
 		}
 	}
 	a.logger.Debug("Using Kubernetes version", "version", kubeVersion)
+	a.kubeVersion = kubeVersion
 
 	// Create application service
 	a.appService = a.factory.CreateAppService(a.kubeClient)
@@ -124,6 +133,30 @@ func (a *App) initialize(ctx context.Context) error {
 	a.repo, err = a.factory.CreateRepository()
 	if err != nil {
 		return fmt.Errorf("failed to open repository: %w", err)
+	}
+
+	// Create render cache (may be nil when disabled via --no-cache).
+	// Cache failures degrade to normal rendering.
+	a.cache, err = a.factory.CreateRenderCache()
+	if err != nil {
+		a.logger.Warn("Failed to initialize render cache, continuing without it", "error", err)
+		a.cache = nil
+	}
+	// Bypass the cache entirely when the working tree is dirty: rendering runs
+	// from a working-tree checkout that may include uncommitted changes the git
+	// tree hash does not capture.
+	if a.cache != nil {
+		status, serr := git.RunGitCommand(a.cfg.RepoPath, "status", "--porcelain")
+		switch {
+		case serr != nil:
+			a.logger.Debug("Could not determine working tree status; disabling render cache", "error", serr)
+			a.cache = nil
+		case strings.TrimSpace(status) != "":
+			a.logger.Debug("Working tree is dirty; disabling render cache for this run")
+			a.cache = nil
+		default:
+			a.logger.Debug("Render cache enabled", "dir", a.cache.Dir())
+		}
 	}
 
 	// Create renderer
@@ -294,6 +327,11 @@ func (a *App) processApplications(ctx context.Context, apps []cluster.Applicatio
 	for _, r := range results {
 		resultSlice = append(resultSlice, r)
 	}
+
+	if a.cache != nil {
+		a.logger.Info("Render cache", "hits", a.cacheHits, "misses", a.cacheMisses)
+	}
+
 	return resultSlice, nil
 }
 
@@ -325,45 +363,19 @@ func (a *App) processOneApp(ctx context.Context, queuedApp *diff.QueuedApp) (*ty
 	appNew.Namespace = queuedApp.Namespace
 
 	// Render from base branch using old spec
-	var renderedOld []byte
-	err := a.repo.WithBranch(a.cfg.BaseBranch, func() error {
-		if !a.sourcePathsExist(appOld, a.repo.Path()) {
-			a.logger.Debug("Source path does not exist on base branch, treating as new app",
-				"app", queuedApp.Name, "branch", a.cfg.BaseBranch)
-			return nil
-		}
-		result, err := a.renderer.RenderApplication(ctx, appOld, a.repo.Path())
-		if err != nil {
-			return err
-		}
-		renderedOld = result.Manifests
-		appDiff.SourceType = result.SourceType
-		return nil
-	})
+	renderedOld, sourceTypeOld, err := a.renderBranch(ctx, appOld, a.cfg.BaseBranch, "new app")
 	if err != nil {
 		return nil, fmt.Errorf("failed to render base branch: %w", err)
 	}
+	appDiff.SourceType = sourceTypeOld
 
 	// Render from target branch using new spec
-	var renderedNew []byte
-	err = a.repo.WithBranch(a.cfg.TargetBranch, func() error {
-		if !a.sourcePathsExist(appNew, a.repo.Path()) {
-			a.logger.Debug("Source path does not exist on target branch, treating as deleted app",
-				"app", queuedApp.Name, "branch", a.cfg.TargetBranch)
-			return nil
-		}
-		result, err := a.renderer.RenderApplication(ctx, appNew, a.repo.Path())
-		if err != nil {
-			return err
-		}
-		renderedNew = result.Manifests
-		if appDiff.SourceType == "" {
-			appDiff.SourceType = result.SourceType
-		}
-		return nil
-	})
+	renderedNew, sourceTypeNew, err := a.renderBranch(ctx, appNew, a.cfg.TargetBranch, "deleted app")
 	if err != nil {
 		return nil, fmt.Errorf("failed to render target branch: %w", err)
+	}
+	if appDiff.SourceType == "" {
+		appDiff.SourceType = sourceTypeNew
 	}
 
 	appDiff.RenderedOld = string(renderedOld)
@@ -377,6 +389,106 @@ func (a *App) processOneApp(ctx context.Context, queuedApp *diff.QueuedApp) (*ty
 	appDiff.DiffResult = diffResult
 
 	return appDiff, nil
+}
+
+// renderBranch renders an application from the given branch, consulting the
+// persistent render cache first. On a cache hit it returns the cached manifests
+// and SKIPS the branch checkout entirely (the main speedup). On a miss it
+// checks out the branch, renders, and stores the result.
+//
+// missingKind describes how a missing source path is interpreted for logging
+// (e.g. "new app" on the base branch, "deleted app" on the target branch).
+func (a *App) renderBranch(
+	ctx context.Context,
+	app *cluster.Application,
+	branch, missingKind string,
+) ([]byte, types.SourceType, error) {
+	// Compute the cache key without checking out (git rev-parse reads the object
+	// database directly). An empty key means "bypass the cache for this render".
+	key, haveKey := a.renderCacheKey(app, branch)
+
+	if a.cache != nil && haveKey {
+		if entry, ok := a.cache.Get(key); ok {
+			a.cacheHits++
+			a.logger.Debug("Render cache hit", "app", app.Name, "branch", branch)
+			return entry.Manifests, types.SourceType(entry.SourceType), nil
+		}
+		a.cacheMisses++
+		a.logger.Debug("Render cache miss", "app", app.Name, "branch", branch)
+	}
+
+	var (
+		manifests  []byte
+		sourceType types.SourceType
+	)
+	err := a.repo.WithBranch(branch, func() error {
+		if !a.sourcePathsExist(app, a.repo.Path()) {
+			a.logger.Debug("Source path does not exist, treating as "+missingKind,
+				"app", app.Name, "branch", branch)
+			return nil
+		}
+		result, rerr := a.renderer.RenderApplication(ctx, app, a.repo.Path())
+		if rerr != nil {
+			return rerr
+		}
+		manifests = result.Manifests
+		sourceType = result.SourceType
+		return nil
+	})
+	if err != nil {
+		return nil, "", err
+	}
+
+	// Store on a real render only. When haveKey is false the source path was
+	// unresolvable (missing on this commit), which is exactly the empty
+	// new/deleted-app render we must not cache.
+	if a.cache != nil && haveKey {
+		if perr := a.cache.Put(key, &rendercache.Entry{
+			Manifests:  manifests,
+			SourceType: string(sourceType),
+		}); perr != nil {
+			a.logger.Warn("Failed to write render cache entry",
+				"app", app.Name, "branch", branch, "error", perr)
+		}
+	}
+
+	return manifests, sourceType, nil
+}
+
+// renderCacheKey computes the cache key for rendering app at branch. It returns
+// ok=false whenever caching should be bypassed for this render (cache disabled,
+// commit unresolvable, or a local source tree hash unavailable).
+func (a *App) renderCacheKey(app *cluster.Application, branch string) (string, bool) {
+	if a.cache == nil {
+		return "", false
+	}
+
+	commit, err := a.repo.CommitHash(branch)
+	if err != nil {
+		a.logger.Debug("Cannot resolve commit for cache key", "branch", branch, "error", err)
+		return "", false
+	}
+
+	return rendercache.ComputeKey(rendercache.KeyInput{
+		AppName:     app.Name,
+		Namespace:   app.Namespace,
+		Spec:        &app.Spec,
+		KubeVersion: a.kubeVersion,
+		Options: rendercache.KeyOptions{
+			KustomizeEnableHelm:     a.cfg.KustomizeEnableHelm,
+			KustomizeBuildOptions:   a.cfg.KustomizeBuildOptions,
+			KustomizeLoadRestrictor: a.cfg.KustomizeLoadRestrictor,
+			HelmSkipRefresh:         a.cfg.HelmSkipRefresh,
+		},
+		Commit: commit,
+		ResolveTree: func(commit, path string) (string, bool) {
+			h, terr := a.repo.TreeHash(commit, path)
+			if terr != nil {
+				return "", false
+			}
+			return h, true
+		},
+	})
 }
 
 // sourcePathsExist checks if all local source paths for an application exist on disk.

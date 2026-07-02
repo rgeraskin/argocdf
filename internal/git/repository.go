@@ -87,6 +87,22 @@ func (r *Repository) CommitHash(ref string) (string, error) {
 	return r.run("rev-parse", ref)
 }
 
+// TreeHash returns the git object (tree or blob) hash for the given path at the
+// specified commit. It reads directly from the object database via
+// `git rev-parse <commit>:<path>`, so no checkout is required. Because the hash
+// is content-addressed, identical content yields an identical hash across
+// branches and commits.
+//
+// An empty or "." path resolves to the commit's root tree (<commit>^{tree}).
+// If the path does not exist at the given commit, an error is returned.
+func (r *Repository) TreeHash(commit, path string) (string, error) {
+	cleanPath := strings.Trim(strings.TrimSpace(path), "/")
+	if cleanPath == "" || cleanPath == "." {
+		return r.run("rev-parse", commit+"^{tree}")
+	}
+	return r.run("rev-parse", commit+":"+cleanPath)
+}
+
 // GetWorktreeForBranch returns the worktree path for a branch if it's checked out in a worktree.
 // Returns empty string if the branch is not in any worktree.
 func (r *Repository) GetWorktreeForBranch(branchName string) (string, error) {

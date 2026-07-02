@@ -204,3 +204,105 @@ func TestGetWorktreeForBranch(t *testing.T) {
 		t.Errorf("GetWorktreeForBranch(nonexistent) = %q, want empty string", path)
 	}
 }
+
+func TestTreeHash(t *testing.T) {
+	repoDir := t.TempDir()
+
+	runCmd := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repoDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, out)
+		}
+	}
+
+	if err := exec.Command("git", "-C", repoDir, "init").Run(); err != nil {
+		t.Skip("git not available")
+	}
+	runCmd("config", "user.email", "test@example.com")
+	runCmd("config", "user.name", "Test User")
+
+	// Commit 1: create app/values.yaml and an unrelated file.
+	if err := os.MkdirAll(filepath.Join(repoDir, "app"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "app", "values.yaml"), []byte("replicas: 1\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "other.txt"), []byte("a\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runCmd("add", ".")
+	runCmd("commit", "-m", "c1")
+
+	repo, err := Open(repoDir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	c1, err := repo.CommitHash("HEAD")
+	if err != nil {
+		t.Fatalf("CommitHash: %v", err)
+	}
+
+	hash1, err := repo.TreeHash(c1, "app")
+	if err != nil {
+		t.Fatalf("TreeHash(app) at c1: %v", err)
+	}
+
+	// Commit 2: change an unrelated file only; app/ content is untouched.
+	if err := os.WriteFile(filepath.Join(repoDir, "other.txt"), []byte("b\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runCmd("add", ".")
+	runCmd("commit", "-m", "c2")
+	c2, err := repo.CommitHash("HEAD")
+	if err != nil {
+		t.Fatalf("CommitHash: %v", err)
+	}
+
+	hash2, err := repo.TreeHash(c2, "app")
+	if err != nil {
+		t.Fatalf("TreeHash(app) at c2: %v", err)
+	}
+	if hash1 != hash2 {
+		t.Errorf("expected stable tree hash for unchanged path across commits, got %s != %s", hash1, hash2)
+	}
+
+	// Commit 3: change app/values.yaml; hash must change.
+	if err := os.WriteFile(filepath.Join(repoDir, "app", "values.yaml"), []byte("replicas: 2\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runCmd("add", ".")
+	runCmd("commit", "-m", "c3")
+	c3, err := repo.CommitHash("HEAD")
+	if err != nil {
+		t.Fatalf("CommitHash: %v", err)
+	}
+
+	hash3, err := repo.TreeHash(c3, "app")
+	if err != nil {
+		t.Fatalf("TreeHash(app) at c3: %v", err)
+	}
+	if hash3 == hash1 {
+		t.Errorf("expected different tree hash after path content changed, got %s", hash3)
+	}
+
+	// Root tree via "." and "" should both resolve and be equal.
+	rootDot, err := repo.TreeHash(c3, ".")
+	if err != nil {
+		t.Fatalf("TreeHash(.): %v", err)
+	}
+	rootEmpty, err := repo.TreeHash(c3, "")
+	if err != nil {
+		t.Fatalf("TreeHash(\"\"): %v", err)
+	}
+	if rootDot != rootEmpty {
+		t.Errorf("root tree hash mismatch: %q vs %q", rootDot, rootEmpty)
+	}
+
+	// Missing path must return an error (caller treats as cache bypass).
+	if _, err := repo.TreeHash(c3, "does/not/exist"); err == nil {
+		t.Error("expected error for missing path")
+	}
+}
