@@ -106,6 +106,10 @@ func (m *MarkdownWriter) writeAppDiffGitHub(appDiff *types.AppDiff, _ int) error
 		if len(result.ParseErrors) > 0 {
 			badges = append(badges, fmt.Sprintf("⚠️ %d parse error(s)", len(result.ParseErrors)))
 		}
+		// Show parse warnings
+		if len(result.ParseWarnings) > 0 {
+			badges = append(badges, fmt.Sprintf("⚠️ %d warning(s)", len(result.ParseWarnings)))
+		}
 		// Show changes
 		if result.HasChanges {
 			if len(result.Added) > 0 {
@@ -144,6 +148,15 @@ func (m *MarkdownWriter) writeAppDiffGitHub(appDiff *types.AppDiff, _ int) error
 			m.write("\n")
 		}
 
+		// Show parse warnings if present (non-fatal; documents are still diffed)
+		if len(result.ParseWarnings) > 0 {
+			m.write(fmt.Sprintf("> ⚠️ **%d warning(s):**\n", len(result.ParseWarnings)))
+			for _, warn := range result.ParseWarnings {
+				m.write(fmt.Sprintf("> - %s\n", html.EscapeString(warn)))
+			}
+			m.write("\n")
+		}
+
 		// Show changes
 		if !result.HasChanges {
 			// Don't show "No changes" if there were parse errors
@@ -177,6 +190,10 @@ func (m *MarkdownWriter) writeAppDiffAtlantis(appDiff *types.AppDiff, _ int) err
 		// Show parse errors
 		if len(result.ParseErrors) > 0 {
 			badges = append(badges, fmt.Sprintf("⚠️%d", len(result.ParseErrors)))
+		}
+		// Show parse warnings
+		if len(result.ParseWarnings) > 0 {
+			badges = append(badges, fmt.Sprintf("⚠️%d", len(result.ParseWarnings)))
 		}
 		// Show changes
 		if result.HasChanges {
@@ -212,6 +229,15 @@ func (m *MarkdownWriter) writeAppDiffAtlantis(appDiff *types.AppDiff, _ int) err
 			m.write(fmt.Sprintf("> ⚠️ **%d YAML parse error(s):**\n", len(result.ParseErrors)))
 			for _, err := range result.ParseErrors {
 				m.write(fmt.Sprintf("> - %s\n", html.EscapeString(err)))
+			}
+			m.write("\n")
+		}
+
+		// Show parse warnings if present (non-fatal; documents are still diffed)
+		if len(result.ParseWarnings) > 0 {
+			m.write(fmt.Sprintf("> ⚠️ **%d warning(s):**\n", len(result.ParseWarnings)))
+			for _, warn := range result.ParseWarnings {
+				m.write(fmt.Sprintf("> - %s\n", html.EscapeString(warn)))
 			}
 			m.write("\n")
 		}

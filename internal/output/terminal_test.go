@@ -96,6 +96,24 @@ func TestTerminalWriterWriteAppDiff(t *testing.T) {
 			wantOutput: []string{"test-app", "No changes"},
 		},
 		{
+			name:   "app with parse warnings renders them but keeps diffing",
+			format: "fields",
+			appDiff: &types.AppDiff{
+				Name:      "test-app",
+				Namespace: "argocd",
+				DiffResult: &diff.ManifestSetDiff{
+					HasChanges: true,
+					Added: []diff.Manifest{
+						{Kind: "ConfigMap", Namespace: "default", Name: "newcm"},
+					},
+					ParseWarnings: []string{
+						`resource ConfigMap/newcm: duplicate key "foo" (using last value)`,
+					},
+				},
+			},
+			wantOutput: []string{"test-app", "1 warning(s)", "duplicate key", "1 added"},
+		},
+		{
 			name:   "app with changes in fields format",
 			format: "fields",
 			appDiff: &types.AppDiff{

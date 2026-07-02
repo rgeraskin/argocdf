@@ -2,6 +2,7 @@
 package diff
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -525,13 +526,14 @@ func TestParseManifests_CollectsParseErrors(t *testing.T) {
 	parser := NewManifestParser()
 
 	tests := []struct {
-		name            string
-		content         string
-		wantManifests   int
-		wantParseErrors int
+		name              string
+		content           string
+		wantManifests     int
+		wantParseErrors   int
+		wantParseWarnings int
 	}{
 		{
-			name: "duplicate key error",
+			name: "duplicate key resolved with last-wins (warning, doc kept)",
 			content: `apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -539,11 +541,12 @@ metadata:
   annotations:
     key: value1
     key: value2`,
-			wantManifests:   0, // Invalid YAML is skipped
-			wantParseErrors: 1,
+			wantManifests:     1, // Duplicate keys are non-fatal now; doc kept
+			wantParseErrors:   0,
+			wantParseWarnings: 1,
 		},
 		{
-			name: "mixed valid and invalid documents",
+			name: "mixed valid and duplicate-key documents",
 			content: `apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -552,23 +555,40 @@ metadata:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: invalid
+  name: dup
   labels:
     app: test
     app: duplicate`,
-			wantManifests:   1, // Only valid one is parsed
-			wantParseErrors: 1,
+			wantManifests:     2, // Both kept; second has a resolved duplicate
+			wantParseErrors:   0,
+			wantParseWarnings: 1,
 		},
 		{
-			name: "no errors",
+			name: "genuine syntax error still lands in ParseErrors and doc skipped",
+			content: `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: valid-config
+---
+apiVersion: v1
+kind: ConfigMap
+data:
+  broken: [unclosed, list`,
+			wantManifests:     1, // Only the valid doc survives
+			wantParseErrors:   1,
+			wantParseWarnings: 0,
+		},
+		{
+			name: "no errors or warnings",
 			content: `apiVersion: v1
 kind: ConfigMap
 metadata:
   name: test
 data:
   key: value`,
-			wantManifests:   1,
-			wantParseErrors: 0,
+			wantManifests:     1,
+			wantParseErrors:   0,
+			wantParseWarnings: 0,
 		},
 	}
 
@@ -580,8 +600,139 @@ data:
 				t.Errorf("ParseManifests() manifests = %d, want %d", len(result.Manifests), tt.wantManifests)
 			}
 			if len(result.ParseErrors) != tt.wantParseErrors {
-				t.Errorf("ParseManifests() parseErrors = %d, want %d", len(result.ParseErrors), tt.wantParseErrors)
+				t.Errorf("ParseManifests() parseErrors = %d, want %d (%v)", len(result.ParseErrors), tt.wantParseErrors, result.ParseErrors)
+			}
+			if len(result.ParseWarnings) != tt.wantParseWarnings {
+				t.Errorf("ParseManifests() parseWarnings = %d, want %d (%v)", len(result.ParseWarnings), tt.wantParseWarnings, result.ParseWarnings)
 			}
 		})
+	}
+}
+
+// TestParseManifests_DuplicateKeyLastWins verifies the last-value-wins behavior
+// for duplicate map keys and that the surviving document participates in diffs.
+func TestParseManifests_DuplicateKeyLastWins(t *testing.T) {
+	parser := NewManifestParser()
+
+	content := `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test
+  namespace: default
+data:
+  key: first
+  key: last`
+
+	result := parser.ParseManifests(content)
+
+	if len(result.Manifests) != 1 {
+		t.Fatalf("expected 1 manifest, got %d", len(result.Manifests))
+	}
+	if len(result.ParseWarnings) != 1 {
+		t.Fatalf("expected 1 warning, got %d (%v)", len(result.ParseWarnings), result.ParseWarnings)
+	}
+
+	// Warning should reference kind/name and the duplicated key.
+	warn := result.ParseWarnings[0]
+	for _, want := range []string{"ConfigMap/test", `"key"`, "last value"} {
+		if !strings.Contains(warn, want) {
+			t.Errorf("warning %q missing %q", warn, want)
+		}
+	}
+
+	// Last value wins.
+	data, ok := result.Manifests[0].Object["data"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("data is not a map: %T", result.Manifests[0].Object["data"])
+	}
+	if data["key"] != "last" {
+		t.Errorf("data.key = %v, want \"last\" (last-wins)", data["key"])
+	}
+}
+
+// TestParseManifests_NestedDuplicateKey verifies a duplicate key nested inside
+// metadata.annotations is detected and resolved.
+func TestParseManifests_NestedDuplicateKey(t *testing.T) {
+	parser := NewManifestParser()
+
+	content := `apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: web
+  namespace: default
+  annotations:
+    nginx.ingress.kubernetes.io/service-upstream: "true"
+    nginx.ingress.kubernetes.io/service-upstream: "false"`
+
+	result := parser.ParseManifests(content)
+
+	if len(result.Manifests) != 1 {
+		t.Fatalf("expected 1 manifest, got %d", len(result.Manifests))
+	}
+	if len(result.ParseWarnings) != 1 {
+		t.Fatalf("expected 1 warning, got %d (%v)", len(result.ParseWarnings), result.ParseWarnings)
+	}
+
+	meta := result.Manifests[0].Object["metadata"].(map[string]interface{})
+	ann := meta["annotations"].(map[string]interface{})
+	if ann["nginx.ingress.kubernetes.io/service-upstream"] != "false" {
+		t.Errorf("annotation = %v, want \"false\" (last-wins)", ann["nginx.ingress.kubernetes.io/service-upstream"])
+	}
+}
+
+// TestDiffManifestSets_DuplicateManifestKey verifies that two documents sharing
+// the same manifest identity within one render produce a duplicate-manifest
+// warning while the diff still functions.
+func TestDiffManifestSets_DuplicateManifestKey(t *testing.T) {
+	differ := NewManifestDiffer()
+
+	oldContent := `apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: web
+  namespace: default
+spec:
+  minAvailable: 1`
+
+	// New render emits the PDB twice (e.g. the chart's own template AND a
+	// library chart). Last one wins for the diff, but the collision is surfaced.
+	newContent := `apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: web
+  namespace: default
+spec:
+  minAvailable: 2
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: web
+  namespace: default
+spec:
+  minAvailable: 3`
+
+	result, err := differ.DiffManifests(oldContent, newContent)
+	if err != nil {
+		t.Fatalf("DiffManifests() error = %v", err)
+	}
+
+	// Duplicate-manifest warning surfaced.
+	foundDup := false
+	for _, w := range result.ParseWarnings {
+		if strings.Contains(w, "duplicate manifest") && strings.Contains(w, "PodDisruptionBudget/web") {
+			foundDup = true
+		}
+	}
+	if !foundDup {
+		t.Errorf("expected duplicate-manifest warning, got %v", result.ParseWarnings)
+	}
+
+	// Diff still works: last doc (minAvailable: 3) wins over old (1) => modified.
+	if len(result.Modified) != 1 {
+		t.Errorf("Modified = %d, want 1", len(result.Modified))
+	}
+	if !result.HasChanges {
+		t.Errorf("HasChanges = false, want true")
 	}
 }

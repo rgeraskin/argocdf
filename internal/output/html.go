@@ -77,6 +77,7 @@ func (h *HTMLWriter) WriteHeader(title string) error {
         .badge-removed { background-color: rgba(241, 76, 76, 0.2); color: var(--removed-color); }
         .badge-modified { background-color: rgba(220, 220, 170, 0.2); color: var(--modified-color); }
         .badge-error { background-color: rgba(241, 76, 76, 0.2); color: var(--removed-color); }
+        .badge-warning { background-color: rgba(220, 220, 170, 0.2); color: var(--modified-color); }
         .diff-container { background-color: #1a1a1a; border-radius: 4px; overflow: hidden; margin-top: 10px; font-family: monospace; font-size: 0.85em; }
         .diff-line { padding: 2px 10px; white-space: pre-wrap; word-wrap: break-word; }
         .diff-add { background-color: rgba(78, 201, 176, 0.15); color: var(--added-color); }
@@ -88,6 +89,7 @@ func (h *HTMLWriter) WriteHeader(title string) error {
         .summary-value { font-size: 2em; font-weight: bold; }
         .summary-label { color: #888; font-size: 0.9em; }
         .error-message { color: var(--removed-color); padding: 10px; background-color: rgba(241, 76, 76, 0.1); border-radius: 4px; }
+        .warning-message { color: var(--modified-color); padding: 10px; background-color: rgba(220, 220, 170, 0.1); border-radius: 4px; }
         .no-changes { color: #888; font-style: italic; }
         .manifest-key { font-family: monospace; font-size: 0.9em; color: #888; }
         .timestamp { color: #666; font-size: 0.8em; margin-top: 30px; text-align: center; }
@@ -133,6 +135,10 @@ func (h *HTMLWriter) writeAppDiffFull(appDiff *types.AppDiff, depth int) error {
 		if len(result.ParseErrors) > 0 {
 			h.write(fmt.Sprintf(`<span class="badge badge-error">⚠ %d parse error(s)</span>`, len(result.ParseErrors)))
 		}
+		// Show parse warnings
+		if len(result.ParseWarnings) > 0 {
+			h.write(fmt.Sprintf(`<span class="badge badge-warning">⚠ %d warning(s)</span>`, len(result.ParseWarnings)))
+		}
 		// Show changes
 		if result.HasChanges {
 			if len(result.Added) > 0 {
@@ -159,6 +165,15 @@ func (h *HTMLWriter) writeAppDiffFull(appDiff *types.AppDiff, depth int) error {
 			h.write(fmt.Sprintf(`<div class="error-message"><strong>⚠ %d YAML parse error(s):</strong><ul>`, len(result.ParseErrors)))
 			for _, err := range result.ParseErrors {
 				h.write(fmt.Sprintf(`<li>%s</li>`, html.EscapeString(err)))
+			}
+			h.write(`</ul></div>`)
+		}
+
+		// Show parse warnings if present (non-fatal; documents are still diffed)
+		if len(result.ParseWarnings) > 0 {
+			h.write(fmt.Sprintf(`<div class="warning-message"><strong>⚠ %d warning(s):</strong><ul>`, len(result.ParseWarnings)))
+			for _, warn := range result.ParseWarnings {
+				h.write(fmt.Sprintf(`<li>%s</li>`, html.EscapeString(warn)))
 			}
 			h.write(`</ul></div>`)
 		}

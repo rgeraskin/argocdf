@@ -370,6 +370,29 @@ func TestComputeSummary(t *testing.T) {
 				TotalAdded:      1,
 			},
 		},
+		{
+			name: "app with parse warnings is NOT counted as errored",
+			diffs: []*types.AppDiff{
+				{
+					Name: "app1",
+					DiffResult: &diff.ManifestSetDiff{
+						HasChanges: true,
+						Added: []diff.Manifest{
+							{Kind: "ConfigMap", Name: "cm1"},
+						},
+						ParseWarnings: []string{
+							`resource ConfigMap/cm1: duplicate key "foo" (using last value)`,
+						},
+					},
+				},
+			},
+			want: Summary{
+				TotalApps:       1,
+				AppsWithChanges: 1,
+				AppsWithErrors:  0, // Warnings must NOT count as errors
+				TotalAdded:      1,
+			},
+		},
 	}
 
 	for _, tt := range tests {
