@@ -236,10 +236,11 @@ func (a *App) processApplications(ctx context.Context, apps []cluster.Applicatio
 		if err != nil {
 			a.logger.Warn("Error processing application", "name", queuedApp.Name, "error", err)
 			appDiff = &types.AppDiff{
-				Name:          queuedApp.Name,
-				Namespace:     queuedApp.Namespace,
-				ParentAppName: queuedApp.ParentApp,
-				Error:         err,
+				Name:               queuedApp.Name,
+				Namespace:          queuedApp.Namespace,
+				ParentAppName:      queuedApp.ParentApp,
+				ParentAppNamespace: queuedApp.ParentNamespace,
+				Error:              err,
 			}
 		}
 		key := fmt.Sprintf("%s/%s", appDiff.Namespace, appDiff.Name)
@@ -255,11 +256,12 @@ func (a *App) processApplications(ctx context.Context, apps []cluster.Applicatio
 			} else {
 				for _, newApp := range newApps {
 					added := queue.Add(diff.QueuedApp{
-						Name:      newApp.Name,
-						Namespace: newApp.Namespace,
-						Depth:     queuedApp.Depth + 1,
-						ParentApp: queuedApp.Name,
-						Spec:      &newApp.Spec,
+						Name:            newApp.Name,
+						Namespace:       newApp.Namespace,
+						Depth:           queuedApp.Depth + 1,
+						ParentApp:       queuedApp.Name,
+						ParentNamespace: queuedApp.Namespace,
+						Spec:            &newApp.Spec,
 					})
 					if added {
 						a.logger.Debug("Discovered new child application", "parent", queuedApp.Name, "child", newApp.Name)
@@ -275,12 +277,13 @@ func (a *App) processApplications(ctx context.Context, apps []cluster.Applicatio
 			} else {
 				for _, modApp := range modifiedApps {
 					childApp := diff.QueuedApp{
-						Name:      modApp.Name,
-						Namespace: modApp.Namespace,
-						Depth:     queuedApp.Depth + 1,
-						ParentApp: queuedApp.Name,
-						Spec:      &modApp.NewSpec,
-						OldSpec:   &modApp.OldSpec,
+						Name:            modApp.Name,
+						Namespace:       modApp.Namespace,
+						Depth:           queuedApp.Depth + 1,
+						ParentApp:       queuedApp.Name,
+						ParentNamespace: queuedApp.Namespace,
+						Spec:            &modApp.NewSpec,
+						OldSpec:         &modApp.OldSpec,
 					}
 
 					// Case 1: App is still pending - update its spec
@@ -321,9 +324,10 @@ func (a *App) processApplications(ctx context.Context, apps []cluster.Applicatio
 // processOneApp processes a single application and returns its diff.
 func (a *App) processOneApp(ctx context.Context, queuedApp *diff.QueuedApp) (*types.AppDiff, error) {
 	appDiff := &types.AppDiff{
-		Name:          queuedApp.Name,
-		Namespace:     queuedApp.Namespace,
-		ParentAppName: queuedApp.ParentApp,
+		Name:               queuedApp.Name,
+		Namespace:          queuedApp.Namespace,
+		ParentAppName:      queuedApp.ParentApp,
+		ParentAppNamespace: queuedApp.ParentNamespace,
 	}
 
 	// Build Application objects for rendering

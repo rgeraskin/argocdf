@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/rgeraskin/argocdf/internal/cluster"
+	"github.com/rgeraskin/argocdf/internal/types"
 )
 
 func TestDiscoverApplications(t *testing.T) {
@@ -1047,6 +1048,185 @@ func TestAppDiffQueue(t *testing.T) {
 		requeued := queue.RequeueProcessed(QueuedApp{Name: "app1", Namespace: "ns1"})
 		if requeued {
 			t.Error("RequeueProcessed should return false for non-existent app")
+		}
+	})
+
+	t.Run("Add rejects an already-pending key", func(t *testing.T) {
+		queue := NewAppDiffQueue(10)
+
+		if !queue.Add(QueuedApp{Name: "app1", Namespace: "ns1", Depth: 0}) {
+			t.Fatal("first Add() should succeed")
+		}
+		// Same key discovered again by another parent while still pending.
+		if queue.Add(QueuedApp{Name: "app1", Namespace: "ns1", Depth: 1, ParentApp: "other"}) {
+			t.Error("Add() should return false for an already-pending app")
+		}
+
+		// It should only be processed once.
+		queue.Next()
+		if !queue.IsEmpty() {
+			t.Error("queue should be empty; app was queued twice")
+		}
+		if queue.ProcessedCount() != 1 {
+			t.Errorf("ProcessedCount() = %d, want 1", queue.ProcessedCount())
+		}
+	})
+
+	t.Run("RequeueProcessed respects maxDepth", func(t *testing.T) {
+		queue := NewAppDiffQueue(2)
+
+		// Process an app so it becomes eligible for requeue.
+		queue.Add(QueuedApp{Name: "app1", Namespace: "ns1", Depth: 0, Spec: &cluster.ApplicationSpec{Project: "a"}})
+		queue.Next()
+
+		// Requeue at depth == maxDepth must be refused even with new specs.
+		requeued := queue.RequeueProcessed(QueuedApp{
+			Name:      "app1",
+			Namespace: "ns1",
+			Depth:     2,
+			Spec:      &cluster.ApplicationSpec{Project: "b"},
+		})
+		if requeued {
+			t.Error("RequeueProcessed should return false at depth >= maxDepth")
+		}
+	})
+}
+
+// TestAppDiffQueue_SelfManagingLoop simulates a self-managing root app (or a pair
+// of mutually-referencing apps) that discovers its own Application CRD as modified
+// on every pass. The first requeue (cluster spec -> git specs) must be allowed, but
+// a second requeue with the same git specs must be refused to terminate the loop.
+func TestAppDiffQueue_SelfManagingLoop(t *testing.T) {
+	clusterSpec := &cluster.ApplicationSpec{Project: "cluster"}
+	gitNewSpec := &cluster.ApplicationSpec{Project: "git-new"}
+	gitOldSpec := &cluster.ApplicationSpec{Project: "git-old"}
+
+	tests := []struct {
+		name         string
+		requeueSpec  *cluster.ApplicationSpec
+		requeueOld   *cluster.ApplicationSpec
+		wantRequeued bool
+	}{
+		{
+			name:         "first requeue with different git specs is allowed",
+			requeueSpec:  gitNewSpec,
+			requeueOld:   gitOldSpec,
+			wantRequeued: true,
+		},
+		{
+			name:         "second requeue with identical git specs is refused",
+			requeueSpec:  gitNewSpec,
+			requeueOld:   gitOldSpec,
+			wantRequeued: false,
+		},
+	}
+
+	queue := NewAppDiffQueue(10)
+
+	// Initial add + process with the cluster spec (no OldSpec).
+	queue.Add(QueuedApp{Name: "root", Namespace: "argocd", Depth: 0, Spec: clusterSpec})
+	queue.Next()
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			requeued := queue.RequeueProcessed(QueuedApp{
+				Name:      "root",
+				Namespace: "argocd",
+				Depth:     1,
+				Spec:      tt.requeueSpec,
+				OldSpec:   tt.requeueOld,
+				ParentApp: "root",
+			})
+			if requeued != tt.wantRequeued {
+				t.Fatalf("RequeueProcessed() = %v, want %v", requeued, tt.wantRequeued)
+			}
+			// After an allowed requeue we must pop it so it becomes processed
+			// again (recording the git specs) before the next iteration.
+			if tt.wantRequeued {
+				if queue.IsEmpty() {
+					t.Fatal("queue should not be empty after an allowed requeue")
+				}
+				queue.Next()
+			}
+		})
+	}
+}
+
+func TestNewAppTree(t *testing.T) {
+	t.Run("attaches children to correct same-named parents across namespaces", func(t *testing.T) {
+		// Two parents share the name "parent" but live in different namespaces.
+		// Each has a child that must attach to the correct parent.
+		diffs := []*types.AppDiff{
+			{Name: "parent", Namespace: "team-a"},
+			{Name: "parent", Namespace: "team-b"},
+			{
+				Name:               "child-a",
+				Namespace:          "team-a",
+				ParentAppName:      "parent",
+				ParentAppNamespace: "team-a",
+			},
+			{
+				Name:               "child-b",
+				Namespace:          "team-b",
+				ParentAppName:      "parent",
+				ParentAppNamespace: "team-b",
+			},
+		}
+
+		tree := NewAppTree(diffs)
+
+		if len(tree.Root) != 2 {
+			t.Fatalf("Root count = %d, want 2", len(tree.Root))
+		}
+
+		// Map each parent node (by namespace) to its single child's name.
+		for _, root := range tree.Root {
+			rootDiff := root.AppDiff.(*types.AppDiff)
+			if len(root.Children) != 1 {
+				t.Fatalf("parent %s/%s has %d children, want 1",
+					rootDiff.Namespace, rootDiff.Name, len(root.Children))
+			}
+			childDiff := root.Children[0].AppDiff.(*types.AppDiff)
+			wantChild := "child-a"
+			if rootDiff.Namespace == "team-b" {
+				wantChild = "child-b"
+			}
+			if childDiff.Name != wantChild {
+				t.Errorf("parent in %s got child %s, want %s",
+					rootDiff.Namespace, childDiff.Name, wantChild)
+			}
+			if childDiff.Namespace != rootDiff.Namespace {
+				t.Errorf("child %s attached to parent in wrong namespace %s",
+					childDiff.Name, rootDiff.Namespace)
+			}
+		}
+	})
+
+	t.Run("orphan with missing parent appears as a root", func(t *testing.T) {
+		diffs := []*types.AppDiff{
+			{Name: "real-root", Namespace: "argocd"},
+			{
+				Name:               "orphan",
+				Namespace:          "argocd",
+				ParentAppName:      "ghost-parent",
+				ParentAppNamespace: "argocd",
+			},
+		}
+
+		tree := NewAppTree(diffs)
+
+		if len(tree.Root) != 2 {
+			t.Fatalf("Root count = %d, want 2 (orphan must not be dropped)", len(tree.Root))
+		}
+
+		found := false
+		for _, root := range tree.Root {
+			if root.AppDiff.(*types.AppDiff).Name == "orphan" {
+				found = true
+			}
+		}
+		if !found {
+			t.Error("orphan node with missing parent should appear as a root")
 		}
 	})
 }
