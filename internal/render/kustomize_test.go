@@ -154,8 +154,8 @@ func TestFindKustomizationFile(t *testing.T) {
 				t.Fatalf("failed to create temp dir: %v", err)
 			}
 			defer func() {
-		_ = os.RemoveAll(tempDir)
-	}()
+				_ = os.RemoveAll(tempDir)
+			}()
 
 			// Create the test files
 			for _, file := range tt.files {
@@ -334,8 +334,8 @@ patches:
 				t.Fatalf("failed to create temp dir: %v", err)
 			}
 			defer func() {
-		_ = os.RemoveAll(tempDir)
-	}()
+				_ = os.RemoveAll(tempDir)
+			}()
 
 			// Write initial kustomization.yaml
 			kustFile := filepath.Join(tempDir, "kustomization.yaml")
@@ -637,6 +637,207 @@ spec:
 	// Verify labels were applied
 	if !strings.Contains(content, "env: production") {
 		t.Errorf("labels not applied, got:\n%s", content)
+	}
+}
+
+func TestKustomizeRenderOverlayWithRelativeBase(t *testing.T) {
+	skipIfNoKustomize(t)
+
+	renderer := NewKustomizeRenderer(RenderOptions{})
+
+	// Simulate a repository checkout where the overlay references its base
+	// with a relative path that escapes the source (overlay) directory.
+	repoDir, err := os.MkdirTemp("", "kustomize-overlay-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.RemoveAll(repoDir)
+	}()
+
+	// base/
+	baseDir := filepath.Join(repoDir, "base")
+	if err := os.MkdirAll(baseDir, 0755); err != nil {
+		t.Fatalf("failed to create base dir: %v", err)
+	}
+	baseKust := `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- deployment.yaml
+`
+	deployment := `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: myapp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: myapp
+  template:
+    metadata:
+      labels:
+        app: myapp
+    spec:
+      containers:
+      - name: myapp
+        image: nginx:latest
+`
+	if err := os.WriteFile(filepath.Join(baseDir, "kustomization.yaml"), []byte(baseKust), 0644); err != nil {
+		t.Fatalf("failed to write base kustomization.yaml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(baseDir, "deployment.yaml"), []byte(deployment), 0644); err != nil {
+		t.Fatalf("failed to write deployment.yaml: %v", err)
+	}
+
+	// overlays/dev/ referencing ../../base
+	overlayDir := filepath.Join(repoDir, "overlays", "dev")
+	if err := os.MkdirAll(overlayDir, 0755); err != nil {
+		t.Fatalf("failed to create overlay dir: %v", err)
+	}
+	overlayKust := `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- ../../base
+`
+	if err := os.WriteFile(filepath.Join(overlayDir, "kustomization.yaml"), []byte(overlayKust), 0644); err != nil {
+		t.Fatalf("failed to write overlay kustomization.yaml: %v", err)
+	}
+
+	app := &cluster.Application{}
+	app.Name = "test-app"
+
+	source := &cluster.ApplicationSource{
+		Path: "overlays/dev",
+		Kustomize: &cluster.ApplicationSourceKustomize{
+			NamePrefix: "prod-",
+		},
+	}
+
+	// Render with repoPath = repoDir and source.Path = overlays/dev.
+	// This requires copying the whole repo tree so ../../base resolves.
+	result, err := renderer.Render(context.Background(), app, source, repoDir)
+	if err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+
+	content := string(result)
+
+	// The base deployment must be present with the app-level namePrefix applied.
+	if !strings.Contains(content, "name: prod-myapp") {
+		t.Errorf("overlay render did not resolve relative base with namePrefix, got:\n%s", content)
+	}
+}
+
+func TestCopyDirSymlink(t *testing.T) {
+	srcDir, err := os.MkdirTemp("", "copydir-src-*")
+	if err != nil {
+		t.Fatalf("failed to create src temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.RemoveAll(srcDir)
+	}()
+
+	// A regular file.
+	if err := os.WriteFile(filepath.Join(srcDir, "real.txt"), []byte("hello"), 0644); err != nil {
+		t.Fatalf("failed to write real.txt: %v", err)
+	}
+
+	// A subdirectory with a file, used as a symlink-to-directory target.
+	targetDir := filepath.Join(srcDir, "targetdir")
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		t.Fatalf("failed to create targetdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(targetDir, "inside.txt"), []byte("nested"), 0644); err != nil {
+		t.Fatalf("failed to write inside.txt: %v", err)
+	}
+
+	// Symlink to a directory (the case that previously broke copyFile).
+	if err := os.Symlink("targetdir", filepath.Join(srcDir, "dirlink")); err != nil {
+		t.Fatalf("failed to create dir symlink: %v", err)
+	}
+	// Symlink to a file.
+	if err := os.Symlink("real.txt", filepath.Join(srcDir, "filelink")); err != nil {
+		t.Fatalf("failed to create file symlink: %v", err)
+	}
+	// Dangling symlink (target does not exist) must not fail the copy.
+	if err := os.Symlink("does-not-exist", filepath.Join(srcDir, "dangling")); err != nil {
+		t.Fatalf("failed to create dangling symlink: %v", err)
+	}
+
+	dstDir, err := os.MkdirTemp("", "copydir-dst-*")
+	if err != nil {
+		t.Fatalf("failed to create dst temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.RemoveAll(dstDir)
+	}()
+
+	if err := copyDir(srcDir, dstDir); err != nil {
+		t.Fatalf("copyDir() error = %v", err)
+	}
+
+	// Regular file copied.
+	if data, err := os.ReadFile(filepath.Join(dstDir, "real.txt")); err != nil || string(data) != "hello" {
+		t.Errorf("real.txt not copied correctly: data=%q err=%v", data, err)
+	}
+
+	// Directory symlink recreated as a symlink pointing to the same target.
+	info, err := os.Lstat(filepath.Join(dstDir, "dirlink"))
+	if err != nil {
+		t.Fatalf("dirlink not present: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("dirlink should be a symlink, got mode %v", info.Mode())
+	}
+	if target, err := os.Readlink(filepath.Join(dstDir, "dirlink")); err != nil || target != "targetdir" {
+		t.Errorf("dirlink target = %q err=%v, want %q", target, err, "targetdir")
+	}
+
+	// File symlink recreated.
+	if target, err := os.Readlink(filepath.Join(dstDir, "filelink")); err != nil || target != "real.txt" {
+		t.Errorf("filelink target = %q err=%v, want %q", target, err, "real.txt")
+	}
+}
+
+func TestCopyDirSkipsGit(t *testing.T) {
+	srcDir, err := os.MkdirTemp("", "copydir-git-src-*")
+	if err != nil {
+		t.Fatalf("failed to create src temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.RemoveAll(srcDir)
+	}()
+
+	// .git directory with content that must be skipped.
+	gitDir := filepath.Join(srcDir, ".git")
+	if err := os.MkdirAll(gitDir, 0755); err != nil {
+		t.Fatalf("failed to create .git dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(gitDir, "HEAD"), []byte("ref: refs/heads/main"), 0644); err != nil {
+		t.Fatalf("failed to write .git/HEAD: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "keep.txt"), []byte("keep"), 0644); err != nil {
+		t.Fatalf("failed to write keep.txt: %v", err)
+	}
+
+	dstDir, err := os.MkdirTemp("", "copydir-git-dst-*")
+	if err != nil {
+		t.Fatalf("failed to create dst temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.RemoveAll(dstDir)
+	}()
+
+	if err := copyDir(srcDir, dstDir); err != nil {
+		t.Fatalf("copyDir() error = %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dstDir, ".git")); !os.IsNotExist(err) {
+		t.Errorf(".git directory should have been skipped, stat err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dstDir, "keep.txt")); err != nil {
+		t.Errorf("keep.txt should have been copied: %v", err)
 	}
 }
 

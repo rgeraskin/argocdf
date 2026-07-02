@@ -58,18 +58,23 @@ func (r *KustomizeRenderer) Render(ctx context.Context, app *cluster.Application
 		return r.renderPlainYAML(kustomizePath)
 	}
 
-	// If we need to apply kustomize edits, copy to a temp directory first
-	// This prevents race conditions when multiple goroutines render the same directory
+	// If we need to apply kustomize edits, copy to a temp directory first.
+	// This prevents race conditions when multiple goroutines render the same
+	// directory. We copy the ENTIRE repository tree (not just the source
+	// subdirectory) because overlays commonly reference bases with relative
+	// paths (e.g. `resources: ../../base`) that escape the source directory.
 	workDir := kustomizePath
 	if r.needsKustomizeEdits(source.Kustomize) {
-		tempDir, err := r.copyToTemp(kustomizePath)
+		tempRepo, err := r.copyToTemp(repoPath)
 		if err != nil {
 			return nil, fmt.Errorf("failed to copy kustomize directory: %w", err)
 		}
 		defer func() {
-			_ = SafeRemoveAll(tempDir)
+			_ = SafeRemoveAll(tempRepo)
 		}()
-		workDir = tempDir
+		// Run kustomize edit/build inside the copied source subdirectory so
+		// relative references to bases outside source.Path still resolve.
+		workDir = filepath.Join(tempRepo, source.Path)
 
 		// Apply kustomize-specific options using edit commands
 		if err := r.applyKustomizeEdits(ctx, workDir, source.Kustomize); err != nil {
@@ -385,8 +390,10 @@ func (r *KustomizeRenderer) needsKustomizeEdits(opts *cluster.ApplicationSourceK
 		len(opts.Patches) > 0
 }
 
-// copyToTemp copies the kustomize directory to a temp location.
+// copyToTemp copies the given directory tree to a temp location.
 // This is used to prevent race conditions when modifying kustomization.yaml.
+// The full repository tree is copied so that overlays referencing bases via
+// relative paths outside the source directory continue to resolve.
 func (r *KustomizeRenderer) copyToTemp(srcDir string) (string, error) {
 	tempDir, err := os.MkdirTemp("", "argocdf-kustomize-")
 	if err != nil {
@@ -402,6 +409,9 @@ func (r *KustomizeRenderer) copyToTemp(srcDir string) (string, error) {
 }
 
 // copyDir recursively copies a directory tree.
+// The .git directory is skipped (it can be large and is not needed for
+// kustomize builds). Symlinks are recreated as symlinks; if a symlink cannot
+// be read or recreated it is skipped rather than failing the whole copy.
 func copyDir(src, dst string) error {
 	entries, err := os.ReadDir(src)
 	if err != nil {
@@ -409,8 +419,30 @@ func copyDir(src, dst string) error {
 	}
 
 	for _, entry := range entries {
+		// Skip the git metadata directory: it can be huge and is irrelevant
+		// to rendering kustomize manifests.
+		if entry.IsDir() && entry.Name() == ".git" {
+			continue
+		}
+
 		srcPath := filepath.Join(src, entry.Name())
 		dstPath := filepath.Join(dst, entry.Name())
+
+		// Handle symlinks explicitly: entry.IsDir() is false for a symlink to
+		// a directory, so without this branch copyFile would try to io.Copy a
+		// directory. Recreate the link when possible, otherwise skip it.
+		if entry.Type()&os.ModeSymlink != 0 {
+			target, err := os.Readlink(srcPath)
+			if err != nil {
+				// Skip unreadable symlink rather than failing the whole copy.
+				continue
+			}
+			if err := os.Symlink(target, dstPath); err != nil {
+				// Skip symlink we cannot recreate rather than failing.
+				continue
+			}
+			continue
+		}
 
 		if entry.IsDir() {
 			// Create the directory
