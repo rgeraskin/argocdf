@@ -248,7 +248,7 @@ metadata:
 		t.Fatalf("failed to write README: %v", err)
 	}
 
-	result, err := renderer.renderPlainYAML(tempDir)
+	result, err := renderer.renderPlainYAML(tempDir, false)
 	if err != nil {
 		t.Fatalf("renderPlainYAML() error = %v", err)
 	}
@@ -271,6 +271,73 @@ metadata:
 	// Should NOT contain README content
 	if strings.Contains(content, "# Test") {
 		t.Error("renderPlainYAML() included non-YAML file")
+	}
+}
+
+func TestRenderPlainYAML_RecursiveWithJSON(t *testing.T) {
+	renderer := NewKustomizeRenderer(RenderOptions{})
+	root := t.TempDir()
+
+	// Top-level YAML manifest.
+	topYAML := "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: top-cm"
+	if err := os.WriteFile(filepath.Join(root, "top.yaml"), []byte(topYAML), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Nested subdirectory with a JSON manifest and a non-manifest .txt file.
+	sub := filepath.Join(root, "nested")
+	if err := os.MkdirAll(sub, 0755); err != nil {
+		t.Fatal(err)
+	}
+	nestedJSON := `{"apiVersion":"v1","kind":"Secret","metadata":{"name":"nested-secret"}}`
+	if err := os.WriteFile(filepath.Join(sub, "secret.json"), []byte(nestedJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "notes.txt"), []byte("ignore me"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A hidden directory that must be skipped.
+	hidden := filepath.Join(root, ".hidden")
+	if err := os.MkdirAll(hidden, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hidden, "skip.yaml"), []byte("apiVersion: v1\nkind: Pod\nmetadata:\n  name: skip"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Non-recursive: only top-level YAML, JSON excluded because it's nested.
+	nonRec, err := renderer.renderPlainYAML(root, false)
+	if err != nil {
+		t.Fatalf("renderPlainYAML(recurse=false) error = %v", err)
+	}
+	if !strings.Contains(string(nonRec), "top-cm") {
+		t.Error("non-recursive output missing top-cm")
+	}
+	if strings.Contains(string(nonRec), "nested-secret") {
+		t.Error("non-recursive output should not include nested files")
+	}
+
+	// Recursive: includes nested JSON (converted to YAML), skips .txt and hidden dir.
+	rec, err := renderer.renderPlainYAML(root, true)
+	if err != nil {
+		t.Fatalf("renderPlainYAML(recurse=true) error = %v", err)
+	}
+	content := string(rec)
+	if !strings.Contains(content, "top-cm") {
+		t.Error("recursive output missing top-cm")
+	}
+	if !strings.Contains(content, "nested-secret") {
+		t.Error("recursive output missing nested-secret from JSON file")
+	}
+	if !strings.Contains(content, "kind: Secret") {
+		t.Error("JSON was not converted to YAML (expected 'kind: Secret')")
+	}
+	if strings.Contains(content, "ignore me") {
+		t.Error("recursive output included non-manifest .txt file")
+	}
+	if strings.Contains(content, "name: skip") {
+		t.Error("recursive output included file from hidden directory")
 	}
 }
 

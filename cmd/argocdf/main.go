@@ -42,6 +42,7 @@ var (
 
 	// Helm options
 	helmSkipRefresh bool
+	noAPIVersions   bool
 
 	// Render cache options
 	noCache  bool
@@ -121,6 +122,8 @@ Examples:
 	// Helm options
 	rootCmd.Flags().BoolVar(&helmSkipRefresh, "helm-skip-refresh", true,
 		"Skip refreshing repository cache during helm dependency build")
+	rootCmd.Flags().BoolVar(&noAPIVersions, "no-api-versions", false,
+		"Do not pass cluster-discovered API versions to helm via --api-versions")
 
 	// Output flags
 	rootCmd.Flags().StringVar(&stdoutFormat, "stdout", config.DefaultStdoutFormat,
@@ -209,6 +212,7 @@ func runMain(cmd *cobra.Command, args []string) error {
 		KustomizeBuildOptions:   kustomizeBuildOptions,
 		KustomizeLoadRestrictor: kustomizeLoadRestrictor,
 		HelmSkipRefresh:         helmSkipRefresh,
+		NoAPIVersions:           noAPIVersions,
 		NoCache:                 noCache,
 		CacheDir:                cacheDir,
 	}

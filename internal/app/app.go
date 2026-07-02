@@ -131,6 +131,17 @@ func (a *App) initialize(ctx context.Context) error {
 	a.logger.Debug("Using Kubernetes version", "version", kubeVersion)
 	a.kubeVersion = kubeVersion
 
+	// Discover cluster API versions for helm's --api-versions (unless disabled).
+	// Failure is non-fatal: warn and continue with whatever was discovered.
+	var apiVersions []string
+	if !a.cfg.NoAPIVersions {
+		apiVersions, err = a.kubeClient.GetAPIVersions(ctx)
+		if err != nil {
+			a.logger.Warn("Failed to discover cluster API versions, continuing", "error", err)
+		}
+		a.logger.Debug("Discovered cluster API versions", "count", len(apiVersions))
+	}
+
 	// Create application service
 	a.appService = a.factory.CreateAppService(a.kubeClient)
 
@@ -166,7 +177,7 @@ func (a *App) initialize(ctx context.Context) error {
 	}
 
 	// Create renderer
-	a.renderer = a.factory.CreateRenderFactory(kubeVersion)
+	a.renderer = a.factory.CreateRenderFactory(kubeVersion, apiVersions)
 
 	// Create differ and discoverer
 	a.differ = a.factory.CreateManifestDiffer()

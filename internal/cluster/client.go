@@ -4,7 +4,9 @@ package cluster
 import (
 	"context"
 	"fmt"
+	"sort"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
@@ -80,6 +82,50 @@ func (c *Client) GetKubeVersion(ctx context.Context) (string, error) {
 	}
 
 	return serverVersion.GitVersion, nil
+}
+
+// GetAPIVersions discovers the API versions available in the cluster and
+// returns them in the form Helm's `--api-versions` flag expects. The result
+// contains both bare group/version entries (e.g. "networking.k8s.io/v1", "v1")
+// and fully-qualified group/version/Kind entries (e.g.
+// "networking.k8s.io/v1/Ingress"), matching what ArgoCD passes to Helm. The
+// list is deduplicated and sorted.
+//
+// Discovery on aggregated API servers can partially fail; in that case the
+// partial result is returned alongside the error so callers may still use it.
+func (c *Client) GetAPIVersions(_ context.Context) ([]string, error) {
+	_, resourceLists, err := c.clientset.Discovery().ServerGroupsAndResources()
+	versions := apiVersionsFromResourceLists(resourceLists)
+	if err != nil {
+		return versions, fmt.Errorf("failed to discover API versions: %w", err)
+	}
+	return versions, nil
+}
+
+// apiVersionsFromResourceLists converts discovered API resource lists into the
+// deduplicated, sorted list of entries Helm accepts for `--api-versions`.
+// It is a pure function to keep it easily testable without a live cluster.
+func apiVersionsFromResourceLists(resourceLists []*metav1.APIResourceList) []string {
+	set := make(map[string]struct{})
+	for _, rl := range resourceLists {
+		if rl == nil || rl.GroupVersion == "" {
+			continue
+		}
+		set[rl.GroupVersion] = struct{}{}
+		for _, res := range rl.APIResources {
+			if res.Kind == "" {
+				continue
+			}
+			set[rl.GroupVersion+"/"+res.Kind] = struct{}{}
+		}
+	}
+
+	versions := make([]string, 0, len(set))
+	for v := range set {
+		versions = append(versions, v)
+	}
+	sort.Strings(versions)
+	return versions
 }
 
 // DynamicClient returns the dynamic client for CRD operations.

@@ -316,6 +316,83 @@ func TestHelmSkipRefresh(t *testing.T) {
 }
 
 // countArg counts how many times an argument appears in args.
+func TestSanitizeKubeVersion(t *testing.T) {
+	tests := []struct {
+		name    string
+		version string
+		want    string
+	}{
+		{name: "gke suffix", version: "v1.29.5-gke.1091002", want: "1.29.5"},
+		{name: "eks suffix", version: "v1.29.13-eks-abc123", want: "1.29.13"},
+		{name: "plain", version: "1.28.3", want: "1.28.3"},
+		{name: "v prefix", version: "v1.30.0", want: "1.30.0"},
+		{name: "no patch", version: "1.29", want: "1.29"},
+		{name: "v prefix no patch", version: "v1.29", want: "1.29"},
+		{name: "build metadata", version: "1.29.5+build.7", want: "1.29.5"},
+		{name: "whitespace", version: "  v1.29.5-gke.1  ", want: "1.29.5"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := SanitizeKubeVersion(tt.version); got != tt.want {
+				t.Errorf("SanitizeKubeVersion(%q) = %q, want %q", tt.version, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildArgs_KubeVersionAndAPIVersions(t *testing.T) {
+	app := &cluster.Application{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-app"},
+	}
+	source := &cluster.ApplicationSource{
+		RepoURL: "https://github.com/example/repo.git",
+		Path:    "charts/myapp",
+	}
+
+	opts := RenderOptions{
+		KubeVersion: "v1.29.5-gke.1091002",
+		APIVersions: []string{"v1", "networking.k8s.io/v1", "networking.k8s.io/v1/Ingress"},
+	}
+	r := NewHelmRenderer(opts)
+	args, _, _, _, err := r.buildArgs(context.TODO(), app, source, t.TempDir())
+	if err != nil {
+		t.Fatalf("buildArgs() unexpected error = %v", err)
+	}
+
+	// --kube-version must be the sanitized bare version.
+	if got := argValue(args, "--kube-version"); got != "1.29.5" {
+		t.Errorf("buildArgs() --kube-version = %q, want %q", got, "1.29.5")
+	}
+
+	// One --api-versions flag per entry.
+	if got := countArg(args, "--api-versions"); got != len(opts.APIVersions) {
+		t.Errorf("buildArgs() --api-versions count = %d, want %d", got, len(opts.APIVersions))
+	}
+	for _, want := range opts.APIVersions {
+		if countArg(args, want) != 1 {
+			t.Errorf("buildArgs() args = %v, missing api-version %q", args, want)
+		}
+	}
+}
+
+func TestBuildArgs_NoAPIVersionsWhenEmpty(t *testing.T) {
+	app := &cluster.Application{ObjectMeta: metav1.ObjectMeta{Name: "my-app"}}
+	source := &cluster.ApplicationSource{
+		RepoURL: "https://github.com/example/repo.git",
+		Path:    "charts/myapp",
+	}
+
+	r := NewHelmRenderer(RenderOptions{KubeVersion: "1.29.0"})
+	args, _, _, _, err := r.buildArgs(context.TODO(), app, source, t.TempDir())
+	if err != nil {
+		t.Fatalf("buildArgs() unexpected error = %v", err)
+	}
+	if count := countArg(args, "--api-versions"); count != 0 {
+		t.Errorf("buildArgs() --api-versions count = %d, want 0 when list empty", count)
+	}
+}
+
 func countArg(args []string, arg string) int {
 	count := 0
 	for _, a := range args {

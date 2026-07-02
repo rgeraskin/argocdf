@@ -54,8 +54,10 @@ func (r *KustomizeRenderer) Render(ctx context.Context, app *cluster.Application
 
 	// Verify kustomization.yaml exists
 	if !r.hasKustomization(kustomizePath) {
-		// Fall back to plain YAML files
-		return r.renderPlainYAML(kustomizePath)
+		// Fall back to plain YAML files, honoring the directory source's
+		// recurse option (spec.source.directory.recurse) when set.
+		recurse := source.Directory != nil && source.Directory.Recurse
+		return r.renderPlainYAML(kustomizePath, recurse)
 	}
 
 	// If we need to apply kustomize edits, copy to a temp directory first.
@@ -319,28 +321,31 @@ func (r *KustomizeRenderer) hasKustomization(path string) bool {
 	return r.findKustomizationFile(path) != ""
 }
 
-// renderPlainYAML renders plain YAML files when no kustomization exists.
-func (r *KustomizeRenderer) renderPlainYAML(dirPath string) ([]byte, error) {
-	var result bytes.Buffer
-
-	entries, err := os.ReadDir(dirPath)
+// renderPlainYAML renders plain manifest files when no kustomization exists.
+// It includes .yaml/.yml and .json files (JSON is converted to YAML so
+// downstream YAML parsing works); .jsonnet files are ignored. When recurse is
+// true it walks subdirectories, skipping hidden directories (e.g. .git). Files
+// are concatenated in sorted path order for deterministic output.
+func (r *KustomizeRenderer) renderPlainYAML(dirPath string, recurse bool) ([]byte, error) {
+	files, err := collectManifestFiles(dirPath, recurse)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read directory: %w", err)
+		return nil, err
 	}
+	sort.Strings(files)
 
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-
-		name := entry.Name()
-		if !isYAMLFile(name) {
-			continue
-		}
-
-		content, err := os.ReadFile(filepath.Join(dirPath, name))
+	var result bytes.Buffer
+	for _, path := range files {
+		content, err := os.ReadFile(path)
 		if err != nil {
-			return nil, fmt.Errorf("failed to read file %s: %w", name, err)
+			return nil, fmt.Errorf("failed to read file %s: %w", path, err)
+		}
+
+		// Convert JSON manifests to YAML so downstream YAML parsing works.
+		if isJSONFile(path) {
+			content, err = yaml.JSONToYAML(content)
+			if err != nil {
+				return nil, fmt.Errorf("failed to convert JSON file %s to YAML: %w", path, err)
+			}
 		}
 
 		if result.Len() > 0 {
@@ -353,10 +358,66 @@ func (r *KustomizeRenderer) renderPlainYAML(dirPath string) ([]byte, error) {
 	return result.Bytes(), nil
 }
 
+// collectManifestFiles returns the manifest file paths in dirPath. When recurse
+// is true it descends into subdirectories, skipping hidden directories.
+func collectManifestFiles(dirPath string, recurse bool) ([]string, error) {
+	var files []string
+
+	if recurse {
+		err := filepath.WalkDir(dirPath, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() {
+				// Skip hidden directories (e.g. .git) but always descend into
+				// the root directory itself.
+				if path != dirPath && strings.HasPrefix(d.Name(), ".") {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if isManifestFile(d.Name()) {
+				files = append(files, path)
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to walk directory: %w", err)
+		}
+		return files, nil
+	}
+
+	entries, err := os.ReadDir(dirPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read directory: %w", err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		if isManifestFile(entry.Name()) {
+			files = append(files, filepath.Join(dirPath, entry.Name()))
+		}
+	}
+	return files, nil
+}
+
+// isManifestFile reports whether the filename is a plain YAML or JSON manifest.
+// Jsonnet files are intentionally excluded (out of scope).
+func isManifestFile(name string) bool {
+	return isYAMLFile(name) || isJSONFile(name)
+}
+
 // isYAMLFile checks if a filename has a YAML extension.
 func isYAMLFile(name string) bool {
 	ext := filepath.Ext(name)
 	return ext == ".yaml" || ext == ".yml"
+}
+
+// isJSONFile checks if a filename has a JSON extension. Note filepath.Ext of a
+// ".jsonnet" file is ".jsonnet", so jsonnet files are not treated as JSON.
+func isJSONFile(name string) bool {
+	return filepath.Ext(name) == ".json"
 }
 
 // CanRender checks if the kustomize binary is available.

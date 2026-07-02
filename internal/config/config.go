@@ -65,6 +65,10 @@ type Config struct {
 	// Helm options
 	HelmSkipRefresh bool
 
+	// NoAPIVersions disables passing cluster-discovered API versions to helm
+	// via --api-versions (faster; useful for compatibility).
+	NoAPIVersions bool
+
 	// Render cache options
 	NoCache  bool   // Disable the persistent render cache
 	CacheDir string // Cache directory (empty = os.UserCacheDir()/argocdf/render)

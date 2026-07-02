@@ -30,6 +30,7 @@ type (
 	HelmParameter              = argoapp.HelmParameter
 	HelmFileParameter          = argoapp.HelmFileParameter
 	ApplicationSourceKustomize = argoapp.ApplicationSourceKustomize
+	ApplicationSourceDirectory = argoapp.ApplicationSourceDirectory
 	ApplicationDestination     = argoapp.ApplicationDestination
 
 	// Kustomize-related types

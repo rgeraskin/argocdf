@@ -33,6 +33,11 @@ type RenderOptions struct {
 	// KubeVersion is the Kubernetes version to use for rendering
 	KubeVersion string
 
+	// APIVersions is the list of cluster API versions passed to helm via
+	// --api-versions so charts can branch on .Capabilities.APIVersions.
+	// Empty means no --api-versions flags are added.
+	APIVersions []string
+
 	// Namespace is the target namespace for the rendered manifests
 	Namespace string
 

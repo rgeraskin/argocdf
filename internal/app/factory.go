@@ -42,12 +42,18 @@ func (f *Factory) CreateRepository() (*git.Repository, error) {
 	return git.Open(f.config.RepoPath)
 }
 
-// CreateRenderFactory creates a render factory.
-func (f *Factory) CreateRenderFactory(kubeVersion string) *render.Factory {
+// CreateRenderFactory creates a render factory. apiVersions is the list of
+// cluster API versions to pass to helm; it is ignored when --no-api-versions
+// is set.
+func (f *Factory) CreateRenderFactory(kubeVersion string, apiVersions []string) *render.Factory {
+	if f.config.NoAPIVersions {
+		apiVersions = nil
+	}
 	opts := render.RenderOptions{
 		RepoPath:                f.config.RepoPath,
 		RepoURL:                 f.config.RepoURL,
 		KubeVersion:             kubeVersion,
+		APIVersions:             apiVersions,
 		KustomizeEnableHelm:     f.config.KustomizeEnableHelm,
 		KustomizeBuildOptions:   f.config.KustomizeBuildOptions,
 		KustomizeLoadRestrictor: f.config.KustomizeLoadRestrictor,

@@ -131,9 +131,17 @@ func (r *HelmRenderer) buildArgs(ctx context.Context, app *cluster.Application, 
 		args = append(args, "--namespace", namespace)
 	}
 
-	// Add Kubernetes version if specified
+	// Add Kubernetes version if specified. The version is sanitized to a bare
+	// major.minor.patch so vendor suffixes (e.g. "-gke.1091002") don't parse as
+	// a semver prerelease and break chart constraints like ">=1.29.5".
 	if r.opts.KubeVersion != "" {
-		args = append(args, "--kube-version", r.opts.KubeVersion)
+		args = append(args, "--kube-version", SanitizeKubeVersion(r.opts.KubeVersion))
+	}
+
+	// Add discovered cluster API versions so charts can branch on
+	// .Capabilities.APIVersions. Helm accepts repeated --api-versions flags.
+	for _, v := range r.opts.APIVersions {
+		args = append(args, "--api-versions", v)
 	}
 
 	// Add Helm-specific options
@@ -349,6 +357,24 @@ func (r *HelmRenderer) CanRender() error {
 		return fmt.Errorf("helm binary not found or not working: %w", err)
 	}
 	return nil
+}
+
+// SanitizeKubeVersion extracts a bare major.minor.patch version from a raw
+// Kubernetes server version. It strips a leading "v" and any vendor suffix
+// introduced by "-" (prerelease, e.g. "-gke.1091002", "-eks-abc123") or "+"
+// (build metadata). Versions without a patch component (e.g. "1.29") are
+// returned unchanged after trimming. If the input has no usable numeric
+// prefix, the trimmed input is returned as-is so helm can surface the error.
+func SanitizeKubeVersion(version string) string {
+	v := strings.TrimSpace(version)
+	v = strings.TrimPrefix(v, "v")
+
+	// Strip anything from the first "-" (prerelease) or "+" (build metadata).
+	if i := strings.IndexAny(v, "-+"); i >= 0 {
+		v = v[:i]
+	}
+
+	return v
 }
 
 // ParseKubeVersion parses a Kubernetes version string.
