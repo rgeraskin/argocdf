@@ -87,6 +87,11 @@ func (r *Repository) CommitHash(ref string) (string, error) {
 	return r.run("rev-parse", ref)
 }
 
+// MergeBase returns the best common ancestor commit of two refs.
+func (r *Repository) MergeBase(ref1, ref2 string) (string, error) {
+	return r.run("merge-base", ref1, ref2)
+}
+
 // GetWorktreeForBranch returns the worktree path for a branch if it's checked out in a worktree.
 // Returns empty string if the branch is not in any worktree.
 func (r *Repository) GetWorktreeForBranch(branchName string) (string, error) {
@@ -117,7 +122,7 @@ func (r *Repository) GetWorktreeForBranch(branchName string) (string, error) {
 // WithBranch executes a function while checked out to the specified branch,
 // then restores the original position afterward.
 // If the branch is already checked out in another worktree, it uses that worktree path instead.
-func (r *Repository) WithBranch(branchName string, fn func() error) error {
+func (r *Repository) WithBranch(branchName string, fn func() error) (err error) {
 	// Check if the branch is already in a worktree
 	worktreePath, err := r.GetWorktreeForBranch(branchName)
 	if err != nil {
@@ -126,12 +131,14 @@ func (r *Repository) WithBranch(branchName string, fn func() error) error {
 
 	if worktreePath != "" && worktreePath != r.path {
 		// Branch is in a different worktree - use that worktree's path
-		// Temporarily change the repository path for this operation
+		// Temporarily change the repository path for this operation,
+		// restoring it even if fn panics
 		originalPath := r.path
 		r.path = worktreePath
-		fnErr := fn()
-		r.path = originalPath
-		return fnErr
+		defer func() {
+			r.path = originalPath
+		}()
+		return fn()
 	}
 
 	// Branch is either in current worktree or not in any worktree - use standard checkout
@@ -140,9 +147,9 @@ func (r *Repository) WithBranch(branchName string, fn func() error) error {
 	var originalRef string
 	if originalBranch == "" {
 		// Detached HEAD - save the hash
-		hash, err := r.Head()
-		if err != nil {
-			return fmt.Errorf("failed to get HEAD: %w", err)
+		hash, headErr := r.Head()
+		if headErr != nil {
+			return fmt.Errorf("failed to get HEAD: %w", headErr)
 		}
 		originalRef = hash
 	} else {
@@ -154,19 +161,21 @@ func (r *Repository) WithBranch(branchName string, fn func() error) error {
 		return err
 	}
 
-	// Execute function
-	fnErr := fn()
-
-	// Restore original position
-	restoreErr := r.Checkout(originalRef)
-	if restoreErr != nil {
-		if fnErr != nil {
-			return fmt.Errorf("function error: %v, restore error: %w", fnErr, restoreErr)
+	// Restore original position afterward, even if fn panics
+	defer func() {
+		restoreErr := r.Checkout(originalRef)
+		if restoreErr == nil {
+			return
 		}
-		return fmt.Errorf("failed to restore original position: %w", restoreErr)
-	}
+		if err != nil {
+			err = fmt.Errorf("function error: %v, restore error: %w", err, restoreErr)
+		} else {
+			err = fmt.Errorf("failed to restore original position: %w", restoreErr)
+		}
+	}()
 
-	return fnErr
+	// Execute function
+	return fn()
 }
 
 // FullPath returns the full path for a relative path within the repository.
@@ -218,6 +227,9 @@ func NormalizeRepoURL(url string) string {
 }
 
 // Clone clones a repository to the specified path.
+// It first attempts a shallow clone of the revision; since --branch only
+// accepts branch or tag names, it falls back to a full clone followed by
+// a checkout when the revision is a commit SHA.
 func Clone(repoURL, revision, destPath string) error {
 	args := []string{"clone", "--depth", "1"}
 
@@ -229,8 +241,29 @@ func Clone(repoURL, revision, destPath string) error {
 
 	cmd := exec.Command("git", args...)
 	output, err := cmd.CombinedOutput()
-	if err != nil {
+	if err == nil {
+		return nil
+	}
+
+	// No fallback possible without a revision to checkout
+	if revision == "" || revision == "HEAD" {
 		return fmt.Errorf("git clone failed: %v\noutput: %s", err, string(output))
+	}
+
+	// Clean up any partial clone - cloning into a non-empty directory fails
+	if rmErr := os.RemoveAll(destPath); rmErr != nil {
+		return fmt.Errorf("git clone failed: %v\noutput: %s\ncleanup failed: %v", err, string(output), rmErr)
+	}
+
+	// Full clone, then checkout the revision (works for commit SHAs)
+	cmd = exec.Command("git", "clone", repoURL, destPath)
+	if fullOutput, fullErr := cmd.CombinedOutput(); fullErr != nil {
+		return fmt.Errorf("git clone failed: %v\noutput: %s", fullErr, string(fullOutput))
+	}
+
+	cmd = exec.Command("git", "-C", destPath, "checkout", revision)
+	if checkoutOutput, checkoutErr := cmd.CombinedOutput(); checkoutErr != nil {
+		return fmt.Errorf("git checkout %s failed: %v\noutput: %s", revision, checkoutErr, string(checkoutOutput))
 	}
 
 	return nil

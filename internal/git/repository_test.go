@@ -204,3 +204,132 @@ func TestGetWorktreeForBranch(t *testing.T) {
 		t.Errorf("GetWorktreeForBranch(nonexistent) = %q, want empty string", path)
 	}
 }
+
+// gitRun runs a git command in dir, failing the test on error.
+func gitRun(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v failed: %v\noutput: %s", args, err, out)
+	}
+}
+
+// commitFile writes a file and commits it with test identity.
+func commitFile(t *testing.T, dir, file, content, msg string) {
+	t.Helper()
+	fullPath := filepath.Join(dir, file)
+	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fullPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, dir, "add", ".")
+	gitRun(t, dir, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", msg)
+}
+
+// initFixtureRepo creates a git repository with an initial commit and returns its path.
+func initFixtureRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	gitRun(t, dir, "init")
+	commitFile(t, dir, "init.txt", "init", "initial")
+	return dir
+}
+
+func TestWithBranchPanicRestoresBranch(t *testing.T) {
+	// A panic inside fn must not leave the repo checked out to the wrong branch
+	repoDir := initFixtureRepo(t)
+	gitRun(t, repoDir, "branch", "other")
+
+	repo, err := Open(repoDir)
+	if err != nil {
+		t.Fatalf("failed to open repo: %v", err)
+	}
+	originalBranch, err := repo.HeadBranch()
+	if err != nil {
+		t.Fatalf("failed to get original branch: %v", err)
+	}
+
+	func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatal("expected panic to propagate from WithBranch")
+			}
+		}()
+		_ = repo.WithBranch("other", func() error {
+			panic("boom")
+		})
+	}()
+
+	currentBranch, err := repo.HeadBranch()
+	if err != nil {
+		t.Fatalf("failed to get current branch: %v", err)
+	}
+	if currentBranch != originalBranch {
+		t.Errorf("branch after panic = %q, want %q", currentBranch, originalBranch)
+	}
+}
+
+func TestWithBranchPanicRestoresWorktreePath(t *testing.T) {
+	// A panic inside fn must not leave the repository path swapped to the worktree
+	repoDir := initFixtureRepo(t)
+	gitRun(t, repoDir, "branch", "other")
+	worktreePath := filepath.Join(t.TempDir(), "other-worktree")
+	gitRun(t, repoDir, "worktree", "add", worktreePath, "other")
+
+	repo, err := Open(repoDir)
+	if err != nil {
+		t.Fatalf("failed to open repo: %v", err)
+	}
+	originalPath := repo.Path()
+
+	func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatal("expected panic to propagate from WithBranch")
+			}
+		}()
+		_ = repo.WithBranch("other", func() error {
+			panic("boom")
+		})
+	}()
+
+	if repo.Path() != originalPath {
+		t.Errorf("path after panic = %q, want %q", repo.Path(), originalPath)
+	}
+}
+
+func TestCloneCommitSHA(t *testing.T) {
+	// Cloning by commit SHA must fall back to a full clone plus checkout,
+	// since git clone --branch only accepts branch or tag names
+	srcDir := initFixtureRepo(t)
+	commitFile(t, srcDir, "second.txt", "second", "second commit")
+
+	src, err := Open(srcDir)
+	if err != nil {
+		t.Fatalf("failed to open source repo: %v", err)
+	}
+	sha, err := src.CommitHash("HEAD~1")
+	if err != nil {
+		t.Fatalf("failed to resolve HEAD~1: %v", err)
+	}
+
+	destPath := filepath.Join(t.TempDir(), "clone")
+	if err := Clone(srcDir, sha, destPath); err != nil {
+		t.Fatalf("Clone by SHA failed: %v", err)
+	}
+
+	cloned, err := Open(destPath)
+	if err != nil {
+		t.Fatalf("failed to open cloned repo: %v", err)
+	}
+	head, err := cloned.Head()
+	if err != nil {
+		t.Fatalf("failed to get cloned HEAD: %v", err)
+	}
+	if head != sha {
+		t.Errorf("cloned HEAD = %q, want %q", head, sha)
+	}
+}
