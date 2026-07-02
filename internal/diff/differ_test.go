@@ -401,6 +401,113 @@ func TestCompareSlices_NameBasedMatching(t *testing.T) {
 	})
 }
 
+// hasChange reports whether result contains a change with the given path and type.
+func hasChange(result *DiffResult, path string, changeType ChangeType) bool {
+	for _, c := range result.Changes {
+		if c.Path == path && c.Type == changeType {
+			return true
+		}
+	}
+	return false
+}
+
+// TestCompareSlices_SoundMatching verifies that name-based matching is only used
+// when it is fully sound for both slices, and that the tool falls back to
+// index-based comparison otherwise (so no list items are silently dropped or
+// double-reported).
+func TestCompareSlices_SoundMatching(t *testing.T) {
+	d := NewDiffer()
+
+	t.Run("mixed tolerations - change to unnamed item is not dropped", func(t *testing.T) {
+		// One toleration has no "key" (only operator: Exists). Because the slice
+		// mixes named and unnamed items, comparison must fall back to index-based
+		// matching so a change to the unnamed item is still reported.
+		oldObj := map[string]interface{}{
+			"tolerations": []interface{}{
+				map[string]interface{}{"key": "node-role", "operator": "Equal", "value": "true"},
+				map[string]interface{}{"operator": "Exists"},
+			},
+		}
+		newObj := map[string]interface{}{
+			"tolerations": []interface{}{
+				map[string]interface{}{"key": "node-role", "operator": "Equal", "value": "true"},
+				map[string]interface{}{"operator": "Exists", "effect": "NoSchedule"}, // changed
+			},
+		}
+
+		result := d.DiffObjects(oldObj, newObj)
+
+		if !result.Modified {
+			t.Fatal("Expected the change to the unnamed toleration to be detected")
+		}
+		if !hasChange(result, "tolerations[1].effect", ChangeTypeAdded) {
+			t.Error("Expected added change at tolerations[1].effect")
+			for _, c := range result.Changes {
+				t.Logf("  Change: %s (%s)", c.Path, c.Type)
+			}
+		}
+	})
+
+	t.Run("duplicate extracted names - no item lost", func(t *testing.T) {
+		// Two ports both extract to name "80" (differing only by protocol). Because
+		// names are not unique, comparison must fall back to index-based matching
+		// so removing one is detected and neither entry collapses or is lost.
+		oldObj := map[string]interface{}{
+			"ports": []interface{}{
+				map[string]interface{}{"containerPort": 80, "protocol": "TCP"},
+				map[string]interface{}{"containerPort": 80, "protocol": "UDP"},
+			},
+		}
+		newObj := map[string]interface{}{
+			"ports": []interface{}{
+				map[string]interface{}{"containerPort": 80, "protocol": "TCP"},
+			},
+		}
+
+		result := d.DiffObjects(oldObj, newObj)
+
+		if !result.Modified {
+			t.Fatal("Expected removal of the UDP port to be detected")
+		}
+		if len(result.Changes) != 1 {
+			t.Errorf("Expected exactly 1 change, got %d", len(result.Changes))
+			for _, c := range result.Changes {
+				t.Logf("  Change: %s (%s)", c.Path, c.Type)
+			}
+		}
+		if !hasChange(result, "ports[1]", ChangeTypeRemoved) {
+			t.Error("Expected removed change at ports[1]")
+		}
+	})
+
+	t.Run("fully-named unique items still use name-based paths", func(t *testing.T) {
+		oldObj := map[string]interface{}{
+			"containers": []interface{}{
+				map[string]interface{}{"name": "app", "image": "app:v1"},
+				map[string]interface{}{"name": "sidecar", "image": "sidecar:v1"},
+			},
+		}
+		newObj := map[string]interface{}{
+			"containers": []interface{}{
+				map[string]interface{}{"name": "app", "image": "app:v2"}, // changed
+				map[string]interface{}{"name": "sidecar", "image": "sidecar:v1"},
+			},
+		}
+
+		result := d.DiffObjects(oldObj, newObj)
+
+		if !result.Modified {
+			t.Fatal("Expected the image change to be detected")
+		}
+		if !hasChange(result, "containers[name=app].image", ChangeTypeModified) {
+			t.Error("Expected name-based path containers[name=app].image")
+			for _, c := range result.Changes {
+				t.Logf("  Change: %s (%s)", c.Path, c.Type)
+			}
+		}
+	})
+}
+
 func TestDiffObjectsNestedSliceOfMaps(t *testing.T) {
 	d := NewDiffer()
 
