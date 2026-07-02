@@ -566,6 +566,8 @@ func (a *App) renderCacheKey(app *cluster.Application, branch string) (string, b
 		return "", false
 	}
 
+	localRepoURL := git.NormalizeRepoURL(a.cfg.RepoURL)
+
 	return rendercache.ComputeKey(rendercache.KeyInput{
 		AppName:     app.Name,
 		Namespace:   app.Namespace,
@@ -584,6 +586,11 @@ func (a *App) renderCacheKey(app *cluster.Application, branch string) (string, b
 				return "", false
 			}
 			return h, true
+		},
+		// A ref source is resolvable to local content only when it points at
+		// the repository being diffed; external-repo refs force a cache bypass.
+		SameRepo: func(repoURL string) bool {
+			return git.NormalizeRepoURL(repoURL) == localRepoURL
 		},
 	})
 }

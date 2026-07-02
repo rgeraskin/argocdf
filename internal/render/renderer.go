@@ -46,6 +46,11 @@ type RenderOptions struct {
 
 	// Helm options
 	HelmSkipRefresh bool
+
+	// ChartCacheDir is the directory under which pulled remote charts (pinned
+	// to an immutable version) are cached and reused across runs. Empty
+	// disables the chart download cache (e.g. under --no-cache).
+	ChartCacheDir string
 }
 
 // RenderResult contains the result of rendering an application.

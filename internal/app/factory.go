@@ -2,6 +2,8 @@
 package app
 
 import (
+	"path/filepath"
+
 	"github.com/charmbracelet/log"
 
 	"github.com/rgeraskin/argocdf/internal/cluster"
@@ -52,28 +54,63 @@ func (f *Factory) CreateRenderFactory(kubeVersion string) *render.Factory {
 		KustomizeBuildOptions:   f.config.KustomizeBuildOptions,
 		KustomizeLoadRestrictor: f.config.KustomizeLoadRestrictor,
 		HelmSkipRefresh:         f.config.HelmSkipRefresh,
+		ChartCacheDir:           f.chartCacheDir(),
 	}
 	return render.NewFactory(opts)
 }
 
+// baseCacheDir resolves the base argocdf cache directory: the explicit
+// --cache-dir when set, otherwise <user cache dir>/argocdf.
+func (f *Factory) baseCacheDir() (string, error) {
+	if f.config.CacheDir != "" {
+		return f.config.CacheDir, nil
+	}
+	return rendercache.BaseDir()
+}
+
+// chartCacheDir returns the directory for the remote chart download cache, or
+// "" when caching is disabled (--no-cache) or the base dir cannot be resolved.
+func (f *Factory) chartCacheDir() string {
+	if f.config.NoCache {
+		return ""
+	}
+	base, err := f.baseCacheDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(base, "charts")
+}
+
 // CreateRenderCache creates the persistent render cache, or returns nil when
 // caching is disabled via --no-cache. When the cache directory cannot be
-// prepared it returns an error; callers degrade to normal rendering.
+// prepared it returns an error; callers degrade to normal rendering. Best-effort
+// garbage collection runs inline at creation to bound the cache by age and size.
 func (f *Factory) CreateRenderCache() (*rendercache.Cache, error) {
 	if f.config.NoCache {
 		return nil, nil
 	}
 
-	dir := f.config.CacheDir
-	if dir == "" {
-		d, err := rendercache.DefaultDir()
-		if err != nil {
-			return nil, err
-		}
-		dir = d
+	base, err := f.baseCacheDir()
+	if err != nil {
+		return nil, err
+	}
+	dir := filepath.Join(base, "render")
+
+	cache, err := rendercache.New(dir, f.logger)
+	if err != nil {
+		return nil, err
 	}
 
-	return rendercache.New(dir, f.logger)
+	// Bound the cache best-effort; failures here must not block rendering.
+	if removed, gcErr := cache.GC(rendercache.DefaultMaxAge, rendercache.DefaultMaxBytes); gcErr != nil {
+		if f.logger != nil {
+			f.logger.Debug("Render cache GC failed", "error", gcErr)
+		}
+	} else if removed > 0 && f.logger != nil {
+		f.logger.Debug("Render cache GC evicted entries", "removed", removed)
+	}
+
+	return cache, nil
 }
 
 // CreateManifestDiffer creates a manifest differ.

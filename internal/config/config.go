@@ -66,8 +66,10 @@ type Config struct {
 	HelmSkipRefresh bool
 
 	// Render cache options
-	NoCache  bool   // Disable the persistent render cache
-	CacheDir string // Cache directory (empty = os.UserCacheDir()/argocdf/render)
+	NoCache bool // Disable the persistent render cache
+	// CacheDir is the base cache directory holding the render cache (render/)
+	// and the downloaded-chart cache (charts/). Empty = os.UserCacheDir()/argocdf.
+	CacheDir string
 }
 
 // ParseFileOutput parses a "format:path" string into a FileOutput.
