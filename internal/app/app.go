@@ -5,7 +5,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
+	"strings"
 
 	"github.com/charmbracelet/log"
 
@@ -156,13 +158,35 @@ func (a *App) filterAffectedApps(apps []cluster.Application, changed *git.Change
 	a.logger.Debug("Filtering apps", "localRepoURL", repoURL, "changedFiles", changed.AllPaths())
 	var affected []cluster.Application
 
+	changedPaths := changed.AllPaths()
+
 	for _, app := range apps {
 		sources := app.Spec.GetSources()
+
+		// Build a lookup of ref name -> ref source so we can resolve
+		// $<ref>/... value file references (which may be declared on a
+		// different source than the ref source itself).
+		refSources := make(map[string]cluster.ApplicationSource)
 		for _, source := range sources {
+			if source.Ref != "" {
+				refSources[source.Ref] = source
+			}
+		}
+
+		for _, source := range sources {
+			// A helm source may reference value files in another (ref) source
+			// via $<ref>/path. This is independent of this source's own repo
+			// URL (the helm chart often lives in a different repo).
+			if a.helmValueFilesAffected(source, refSources, repoURL, changedPaths) {
+				a.logger.Debug("App affected via ref value file", "app", app.Name)
+				affected = append(affected, app)
+				break
+			}
+
 			normalizedSourceURL := git.NormalizeRepoURL(source.RepoURL)
 			// Check if this source uses our repo
 			if normalizedSourceURL != repoURL {
-				a.logger.Debug("Skipping app - repo URL mismatch",
+				a.logger.Debug("Skipping source - repo URL mismatch",
 					"app", app.Name,
 					"appRepoURL", normalizedSourceURL,
 					"localRepoURL", repoURL)
@@ -177,7 +201,7 @@ func (a *App) filterAffectedApps(apps []cluster.Application, changed *git.Change
 				affected = append(affected, app)
 				break
 			} else {
-				a.logger.Debug("Skipping app - no changes in path",
+				a.logger.Debug("Skipping source - no changes in path",
 					"app", app.Name,
 					"path", source.Path)
 			}
@@ -185,6 +209,54 @@ func (a *App) filterAffectedApps(apps []cluster.Application, changed *git.Change
 	}
 
 	return affected
+}
+
+// helmValueFilesAffected reports whether any of a helm source's value files
+// reference a $<ref>/... path in the local repo that was changed. It resolves
+// the ref name against the app's ref sources, and only matches when the ref
+// source points at the local repo being diffed.
+func (a *App) helmValueFilesAffected(
+	source cluster.ApplicationSource,
+	refSources map[string]cluster.ApplicationSource,
+	repoURL string,
+	changedPaths []string,
+) bool {
+	if source.Helm == nil {
+		return false
+	}
+
+	for _, vf := range source.Helm.ValueFiles {
+		if !strings.HasPrefix(vf, "$") {
+			continue
+		}
+
+		// Split "$values/env/prod.yaml" into ref name ("values") and the
+		// remaining path within the ref source ("env/prod.yaml").
+		refName, remainder, ok := strings.Cut(strings.TrimPrefix(vf, "$"), "/")
+		if !ok {
+			continue
+		}
+
+		refSource, ok := refSources[refName]
+		if !ok {
+			continue
+		}
+
+		// Only local-repo ref sources map to changed files in this repo.
+		if git.NormalizeRepoURL(refSource.RepoURL) != repoURL {
+			continue
+		}
+
+		// Repo-relative path of the referenced value file.
+		relPath := path.Clean(path.Join(refSource.Path, remainder))
+		for _, cp := range changedPaths {
+			if path.Clean(cp) == relPath {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 // processApplications processes all affected applications with recursion.

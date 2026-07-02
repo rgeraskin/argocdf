@@ -186,6 +186,85 @@ func TestFilterAffectedApps(t *testing.T) {
 	}
 }
 
+func TestFilterAffectedApps_RefValueFiles(t *testing.T) {
+	const localURL = "https://github.com/org/repo"
+
+	// helmSource references a value file in a ref source via $values/... The
+	// helm chart itself lives in a different repo than the one being diffed.
+	helmSource := func(valueFiles ...string) cluster.ApplicationSource {
+		return cluster.ApplicationSource{
+			RepoURL: "https://charts.example.com",
+			Chart:   "app",
+			Helm:    &cluster.ApplicationSourceHelm{ValueFiles: valueFiles},
+		}
+	}
+	refSource := func(refPath string) cluster.ApplicationSource {
+		return cluster.ApplicationSource{
+			RepoURL: localURL,
+			Ref:     "values",
+			Path:    refPath,
+		}
+	}
+
+	tests := []struct {
+		name         string
+		app          cluster.Application
+		changedFiles *git.ChangedFiles
+		want         bool
+	}{
+		{
+			name: "ref value file changed - affected",
+			app: testutil.TestAppMultiSource("my-app", "argocd", []cluster.ApplicationSource{
+				helmSource("$values/env/prod.yaml"),
+				refSource(""),
+			}),
+			changedFiles: testutil.TestChangedFiles(nil, []string{"env/prod.yaml"}, nil),
+			want:         true,
+		},
+		{
+			name: "unrelated file changed - not affected",
+			app: testutil.TestAppMultiSource("my-app", "argocd", []cluster.ApplicationSource{
+				helmSource("$values/env/prod.yaml"),
+				refSource(""),
+			}),
+			changedFiles: testutil.TestChangedFiles(nil, []string{"env/staging.yaml"}, nil),
+			want:         false,
+		},
+		{
+			name: "ref source with path prefix - affected",
+			app: testutil.TestAppMultiSource("my-app", "argocd", []cluster.ApplicationSource{
+				helmSource("$values/env/prod.yaml"),
+				refSource("config"),
+			}),
+			changedFiles: testutil.TestChangedFiles(nil, []string{"config/env/prod.yaml"}, nil),
+			want:         true,
+		},
+		{
+			name: "ref value file added - affected",
+			app: testutil.TestAppMultiSource("my-app", "argocd", []cluster.ApplicationSource{
+				helmSource("$values/env/prod.yaml"),
+				refSource(""),
+			}),
+			changedFiles: testutil.TestChangedFiles([]string{"env/prod.yaml"}, nil, nil),
+			want:         true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.Config{RepoURL: localURL}
+			logger := log.New(nil)
+			logger.SetLevel(log.FatalLevel)
+			app := &App{cfg: cfg, logger: logger}
+
+			got := app.filterAffectedApps([]cluster.Application{tt.app}, tt.changedFiles)
+			if affected := len(got) == 1; affected != tt.want {
+				t.Errorf("filterAffectedApps() affected = %v, want %v", affected, tt.want)
+			}
+		})
+	}
+}
+
 func TestSourcePathsExist(t *testing.T) {
 	logger := log.New(nil)
 	logger.SetLevel(log.FatalLevel)
