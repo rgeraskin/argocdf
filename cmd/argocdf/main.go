@@ -14,6 +14,7 @@ import (
 
 	"github.com/rgeraskin/argocdf/internal/app"
 	"github.com/rgeraskin/argocdf/internal/config"
+	"github.com/rgeraskin/argocdf/internal/rendercache"
 )
 
 var (
@@ -153,7 +154,7 @@ Examples:
 	rootCmd.Flags().BoolVar(&noCache, "no-cache", false,
 		"Disable the persistent render cache")
 	rootCmd.Flags().StringVar(&cacheDir, "cache-dir", "",
-		"Render cache directory (default: <user cache dir>/argocdf/render)")
+		"Base cache directory for render and chart caches (default: <user cache dir>/argocdf)")
 
 	// Recursion flags
 	rootCmd.Flags().BoolVar(&noRecursive, "no-recursive", false, "Disable apps-of-apps recursion")
@@ -168,6 +169,9 @@ Examples:
 		},
 	})
 
+	// Cache command
+	rootCmd.AddCommand(newCacheCmd())
+
 	err := rootCmd.Execute()
 	// Print real errors ourselves (Cobra's printing is silenced above), but keep
 	// the ErrChangesPresent sentinel invisible: it only carries the exit code.
@@ -175,6 +179,77 @@ Examples:
 		fmt.Fprintln(os.Stderr, "Error:", err)
 	}
 	os.Exit(app.ExitCodeFor(err))
+}
+
+// resolveBaseCacheDir returns the base cache directory, honoring --cache-dir.
+func resolveBaseCacheDir(override string) (string, error) {
+	if override != "" {
+		return override, nil
+	}
+	return rendercache.BaseDir()
+}
+
+// newCacheCmd builds the `cache` command group with `clean` and `info`.
+func newCacheCmd() *cobra.Command {
+	var dirOverride string
+
+	cacheCmd := &cobra.Command{
+		Use:   "cache",
+		Short: "Inspect and manage the persistent render/chart cache",
+	}
+	cacheCmd.PersistentFlags().StringVar(&dirOverride, "cache-dir", "",
+		"Base cache directory (default: <user cache dir>/argocdf)")
+
+	cacheCmd.AddCommand(&cobra.Command{
+		Use:   "info",
+		Short: "Show cache location, entry count, and total size",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			base, err := resolveBaseCacheDir(dirOverride)
+			if err != nil {
+				return err
+			}
+			entries, bytes, err := rendercache.DirStats(base)
+			if err != nil {
+				return err
+			}
+			cmd.Printf("Cache dir:   %s\n", base)
+			cmd.Printf("Entries:     %d\n", entries)
+			cmd.Printf("Total size:  %s\n", humanizeBytes(bytes))
+			return nil
+		},
+	})
+
+	cacheCmd.AddCommand(&cobra.Command{
+		Use:   "clean",
+		Short: "Remove the entire cache directory (render and chart caches)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			base, err := resolveBaseCacheDir(dirOverride)
+			if err != nil {
+				return err
+			}
+			if err := os.RemoveAll(base); err != nil {
+				return err
+			}
+			cmd.Printf("Removed cache dir %s\n", base)
+			return nil
+		},
+	})
+
+	return cacheCmd
+}
+
+// humanizeBytes formats a byte count with a binary unit suffix.
+func humanizeBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
 func runMain(cmd *cobra.Command, args []string) error {

@@ -11,10 +11,23 @@ package rendercache
 import (
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
+	"time"
 
 	"github.com/charmbracelet/log"
+)
+
+// GC defaults, used when the cache is created. They bound the cache both by age
+// and by total size; documented here rather than exposed as flags to keep the
+// CLI surface small.
+const (
+	// DefaultMaxAge evicts cache entries not modified within this window.
+	DefaultMaxAge = 30 * 24 * time.Hour // 30 days
+	// DefaultMaxBytes caps the total size of render cache entries.
+	DefaultMaxBytes = int64(1) << 30 // 1 GiB
 )
 
 // Entry is a single cached render result.
@@ -31,13 +44,52 @@ type Cache struct {
 	logger *log.Logger
 }
 
-// DefaultDir returns the default cache directory: os.UserCacheDir()/argocdf/render.
-func DefaultDir() (string, error) {
+// BaseDir returns the base argocdf cache directory: os.UserCacheDir()/argocdf.
+// It is the common parent of the render cache and the downloaded-chart cache,
+// and the directory removed by `argocdf cache clean`.
+func BaseDir() (string, error) {
 	base, err := os.UserCacheDir()
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve user cache dir: %w", err)
 	}
-	return filepath.Join(base, "argocdf", "render"), nil
+	return filepath.Join(base, "argocdf"), nil
+}
+
+// DefaultDir returns the default render cache directory:
+// os.UserCacheDir()/argocdf/render.
+func DefaultDir() (string, error) {
+	base, err := BaseDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(base, "render"), nil
+}
+
+// DirStats walks dir recursively and returns the number of regular files and
+// their total size in bytes. A missing directory reports zero, nil.
+func DirStats(dir string) (entries int, bytes int64, err error) {
+	werr := filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		info, ierr := d.Info()
+		if ierr != nil {
+			return ierr
+		}
+		entries++
+		bytes += info.Size()
+		return nil
+	})
+	if werr != nil {
+		if os.IsNotExist(werr) {
+			return 0, 0, nil
+		}
+		return 0, 0, werr
+	}
+	return entries, bytes, nil
 }
 
 // New creates a Cache rooted at dir, creating the directory if needed.
@@ -109,4 +161,83 @@ func (c *Cache) Put(key string, e *Entry) error {
 		return fmt.Errorf("failed to rename cache file into place: %w", err)
 	}
 	return nil
+}
+
+// GC evicts cache entries to bound the cache. It first removes entries whose
+// mtime is older than maxAge, then, if the remaining entries still exceed
+// maxBytes in total, removes the oldest entries (by mtime) until the total is
+// within maxBytes. A non-positive maxAge disables age-based eviction; a
+// non-positive maxBytes disables size-based eviction. It returns the number of
+// entries removed. GC is best-effort: it only operates on cache entry files
+// (*.json) and ignores unrelated files.
+func (c *Cache) GC(maxAge time.Duration, maxBytes int64) (removed int, err error) {
+	dirEntries, err := os.ReadDir(c.dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("failed to read cache dir: %w", err)
+	}
+
+	type entry struct {
+		path    string
+		size    int64
+		modTime time.Time
+	}
+
+	var entries []entry
+	for _, de := range dirEntries {
+		if de.IsDir() || filepath.Ext(de.Name()) != ".json" {
+			continue
+		}
+		info, ierr := de.Info()
+		if ierr != nil {
+			continue
+		}
+		entries = append(entries, entry{
+			path:    filepath.Join(c.dir, de.Name()),
+			size:    info.Size(),
+			modTime: info.ModTime(),
+		})
+	}
+
+	// Age-based eviction.
+	if maxAge > 0 {
+		cutoff := time.Now().Add(-maxAge)
+		kept := entries[:0:0]
+		for _, e := range entries {
+			if e.modTime.Before(cutoff) {
+				if rmErr := os.Remove(e.path); rmErr == nil {
+					removed++
+					continue
+				}
+			}
+			kept = append(kept, e)
+		}
+		entries = kept
+	}
+
+	// Size-based eviction: oldest first until within budget.
+	if maxBytes > 0 {
+		var total int64
+		for _, e := range entries {
+			total += e.size
+		}
+		if total > maxBytes {
+			sort.Slice(entries, func(i, j int) bool {
+				return entries[i].modTime.Before(entries[j].modTime)
+			})
+			for _, e := range entries {
+				if total <= maxBytes {
+					break
+				}
+				if rmErr := os.Remove(e.path); rmErr == nil {
+					removed++
+					total -= e.size
+				}
+			}
+		}
+	}
+
+	return removed, nil
 }

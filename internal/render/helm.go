@@ -106,15 +106,18 @@ func (r *HelmRenderer) buildArgs(ctx context.Context, app *cluster.Application, 
 	// Determine chart location
 	if source.Chart != "" {
 		// Remote chart from repository
-		chartRef, chartEnv, tempDirPath, err := r.handleRemoteChart(ctx, source)
+		chartRef, chartEnv, tempDirPath, isLocalChart, err := r.handleRemoteChart(ctx, source)
 		if err != nil {
 			return nil, nil, "", nil, err
 		}
 		env = chartEnv
 		tempDir = tempDirPath
 		args = append(args, chartRef)
-		// For remote charts, targetRevision is the chart version
-		if source.TargetRevision != "" && source.TargetRevision != "HEAD" {
+		// For remote charts, targetRevision is the chart version. When the
+		// chart was served from the download cache it is already unpacked at a
+		// pinned version and chartRef is a local directory; helm rejects
+		// --version on a local path, so it is omitted in that case.
+		if !isLocalChart && source.TargetRevision != "" && source.TargetRevision != "HEAD" {
 			args = append(args, "--version", source.TargetRevision)
 		}
 	} else if source.Path != "" {
@@ -179,22 +182,42 @@ func isolatedHelmEnv(tempDir string) []string {
 
 // handleRemoteChart handles fetching a chart from a remote repository.
 // Returns the chart reference, the isolated environment to use for helm
-// commands (nil when the default environment suffices), and a temp directory
-// to cleanup (empty when none was created).
-func (r *HelmRenderer) handleRemoteChart(ctx context.Context, source *cluster.ApplicationSource) (string, []string, string, error) {
+// commands (nil when the default environment suffices), a temp directory to
+// cleanup (empty when none was created), and whether the returned reference is
+// a local (already-unpacked) chart directory rather than a remote reference.
+//
+// For pinned (immutable) chart versions and an enabled chart cache, the chart
+// is pulled+unpacked once into the persistent cache and subsequent renders
+// template the local directory directly, skipping helm repo add/update.
+func (r *HelmRenderer) handleRemoteChart(ctx context.Context, source *cluster.ApplicationSource) (string, []string, string, bool, error) {
 	repoURL := source.RepoURL
+
+	// Fast path: persistent download cache for pinned chart versions.
+	cacheDir, chartDir, hit, enabled := chartCacheDecision(
+		r.opts.ChartCacheDir, repoURL, source.Chart, source.TargetRevision, dirExists,
+	)
+	if enabled {
+		if hit {
+			return chartDir, nil, "", true, nil
+		}
+		if err := r.pullChartToCache(ctx, source, cacheDir, chartDir); err == nil {
+			return chartDir, nil, "", true, nil
+		}
+		// On any pull/cache error, fall through to the always-fetch path so
+		// rendering stays functional even if the cache cannot be populated.
+	}
 
 	if strings.HasPrefix(repoURL, "oci://") {
 		// OCI registry - helm can pull directly; the chart version is
 		// passed separately via --version
-		return repoURL + "/" + source.Chart, nil, "", nil
+		return repoURL + "/" + source.Chart, nil, "", false, nil
 	}
 
 	// HTTP/HTTPS repo - need to add repo first
 	// Create a temp directory for repo operations
 	tempDir, err := os.MkdirTemp("", "argocdf-helm-")
 	if err != nil {
-		return "", nil, "", fmt.Errorf("failed to create temp dir: %w", err)
+		return "", nil, "", false, fmt.Errorf("failed to create temp dir: %w", err)
 	}
 	env := isolatedHelmEnv(tempDir)
 
@@ -208,9 +231,9 @@ func (r *HelmRenderer) handleRemoteChart(ctx context.Context, source *cluster.Ap
 	if output, err := addCmd.CombinedOutput(); err != nil {
 		_ = SafeRemoveAll(tempDir)
 		if ctx.Err() != nil {
-			return "", nil, "", ctx.Err()
+			return "", nil, "", false, ctx.Err()
 		}
-		return "", nil, "", fmt.Errorf("failed to add helm repo: %v\noutput: %s", err, output)
+		return "", nil, "", false, fmt.Errorf("failed to add helm repo: %v\noutput: %s", err, output)
 	}
 
 	// Update the repo with context
@@ -220,13 +243,77 @@ func (r *HelmRenderer) handleRemoteChart(ctx context.Context, source *cluster.Ap
 	if output, err := updateCmd.CombinedOutput(); err != nil {
 		_ = SafeRemoveAll(tempDir)
 		if ctx.Err() != nil {
-			return "", nil, "", ctx.Err()
+			return "", nil, "", false, ctx.Err()
 		}
-		return "", nil, "", fmt.Errorf("failed to update helm repo: %v\noutput: %s", err, output)
+		return "", nil, "", false, fmt.Errorf("failed to update helm repo: %v\noutput: %s", err, output)
 	}
 
 	chartRef := repoName + "/" + source.Chart
-	return chartRef, env, tempDir, nil
+	return chartRef, env, tempDir, false, nil
+}
+
+// dirExists reports whether p exists and is a directory.
+func dirExists(p string) bool {
+	info, err := os.Stat(p)
+	return err == nil && info.IsDir()
+}
+
+// pullChartToCache pulls a pinned chart version into the persistent cache using
+// an atomic claim: the chart is unpacked into a sibling temp directory and then
+// renamed into place, so concurrent renders never observe a partial chart. If a
+// concurrent render already published the chart, the existing directory is
+// treated as a hit.
+func (r *HelmRenderer) pullChartToCache(ctx context.Context, source *cluster.ApplicationSource, cacheDir, chartDir string) error {
+	parent := filepath.Dir(cacheDir)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return fmt.Errorf("failed to create chart cache dir: %w", err)
+	}
+
+	// Isolated helm homes so the pull never touches the user's helm config.
+	homeTmp, err := os.MkdirTemp("", "argocdf-helmhome-")
+	if err != nil {
+		return fmt.Errorf("failed to create temp helm home: %w", err)
+	}
+	defer func() { _ = SafeRemoveAll(homeTmp) }()
+
+	// Unpack into a sibling temp dir that we atomically rename into place.
+	untarTmp, err := os.MkdirTemp(parent, "argocdf-chart-*.tmp")
+	if err != nil {
+		return fmt.Errorf("failed to create temp chart dir: %w", err)
+	}
+	published := false
+	defer func() {
+		if !published {
+			_ = SafeRemoveAll(untarTmp)
+		}
+	}()
+
+	args := []string{"pull"}
+	if strings.HasPrefix(source.RepoURL, "oci://") {
+		args = append(args, source.RepoURL+"/"+source.Chart)
+	} else {
+		args = append(args, source.Chart, "--repo", source.RepoURL)
+	}
+	args = append(args, "--version", source.TargetRevision, "--untar", "--untardir", untarTmp)
+
+	cmd := exec.CommandContext(ctx, "helm", args...)
+	cmd.Env = isolatedHelmEnv(homeTmp)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("failed to pull helm chart: %v\noutput: %s", err, output)
+	}
+
+	// Atomically publish. If another render won the race, treat as a hit.
+	if err := os.Rename(untarTmp, cacheDir); err != nil {
+		if dirExists(chartDir) {
+			return nil
+		}
+		return fmt.Errorf("failed to publish cached chart: %w", err)
+	}
+	published = true
+	return nil
 }
 
 // addHelmOptions adds Helm-specific options to the command arguments.
