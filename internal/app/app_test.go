@@ -2,7 +2,12 @@
 package app
 
 import (
+	"errors"
+	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/charmbracelet/log"
@@ -383,5 +388,142 @@ func TestChangedFilesHasChangesInPath(t *testing.T) {
 				t.Errorf("HasChangesInPath(%q) = %v, want %v", tt.dirPath, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestExitCodeFor(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{"nil means success", nil, 0},
+		{"changes present sentinel", ErrChangesPresent, 2},
+		{"wrapped changes present", fmt.Errorf("run: %w", ErrChangesPresent), 2},
+		{"other error", errors.New("boom"), 1},
+		{"wrapped other error", fmt.Errorf("outer: %w", errors.New("boom")), 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ExitCodeFor(tt.err); got != tt.want {
+				t.Errorf("ExitCodeFor(%v) = %d, want %d", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+// gitInRepo runs a git command in dir, failing the test on error.
+func gitInRepo(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v failed: %v\noutput: %s", args, err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func writeAndCommit(t *testing.T, dir, file, content, msg string) {
+	t.Helper()
+	full := filepath.Join(dir, file)
+	if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitInRepo(t, dir, "add", ".")
+	gitInRepo(t, dir, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", msg)
+}
+
+// setupStaleBaseRepo builds a repo modeling the stale-local-base incident:
+//
+//	c1 (initial) --- c2 (upstream bump, origin/main) --- cf (feature)
+//
+// origin/main points at c2, but the local main branch is reset back to c1, so it
+// is one commit behind origin/main. The feature branch is cut from c2.
+// Returns the repo dir plus the c1 and c2 commit hashes.
+func setupStaleBaseRepo(t *testing.T) (dir, c1, c2 string) {
+	t.Helper()
+	dir = t.TempDir()
+	gitInRepo(t, dir, "init")
+	writeAndCommit(t, dir, "init.txt", "init\n", "c1")
+	// Ensure a local 'main' branch regardless of the default branch name.
+	gitInRepo(t, dir, "checkout", "-B", "main")
+	c1 = gitInRepo(t, dir, "rev-parse", "HEAD")
+
+	// c2: the upstream bump that landed on origin/main after the PR was cut.
+	writeAndCommit(t, dir, "image.txt", "v2\n", "c2 upstream bump")
+	c2 = gitInRepo(t, dir, "rev-parse", "HEAD")
+
+	// Simulate the remote-tracking ref locally (no network fetch needed).
+	gitInRepo(t, dir, "update-ref", "refs/remotes/origin/main", c2)
+
+	// Feature branch cut from c2.
+	gitInRepo(t, dir, "checkout", "-b", "feature")
+	writeAndCommit(t, dir, "feature.txt", "work\n", "cf feature work")
+
+	// Reset local main back to c1: now it is 1 commit behind origin/main.
+	gitInRepo(t, dir, "branch", "-f", "main", c1)
+
+	return dir, c1, c2
+}
+
+func newQuietApp(t *testing.T, dir, base, target string) *App {
+	t.Helper()
+	repo, err := git.Open(dir)
+	if err != nil {
+		t.Fatalf("failed to open repo: %v", err)
+	}
+	logger := log.New(nil)
+	logger.SetLevel(log.FatalLevel)
+	return &App{
+		repo:   repo,
+		cfg:    &config.Config{BaseBranch: base, TargetBranch: target},
+		logger: logger,
+	}
+}
+
+func TestResolveBaseRefPrefersOriginWhenLocalStale(t *testing.T) {
+	dir, c1, c2 := setupStaleBaseRepo(t)
+
+	app := newQuietApp(t, dir, "main", "feature")
+	got := app.resolveBaseRef()
+
+	// With the fix, the base side resolves against origin/main (c2), so the
+	// upstream bump is excluded from the PR diff. The stale local main (c1) would
+	// have made c2 look like part of the PR.
+	if got != c2 {
+		t.Errorf("resolveBaseRef() = %q, want origin/main (%q); stale local base c1=%q", got, c2, c1)
+	}
+}
+
+func TestResolveBaseRefExplicitOriginBase(t *testing.T) {
+	dir, _, c2 := setupStaleBaseRepo(t)
+
+	// Passing --base origin/main explicitly must keep working end-to-end.
+	app := newQuietApp(t, dir, "origin/main", "feature")
+	got := app.resolveBaseRef()
+	if got != c2 {
+		t.Errorf("resolveBaseRef() with explicit origin/main = %q, want %q", got, c2)
+	}
+}
+
+func TestResolveBaseRefKeepsLocalWhenAhead(t *testing.T) {
+	// Local main ahead of origin/main: keep the local base.
+	dir := t.TempDir()
+	gitInRepo(t, dir, "init")
+	writeAndCommit(t, dir, "init.txt", "init\n", "c1")
+	gitInRepo(t, dir, "checkout", "-B", "main")
+	c1 := gitInRepo(t, dir, "rev-parse", "HEAD")
+	// origin/main stays at c1; local main advances to c2.
+	gitInRepo(t, dir, "update-ref", "refs/remotes/origin/main", c1)
+	writeAndCommit(t, dir, "local.txt", "local\n", "c2 local ahead")
+	c2 := gitInRepo(t, dir, "rev-parse", "HEAD")
+	gitInRepo(t, dir, "checkout", "-b", "feature")
+	writeAndCommit(t, dir, "feature.txt", "work\n", "cf")
+
+	app := newQuietApp(t, dir, "main", "feature")
+	got := app.resolveBaseRef()
+	// merge-base(local main=c2, feature) = c2, i.e. the local (ahead) base is used.
+	if got != c2 {
+		t.Errorf("resolveBaseRef() = %q, want local base c2 (%q); origin was c1 (%q)", got, c2, c1)
 	}
 }

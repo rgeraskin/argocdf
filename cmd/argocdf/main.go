@@ -3,6 +3,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
@@ -34,6 +36,8 @@ var (
 	noRecursive    bool
 	maxDepth       int
 	unifiedContext int
+	exitCode       bool
+	marker         string
 
 	// Kustomize build options
 	kustomizeEnableHelm     bool
@@ -94,6 +98,11 @@ Examples:
   # Use external diff tool for side-by-side view
   ARGOCDF_EXTERNAL_DIFF="delta --side-by-side" argocdf`,
 		RunE: runMain,
+		// We map the Run result to a detailed exit code ourselves (see below), so
+		// suppress Cobra's default error printing and usage-on-error behavior for
+		// runtime errors. The sentinel ErrChangesPresent must stay invisible.
+		SilenceErrors: true,
+		SilenceUsage:  true,
 	}
 
 	// Kubernetes flags
@@ -134,6 +143,12 @@ Examples:
 	rootCmd.Flags().IntVarP(&unifiedContext, "context-lines", "U", config.DefaultUnifiedContext,
 		"Number of context lines in unified diff output (-1 for unlimited)")
 
+	// CI flags
+	rootCmd.Flags().BoolVar(&exitCode, "exit-code", false,
+		"Exit 0 if no changes, 1 on error, 2 if changes are present (like `diff`)")
+	rootCmd.Flags().StringVar(&marker, "marker", "",
+		"Marker id for the markdown PR-comment upsert marker (default: <!-- argocdf-diff -->)")
+
 	// Render cache flags
 	rootCmd.Flags().BoolVar(&noCache, "no-cache", false,
 		"Disable the persistent render cache")
@@ -153,9 +168,13 @@ Examples:
 		},
 	})
 
-	if err := rootCmd.Execute(); err != nil {
-		os.Exit(1)
+	err := rootCmd.Execute()
+	// Print real errors ourselves (Cobra's printing is silenced above), but keep
+	// the ErrChangesPresent sentinel invisible: it only carries the exit code.
+	if err != nil && !errors.Is(err, app.ErrChangesPresent) {
+		fmt.Fprintln(os.Stderr, "Error:", err)
 	}
+	os.Exit(app.ExitCodeFor(err))
 }
 
 func runMain(cmd *cobra.Command, args []string) error {
@@ -215,6 +234,8 @@ func runMain(cmd *cobra.Command, args []string) error {
 		NoAPIVersions:           noAPIVersions,
 		NoCache:                 noCache,
 		CacheDir:                cacheDir,
+		ExitCode:                exitCode,
+		Marker:                  marker,
 	}
 
 	// Auto-detect missing values

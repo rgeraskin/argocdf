@@ -97,6 +97,62 @@ func TestMarkdownWriter_WriteHeader(t *testing.T) {
 	}
 }
 
+func TestCommentMarker(t *testing.T) {
+	if got := CommentMarker(""); got != "<!-- argocdf-diff -->" {
+		t.Errorf("CommentMarker(\"\") = %q, want default marker", got)
+	}
+	if got := CommentMarker("prod"); got != "<!-- argocdf-diff:prod -->" {
+		t.Errorf("CommentMarker(\"prod\") = %q, want scoped marker", got)
+	}
+}
+
+func TestMarkdownWriter_WriteHeader_Marker(t *testing.T) {
+	tests := []struct {
+		name       string
+		format     MarkdownFormat
+		markerID   string
+		wantMarker string
+	}{
+		{"github default marker", MarkdownFormatGitHub, "", "<!-- argocdf-diff -->"},
+		{"github scoped marker", MarkdownFormatGitHub, "prod", "<!-- argocdf-diff:prod -->"},
+		{"atlantis default marker", MarkdownFormatAtlantis, "", "<!-- argocdf-diff -->"},
+		{"atlantis scoped marker", MarkdownFormatAtlantis, "staging", "<!-- argocdf-diff:staging -->"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tempDir, _ := os.MkdirTemp("", "markdown-test-")
+			defer func() {
+				_ = os.RemoveAll(tempDir)
+			}()
+
+			filePath := filepath.Join(tempDir, "test.md")
+			w, err := NewMarkdownWriter(filePath, tt.format, 3)
+			if err != nil {
+				t.Fatalf("NewMarkdownWriter() error = %v", err)
+			}
+			w.SetMarker(tt.markerID)
+
+			if err := w.WriteHeader("Some Title"); err != nil {
+				t.Fatalf("WriteHeader() error = %v", err)
+			}
+			if err := w.Flush(); err != nil {
+				t.Fatalf("Flush() error = %v", err)
+			}
+
+			content, _ := os.ReadFile(filePath)
+			// Marker must be the very first line so CI can match on it.
+			lines := strings.SplitN(string(content), "\n", 2)
+			if lines[0] != tt.wantMarker {
+				t.Errorf("first line = %q, want %q", lines[0], tt.wantMarker)
+			}
+			if !strings.Contains(string(content), "## Some Title") {
+				t.Errorf("output missing title header, got: %s", content)
+			}
+		})
+	}
+}
+
 func TestMarkdownWriter_WriteAppDiff_GitHub(t *testing.T) {
 	tests := []struct {
 		name     string
