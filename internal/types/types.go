@@ -23,6 +23,11 @@ type AppDiff struct {
 	// ParentAppName is the name of the parent app (for apps-of-apps pattern)
 	ParentAppName string
 
+	// ParentAppNamespace is the namespace of the parent app (for apps-of-apps pattern).
+	// Together with ParentAppName it uniquely identifies the parent, so same-named
+	// apps in different namespaces attach to the correct parent.
+	ParentAppNamespace string
+
 	// ChildAppNames contains names of child applications discovered
 	ChildAppNames []string
 

@@ -174,32 +174,60 @@ func (d *AppDiscoverer) FindModifiedApplications(oldContent, newContent string) 
 type AppDiffQueue struct {
 	pending   []QueuedApp
 	processed map[string]bool
-	maxDepth  int
+	// processedSpecs records the (Spec, OldSpec) identity each app was last
+	// processed with. It is used by RequeueProcessed to break requeue loops
+	// (e.g. self-managing root apps that discover their own Application CRD).
+	processedSpecs map[string]string
+	maxDepth       int
 }
 
 // QueuedApp represents an application in the processing queue.
 type QueuedApp struct {
-	Name      string
-	Namespace string
-	Depth     int
-	ParentApp string
-	Spec      *cluster.ApplicationSpec // Spec to use for target branch (also for base if OldSpec is nil)
-	OldSpec   *cluster.ApplicationSpec // Optional: spec to use for base branch (for modified child apps)
+	Name            string
+	Namespace       string
+	Depth           int
+	ParentApp       string
+	ParentNamespace string
+	Spec            *cluster.ApplicationSpec // Spec to use for target branch (also for base if OldSpec is nil)
+	OldSpec         *cluster.ApplicationSpec // Optional: spec to use for base branch (for modified child apps)
+}
+
+// specSignature returns a stable identity for an app's (Spec, OldSpec) pair.
+// Apps requeued with an identical signature to what was already processed are
+// refused, which terminates apps-of-apps requeue loops.
+func specSignature(app QueuedApp) string {
+	spec, _ := json.Marshal(app.Spec)
+	oldSpec, _ := json.Marshal(app.OldSpec)
+	return string(spec) + "|" + string(oldSpec)
 }
 
 // NewAppDiffQueue creates a new AppDiffQueue.
 func NewAppDiffQueue(maxDepth int) *AppDiffQueue {
 	return &AppDiffQueue{
-		pending:   make([]QueuedApp, 0),
-		processed: make(map[string]bool),
-		maxDepth:  maxDepth,
+		pending:        make([]QueuedApp, 0),
+		processed:      make(map[string]bool),
+		processedSpecs: make(map[string]string),
+		maxDepth:       maxDepth,
 	}
 }
 
-// Add adds an application to the queue if not already processed.
+// isPending reports whether an app with the given key is already in pending.
+func (q *AppDiffQueue) isPending(key string) bool {
+	for i := range q.pending {
+		if appKey(q.pending[i].Namespace, q.pending[i].Name) == key {
+			return true
+		}
+	}
+	return false
+}
+
+// Add adds an application to the queue if not already processed or pending.
 func (q *AppDiffQueue) Add(app QueuedApp) bool {
 	key := appKey(app.Namespace, app.Name)
 	if q.processed[key] {
+		return false
+	}
+	if q.isPending(key) {
 		return false
 	}
 	if app.Depth >= q.maxDepth {
@@ -218,6 +246,7 @@ func (q *AppDiffQueue) Next() *QueuedApp {
 	q.pending = q.pending[1:]
 	key := appKey(app.Namespace, app.Name)
 	q.processed[key] = true
+	q.processedSpecs[key] = specSignature(app)
 	return &app
 }
 
@@ -247,6 +276,7 @@ func (q *AppDiffQueue) UpdatePending(app QueuedApp) bool {
 			q.pending[i].Spec = app.Spec
 			q.pending[i].OldSpec = app.OldSpec
 			q.pending[i].ParentApp = app.ParentApp
+			q.pending[i].ParentNamespace = app.ParentNamespace
 			return true
 		}
 	}
@@ -264,6 +294,20 @@ func (q *AppDiffQueue) RequeueProcessed(app QueuedApp) bool {
 
 	// Only requeue if it was actually processed
 	if !q.processed[key] {
+		return false
+	}
+
+	// Enforce maxDepth like Add does, so requeuing can't recurse without bound.
+	if app.Depth >= q.maxDepth {
+		return false
+	}
+
+	// Spec-identity guard: refuse to requeue when the incoming (Spec, OldSpec)
+	// is identical to what the app was already processed with. This is the loop
+	// terminator for self-managing / mutually-referencing apps: the first
+	// requeue (cluster spec -> git specs) differs and is allowed; a second
+	// requeue with the same git specs is refused.
+	if sig, ok := q.processedSpecs[key]; ok && sig == specSignature(app) {
 		return false
 	}
 
@@ -309,16 +353,13 @@ func NewAppTree(diffs []*types.AppDiff) *AppTree {
 		if d.ParentAppName == "" {
 			// Root node
 			tree.Root = append(tree.Root, node)
+		} else if parentNode, ok := tree.allNodes[appKey(d.ParentAppNamespace, d.ParentAppName)]; ok {
+			// Attach to the exact parent (matched by namespace/name)
+			parentNode.Children = append(parentNode.Children, node)
 		} else {
-			// Find parent and add as child
-			for _, parentNode := range tree.allNodes {
-				if parentAppDiff, ok := parentNode.AppDiff.(*types.AppDiff); ok {
-					if parentAppDiff.Name == d.ParentAppName {
-						parentNode.Children = append(parentNode.Children, node)
-						break
-					}
-				}
-			}
+			// Parent not present in the result set: treat as a root so the
+			// node still appears in the tree instead of being dropped.
+			tree.Root = append(tree.Root, node)
 		}
 	}
 
