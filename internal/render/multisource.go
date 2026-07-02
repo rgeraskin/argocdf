@@ -26,6 +26,14 @@ func NewMultiSourceRenderer(factory *Factory, repoPath string) *MultiSourceRende
 	}
 }
 
+// isPureRef reports whether a source is used ONLY as a ref and produces no
+// manifests. ArgoCD's IsRef() is simply Ref != "", but a source may legitimately
+// both render manifests (via Path/Chart) AND be referenced by other sources. Only
+// a source with a Ref and neither Path nor Chart should be skipped from rendering.
+func isPureRef(source cluster.ApplicationSource) bool {
+	return source.Ref != "" && source.Path == "" && source.Chart == ""
+}
+
 // RenderMultiSource renders an application with multiple sources.
 // The context can be used to cancel long-running render operations.
 // This method is safe for concurrent use - it creates per-request renderers
@@ -63,8 +71,9 @@ func (r *MultiSourceRenderer) RenderMultiSource(ctx context.Context, app *cluste
 		default:
 		}
 
-		// Skip ref sources - they don't produce manifests
-		if source.IsRef() {
+		// Skip pure ref sources - they don't produce manifests. Sources that are
+		// both a ref and a renderable source (Path/Chart set) are still rendered.
+		if isPureRef(source) {
 			continue
 		}
 
@@ -101,12 +110,37 @@ func (r *MultiSourceRenderer) prepareRefSources(sources []cluster.ApplicationSou
 		}
 	}
 
+	// Local repo URL of the repository being diffed (may be empty if auto-detect
+	// failed). Both renderers share the same opts, so read from either.
+	localRepoURL := r.factory.helmRenderer.opts.RepoURL
+
 	for _, source := range sources {
-		if !source.IsRef() {
+		// Register ANY source that carries a Ref, including sources that also
+		// render manifests (Path/Chart set) and are referenced by others.
+		if source.Ref == "" {
 			continue
 		}
 
-		// Create a temp directory for this ref source
+		// If the ref source points at the local repo being diffed, use the
+		// local branch checkout (r.repoPath already points at the correct
+		// branch at render time) instead of cloning. This ensures edits to
+		// $values files in a PR actually produce a diff. Fall back to cloning
+		// when the local repo URL is unknown.
+		if localRepoURL != "" && git.NormalizeRepoURL(source.RepoURL) == git.NormalizeRepoURL(localRepoURL) {
+			refPath := r.repoPath
+			if source.Path != "" {
+				refPath = filepath.Join(r.repoPath, source.Path)
+				// Validate that the path stays within the local checkout
+				if err := ValidatePathContainment(r.repoPath, refPath); err != nil {
+					cleanup()
+					return nil, nil, fmt.Errorf("invalid ref source path for %s: %w", source.Ref, err)
+				}
+			}
+			refSources[source.Ref] = refPath
+			continue
+		}
+
+		// External repo: create a temp directory and clone it.
 		tempDir, err := os.MkdirTemp("", "argocdf-ref-")
 		if err != nil {
 			cleanup()

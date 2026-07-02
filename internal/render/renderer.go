@@ -25,6 +25,11 @@ type RenderOptions struct {
 	// RepoPath is the path to the git repository
 	RepoPath string
 
+	// RepoURL is the normalized URL of the local repository being diffed.
+	// It is used to detect ref sources that point at the local repo so their
+	// files can be read from the local branch checkout instead of a remote clone.
+	RepoURL string
+
 	// KubeVersion is the Kubernetes version to use for rendering
 	KubeVersion string
 
@@ -100,8 +105,10 @@ func (f *Factory) RenderApplication(ctx context.Context, app *cluster.Applicatio
 		}, nil
 	}
 
-	// For single source apps, render directly
-	if len(sources) == 1 && !sources[0].IsRef() {
+	// For single source apps, render directly.
+	// A source that is a pure ref (Ref set, but no Path/Chart) produces no
+	// manifests, so it must go through the multi-source path instead.
+	if len(sources) == 1 && !isPureRef(sources[0]) {
 		renderer := f.GetRenderer(&sources[0], repoPath)
 		manifests, err := renderer.Render(ctx, app, &sources[0], repoPath)
 		return &RenderResult{
