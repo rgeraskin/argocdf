@@ -248,6 +248,123 @@ func TestChangedFilesHasChangesInPath(t *testing.T) {
 	}
 }
 
+func TestChangedFilesHasChangesInPathNormalization(t *testing.T) {
+	tests := []struct {
+		name    string
+		changed []string
+		dirPath string
+		want    bool
+	}{
+		{
+			name:    "repo root dot matches any change",
+			changed: []string{"apps/foo.yaml"},
+			dirPath: ".",
+			want:    true,
+		},
+		{
+			name:    "repo root dot with no changes",
+			changed: []string{},
+			dirPath: ".",
+			want:    false,
+		},
+		{
+			name:    "leading dot-slash prefix",
+			changed: []string{"charts/x/values.yaml"},
+			dirPath: "./charts/x",
+			want:    true,
+		},
+		{
+			name:    "embedded dot segment",
+			changed: []string{"charts/x/values.yaml"},
+			dirPath: "charts/./x",
+			want:    true,
+		},
+		{
+			name:    "trailing slash",
+			changed: []string{"charts/x/values.yaml"},
+			dirPath: "charts/x/",
+			want:    true,
+		},
+		{
+			name:    "exact file path",
+			changed: []string{"apps/app1/values.yaml"},
+			dirPath: "apps/app1/values.yaml",
+			want:    true,
+		},
+		{
+			name:    "sibling prefix does not match",
+			changed: []string{"apps2/file.yaml"},
+			dirPath: "apps",
+			want:    false,
+		},
+		{
+			name:    "changed path with dot-slash prefix",
+			changed: []string{"./charts/x/values.yaml"},
+			dirPath: "charts/x",
+			want:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cf := &ChangedFiles{Modified: tt.changed}
+			got := cf.HasChangesInPath(tt.dirPath)
+			if got != tt.want {
+				t.Errorf("HasChangesInPath(%q) = %v, want %v", tt.dirPath, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMergeBaseDiff(t *testing.T) {
+	// Create a repo where the base branch advances after the feature branch
+	// diverged: files changed only on base must NOT appear in the diff.
+	repoDir := initFixtureRepo(t)
+
+	repo, err := Open(repoDir)
+	if err != nil {
+		t.Fatalf("failed to open repo: %v", err)
+	}
+	baseBranch, err := repo.HeadBranch()
+	if err != nil {
+		t.Fatalf("failed to get base branch: %v", err)
+	}
+
+	// Diverge: commit on feature, then advance base
+	gitRun(t, repoDir, "checkout", "-b", "feature")
+	commitFile(t, repoDir, "apps/feature.yaml", "feature: true", "feature change")
+	gitRun(t, repoDir, "checkout", baseBranch)
+	commitFile(t, repoDir, "apps/base-only.yaml", "base: true", "base-only change")
+
+	mergeBase, err := repo.MergeBase(baseBranch, "feature")
+	if err != nil {
+		t.Fatalf("MergeBase failed: %v", err)
+	}
+
+	changed, err := repo.GetDiff(mergeBase, "feature")
+	if err != nil {
+		t.Fatalf("GetDiff failed: %v", err)
+	}
+
+	paths := changed.AllPaths()
+	if !stringSliceContains(paths, "apps/feature.yaml") {
+		t.Errorf("expected apps/feature.yaml in diff, got %v", paths)
+	}
+	if stringSliceContains(paths, "apps/base-only.yaml") {
+		t.Errorf("apps/base-only.yaml changed only on base, must not be in diff: %v", paths)
+	}
+}
+
+// stringSliceContains reports whether s contains v.
+func stringSliceContains(s []string, v string) bool {
+	for _, item := range s {
+		if item == v {
+			return true
+		}
+	}
+	return false
+}
+
 // stringSliceEqual compares two string slices for equality.
 func stringSliceEqual(a, b []string) bool {
 	if len(a) != len(b) {

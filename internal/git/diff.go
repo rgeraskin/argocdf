@@ -2,6 +2,7 @@
 package git
 
 import (
+	"path"
 	"strings"
 )
 
@@ -22,13 +23,25 @@ func (c *ChangedFiles) AllPaths() []string {
 }
 
 // HasChangesInPath checks if any changed files are within the given directory path.
+// Paths are normalized before comparison (git always outputs forward slashes),
+// so values like ".", "./charts/x", or "charts/x/" match as expected.
 func (c *ChangedFiles) HasChangesInPath(dirPath string) bool {
-	if !strings.HasSuffix(dirPath, "/") {
-		dirPath = dirPath + "/"
+	// An unspecified path never matches; a repo-root path is "." explicitly
+	if dirPath == "" {
+		return false
 	}
 
-	for _, path := range c.AllPaths() {
-		if strings.HasPrefix(path, dirPath) || path == strings.TrimSuffix(dirPath, "/") {
+	dirPath = path.Clean(dirPath)
+
+	// A repo-root source path matches any change
+	if dirPath == "." {
+		return len(c.AllPaths()) > 0
+	}
+
+	prefix := dirPath + "/"
+	for _, p := range c.AllPaths() {
+		p = path.Clean(p)
+		if p == dirPath || strings.HasPrefix(p, prefix) {
 			return true
 		}
 	}
@@ -36,27 +49,10 @@ func (c *ChangedFiles) HasChangesInPath(dirPath string) bool {
 	return false
 }
 
-// GetDiff returns the changed files between two branches.
-func (r *Repository) GetDiff(baseBranch, targetBranch string) (*ChangedFiles, error) {
+// GetDiff returns the changed files between two refs (branches or commits).
+func (r *Repository) GetDiff(baseRef, targetRef string) (*ChangedFiles, error) {
 	// Use git diff --name-status to get changed files
-	output, err := r.run("diff", "--name-status", baseBranch+".."+targetBranch)
-	if err != nil {
-		return nil, err
-	}
-
-	return parseNameStatus(output), nil
-}
-
-// GetDiffFromMergeBase returns changed files from the merge base of two branches.
-func (r *Repository) GetDiffFromMergeBase(baseBranch, targetBranch string) (*ChangedFiles, error) {
-	// Find merge base
-	mergeBase, err := r.run("merge-base", baseBranch, targetBranch)
-	if err != nil {
-		return nil, err
-	}
-
-	// Get diff from merge base to target
-	output, err := r.run("diff", "--name-status", mergeBase+".."+targetBranch)
+	output, err := r.run("diff", "--name-status", baseRef+".."+targetRef)
 	if err != nil {
 		return nil, err
 	}

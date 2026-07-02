@@ -30,6 +30,9 @@ type App struct {
 	differ     *diff.ManifestDiffer
 	discoverer *diff.AppDiscoverer
 	writer     output.Writer
+	// baseRef is the ref used for the base side of comparisons: the merge base
+	// of the base and target branches, or the base branch tip as a fallback.
+	baseRef string
 }
 
 // New creates a new App with the given configuration.
@@ -58,9 +61,11 @@ func (a *App) Run(ctx context.Context) error {
 	}
 	a.logger.Info("Found applications", "count", len(apps))
 
-	// Get changed files
+	// Get changed files from the merge base so commits made on the base branch
+	// after the target branch diverged don't show up as phantom changes
 	a.logger.Info("Analyzing git changes...")
-	changedFiles, err := a.repo.GetDiff(a.cfg.BaseBranch, a.cfg.TargetBranch)
+	a.baseRef = a.resolveBaseRef()
+	changedFiles, err := a.repo.GetDiff(a.baseRef, a.cfg.TargetBranch)
 	if err != nil {
 		return fmt.Errorf("failed to get changed files: %w", err)
 	}
@@ -140,6 +145,22 @@ func (a *App) initialize(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// resolveBaseRef resolves the merge base of the base and target branches so
+// change detection and base-side rendering both use PR-style diff semantics.
+// Falls back to the base branch tip if the merge base cannot be resolved
+// (e.g., unrelated histories).
+func (a *App) resolveBaseRef() string {
+	mergeBase, err := a.repo.MergeBase(a.cfg.BaseBranch, a.cfg.TargetBranch)
+	if err != nil {
+		a.logger.Warn("Failed to resolve merge base, using base branch tip",
+			"base", a.cfg.BaseBranch,
+			"target", a.cfg.TargetBranch,
+			"error", err)
+		return a.cfg.BaseBranch
+	}
+	return mergeBase
 }
 
 // fetchApplications retrieves ArgoCD applications from the cluster.
@@ -324,12 +345,13 @@ func (a *App) processOneApp(ctx context.Context, queuedApp *diff.QueuedApp) (*ty
 	appNew.Name = queuedApp.Name
 	appNew.Namespace = queuedApp.Namespace
 
-	// Render from base branch using old spec
+	// Render from the base ref (merge base) using old spec, so the base side
+	// matches the merge-base semantics used for change detection
 	var renderedOld []byte
-	err := a.repo.WithBranch(a.cfg.BaseBranch, func() error {
+	err := a.repo.WithBranch(a.baseRef, func() error {
 		if !a.sourcePathsExist(appOld, a.repo.Path()) {
-			a.logger.Debug("Source path does not exist on base branch, treating as new app",
-				"app", queuedApp.Name, "branch", a.cfg.BaseBranch)
+			a.logger.Debug("Source path does not exist on base ref, treating as new app",
+				"app", queuedApp.Name, "ref", a.baseRef)
 			return nil
 		}
 		result, err := a.renderer.RenderApplication(ctx, appOld, a.repo.Path())
