@@ -2,6 +2,7 @@
 package app
 
 import (
+	"os"
 	"testing"
 
 	"github.com/charmbracelet/log"
@@ -166,7 +167,7 @@ func TestFilterAffectedApps(t *testing.T) {
 			if tt.wantNames != nil {
 				gotNames := make([]string, len(got))
 				for i, a := range got {
-					gotNames[i] = a.ObjectMeta.Name
+					gotNames[i] = a.Name
 				}
 				for _, wantName := range tt.wantNames {
 					found := false
@@ -180,6 +181,79 @@ func TestFilterAffectedApps(t *testing.T) {
 						t.Errorf("filterAffectedApps() missing expected app %q, got %v", wantName, gotNames)
 					}
 				}
+			}
+		})
+	}
+}
+
+func TestSourcePathsExist(t *testing.T) {
+	logger := log.New(nil)
+	logger.SetLevel(log.FatalLevel)
+	a := &App{logger: logger}
+
+	// Create a temp directory with a subdirectory to simulate repo structure
+	tmpDir := t.TempDir()
+	existingPath := "charts/my-app"
+	if err := os.MkdirAll(tmpDir+"/"+existingPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name string
+		app  *cluster.Application
+		want bool
+	}{
+		{
+			name: "path exists",
+			app: &cluster.Application{
+				Spec: cluster.ApplicationSpec{
+					Source: &cluster.ApplicationSource{
+						Path: existingPath,
+					},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "path does not exist",
+			app: &cluster.Application{
+				Spec: cluster.ApplicationSpec{
+					Source: &cluster.ApplicationSource{
+						Path: "charts/nonexistent",
+					},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "remote chart source - no local path needed",
+			app: &cluster.Application{
+				Spec: cluster.ApplicationSpec{
+					Source: &cluster.ApplicationSource{
+						Chart:   "nginx",
+						RepoURL: "https://charts.bitnami.com/bitnami",
+					},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "empty path",
+			app: &cluster.Application{
+				Spec: cluster.ApplicationSpec{
+					Source: &cluster.ApplicationSource{
+						Path: "",
+					},
+				},
+			},
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := a.sourcePathsExist(tt.app, tmpDir); got != tt.want {
+				t.Errorf("sourcePathsExist() = %v, want %v", got, tt.want)
 			}
 		})
 	}

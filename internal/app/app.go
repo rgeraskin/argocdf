@@ -4,6 +4,8 @@ package app
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/charmbracelet/log"
 
@@ -161,7 +163,7 @@ func (a *App) filterAffectedApps(apps []cluster.Application, changed *git.Change
 			// Check if this source uses our repo
 			if normalizedSourceURL != repoURL {
 				a.logger.Debug("Skipping app - repo URL mismatch",
-					"app", app.ObjectMeta.Name,
+					"app", app.Name,
 					"appRepoURL", normalizedSourceURL,
 					"localRepoURL", repoURL)
 				continue
@@ -170,13 +172,13 @@ func (a *App) filterAffectedApps(apps []cluster.Application, changed *git.Change
 			// Check if the source path has changes
 			if source.Path != "" && changed.HasChangesInPath(source.Path) {
 				a.logger.Debug("App affected",
-					"app", app.ObjectMeta.Name,
+					"app", app.Name,
 					"path", source.Path)
 				affected = append(affected, app)
 				break
 			} else {
 				a.logger.Debug("Skipping app - no changes in path",
-					"app", app.ObjectMeta.Name,
+					"app", app.Name,
 					"path", source.Path)
 			}
 		}
@@ -193,8 +195,8 @@ func (a *App) processApplications(ctx context.Context, apps []cluster.Applicatio
 	// Add initial apps to queue
 	for _, app := range apps {
 		queue.Add(diff.QueuedApp{
-			Name:      app.ObjectMeta.Name,
-			Namespace: app.ObjectMeta.Namespace,
+			Name:      app.Name,
+			Namespace: app.Namespace,
 			Depth:     0,
 			Spec:      &app.Spec,
 		})
@@ -313,18 +315,23 @@ func (a *App) processOneApp(ctx context.Context, queuedApp *diff.QueuedApp) (*ty
 	appOld := &cluster.Application{
 		Spec: *oldSpec,
 	}
-	appOld.ObjectMeta.Name = queuedApp.Name
-	appOld.ObjectMeta.Namespace = queuedApp.Namespace
+	appOld.Name = queuedApp.Name
+	appOld.Namespace = queuedApp.Namespace
 
 	appNew := &cluster.Application{
 		Spec: *queuedApp.Spec,
 	}
-	appNew.ObjectMeta.Name = queuedApp.Name
-	appNew.ObjectMeta.Namespace = queuedApp.Namespace
+	appNew.Name = queuedApp.Name
+	appNew.Namespace = queuedApp.Namespace
 
 	// Render from base branch using old spec
 	var renderedOld []byte
 	err := a.repo.WithBranch(a.cfg.BaseBranch, func() error {
+		if !a.sourcePathsExist(appOld, a.repo.Path()) {
+			a.logger.Debug("Source path does not exist on base branch, treating as new app",
+				"app", queuedApp.Name, "branch", a.cfg.BaseBranch)
+			return nil
+		}
 		result, err := a.renderer.RenderApplication(ctx, appOld, a.repo.Path())
 		if err != nil {
 			return err
@@ -340,11 +347,19 @@ func (a *App) processOneApp(ctx context.Context, queuedApp *diff.QueuedApp) (*ty
 	// Render from target branch using new spec
 	var renderedNew []byte
 	err = a.repo.WithBranch(a.cfg.TargetBranch, func() error {
+		if !a.sourcePathsExist(appNew, a.repo.Path()) {
+			a.logger.Debug("Source path does not exist on target branch, treating as deleted app",
+				"app", queuedApp.Name, "branch", a.cfg.TargetBranch)
+			return nil
+		}
 		result, err := a.renderer.RenderApplication(ctx, appNew, a.repo.Path())
 		if err != nil {
 			return err
 		}
 		renderedNew = result.Manifests
+		if appDiff.SourceType == "" {
+			appDiff.SourceType = result.SourceType
+		}
 		return nil
 	})
 	if err != nil {
@@ -362,6 +377,25 @@ func (a *App) processOneApp(ctx context.Context, queuedApp *diff.QueuedApp) (*ty
 	appDiff.DiffResult = diffResult
 
 	return appDiff, nil
+}
+
+// sourcePathsExist checks if all local source paths for an application exist on disk.
+// Remote chart sources (with Chart field set) are skipped since they don't need a local path.
+func (a *App) sourcePathsExist(app *cluster.Application, repoPath string) bool {
+	for _, source := range app.Spec.GetSources() {
+		// Remote charts don't need a local path
+		if source.Chart != "" {
+			continue
+		}
+		if source.Path == "" {
+			continue
+		}
+		fullPath := filepath.Join(repoPath, source.Path)
+		if _, err := os.Stat(fullPath); os.IsNotExist(err) {
+			return false
+		}
+	}
+	return true
 }
 
 // writeOutput writes the results to the configured output.
