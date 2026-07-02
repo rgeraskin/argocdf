@@ -36,6 +36,7 @@ var (
 	quiet          bool
 	noRecursive    bool
 	maxDepth       int
+	concurrency    int
 	unifiedContext int
 	exitCode       bool
 	marker         string
@@ -159,6 +160,10 @@ Examples:
 	// Recursion flags
 	rootCmd.Flags().BoolVar(&noRecursive, "no-recursive", false, "Disable apps-of-apps recursion")
 	rootCmd.Flags().IntVar(&maxDepth, "max-depth", config.DefaultMaxDepth, "Maximum recursion depth")
+
+	// Concurrency flag
+	rootCmd.Flags().IntVar(&concurrency, "concurrency", config.DefaultConcurrency(),
+		"Number of applications to render in parallel (1 = sequential)")
 
 	// Version command
 	rootCmd.AddCommand(&cobra.Command{
@@ -301,6 +306,7 @@ func runMain(cmd *cobra.Command, args []string) error {
 		FileOutputs:             parsedFileOutputs,
 		NoRecursive:             noRecursive,
 		MaxDepth:                maxDepth,
+		Concurrency:             concurrency,
 		UnifiedContext:          unifiedContext,
 		KustomizeEnableHelm:     kustomizeEnableHelm,
 		KustomizeBuildOptions:   kustomizeBuildOptions,

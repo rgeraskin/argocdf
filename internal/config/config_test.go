@@ -114,6 +114,7 @@ func TestConfigValidate(t *testing.T) {
 				RepoPath:     tmpDir,
 				StdoutFormat: "fields",
 				MaxDepth:     10,
+				Concurrency:  1,
 			},
 		},
 		{
@@ -122,6 +123,7 @@ func TestConfigValidate(t *testing.T) {
 				RepoPath:     tmpDir,
 				StdoutFormat: "summary",
 				MaxDepth:     10,
+				Concurrency:  1,
 			},
 		},
 		{
@@ -130,6 +132,7 @@ func TestConfigValidate(t *testing.T) {
 				RepoPath:     tmpDir,
 				StdoutFormat: "unified",
 				MaxDepth:     10,
+				Concurrency:  4,
 			},
 		},
 		{
@@ -139,6 +142,7 @@ func TestConfigValidate(t *testing.T) {
 				StdoutFormat: "none",
 				FileOutputs:  []FileOutput{{Format: "md-fields", Path: "output.md"}},
 				MaxDepth:     10,
+				Concurrency:  1,
 			},
 		},
 		{
@@ -215,6 +219,17 @@ func TestConfigValidate(t *testing.T) {
 			},
 			wantErr: true,
 			errMsg:  "max depth must be at least 1",
+		},
+		{
+			name: "concurrency less than 1",
+			config: &Config{
+				RepoPath:     tmpDir,
+				StdoutFormat: "fields",
+				MaxDepth:     10,
+				Concurrency:  0,
+			},
+			wantErr: true,
+			errMsg:  "concurrency must be at least 1",
 		},
 	}
 

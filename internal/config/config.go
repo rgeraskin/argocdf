@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -22,6 +23,19 @@ const (
 	// when the cluster version cannot be detected.
 	DefaultKubeVersionFallback = "1.29.0"
 )
+
+// DefaultConcurrency returns the default number of applications to render in
+// parallel: min(4, runtime.NumCPU()), and never less than 1.
+func DefaultConcurrency() int {
+	n := runtime.NumCPU()
+	if n > 4 {
+		return 4
+	}
+	if n < 1 {
+		return 1
+	}
+	return n
+}
 
 // FileOutput represents a single file output specification.
 type FileOutput struct {
@@ -53,6 +67,10 @@ type Config struct {
 	// Recursion settings
 	NoRecursive bool
 	MaxDepth    int
+
+	// Concurrency is the number of applications rendered in parallel.
+	// 1 means sequential processing.
+	Concurrency int
 
 	// Unified diff settings
 	UnifiedContext int // Number of context lines in unified diff output
@@ -153,6 +171,10 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("max depth must be at least 1")
 	}
 
+	if c.Concurrency < 1 {
+		return fmt.Errorf("concurrency must be at least 1")
+	}
+
 	return nil
 }
 
@@ -168,6 +190,9 @@ func (c *Config) WithDefaults() *Config {
 	}
 	if c.MaxDepth == 0 {
 		c.MaxDepth = DefaultMaxDepth
+	}
+	if c.Concurrency == 0 {
+		c.Concurrency = DefaultConcurrency()
 	}
 	// Note: UnifiedContext is not defaulted here because 0 is a valid value
 	// (meaning no context lines). The default is set by the CLI flag.

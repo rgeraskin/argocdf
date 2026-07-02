@@ -9,11 +9,26 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/rgeraskin/argocdf/internal/cluster"
 	"github.com/rgeraskin/argocdf/internal/types"
 	"sigs.k8s.io/yaml"
 )
+
+// chartDepLocks serializes `helm dependency build` per chart directory. When
+// apps render in parallel from a shared worktree, two apps pointing at the same
+// local chart would otherwise run `helm dependency build` into the same
+// charts/ directory concurrently and race. It maps an absolute chart path to
+// its *sync.Mutex.
+var chartDepLocks sync.Map
+
+// chartDepMutex returns the mutex guarding `helm dependency build` for the
+// given chart path, creating it on first use.
+func chartDepMutex(chartPath string) *sync.Mutex {
+	m, _ := chartDepLocks.LoadOrStore(chartPath, &sync.Mutex{})
+	return m.(*sync.Mutex)
+}
 
 // HelmRenderer renders Helm charts using the helm binary.
 type HelmRenderer struct {
@@ -481,6 +496,14 @@ func ParseKubeVersion(version string) (major, minor string, err error) {
 // It runs `helm dependency build` if Chart.yaml exists with a dependencies section.
 // Helm is smart enough to skip already-fetched dependencies.
 func (r *HelmRenderer) ensureDependencies(ctx context.Context, chartPath string) error {
+	// Serialize per chart directory: parallel renders may share a worktree, and
+	// concurrent `helm dependency build` runs into the same charts/ dir race.
+	// It still mutates the (ephemeral) worktree, which is acceptable since the
+	// worktree is thrown away, but it must not run concurrently for a path.
+	mu := chartDepMutex(chartPath)
+	mu.Lock()
+	defer mu.Unlock()
+
 	// Check if Chart.yaml exists
 	chartYamlPath := filepath.Join(chartPath, "Chart.yaml")
 	if _, err := os.Stat(chartYamlPath); os.IsNotExist(err) {

@@ -162,6 +162,44 @@ func (r *Repository) GetWorktreeForBranch(branchName string) (string, error) {
 	return "", nil
 }
 
+// AddWorktree creates an ephemeral detached-HEAD git worktree checked out at
+// the given ref (branch name or commit hash) under a fresh temp directory.
+// It returns the worktree path and a cleanup function that removes the
+// worktree via `git worktree remove --force`, falling back to os.RemoveAll plus
+// `git worktree prune` if that fails. Callers MUST invoke cleanup to avoid
+// leaking temp directories and dangling worktree registrations.
+//
+// Rendering against a dedicated worktree keeps the user's working tree
+// untouched (no checkout churn, no `helm dependency build` litter) and lets
+// multiple applications render in parallel from a fixed, committed tree.
+func (r *Repository) AddWorktree(ref string) (string, func(), error) {
+	// Create a parent temp dir and use a non-existent subpath for the worktree
+	// itself: `git worktree add` refuses a path that already exists.
+	parent, err := os.MkdirTemp("", "argocdf-worktree-")
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to create temp dir for worktree: %w", err)
+	}
+	worktreePath := filepath.Join(parent, "tree")
+
+	if _, err := r.run("worktree", "add", "--detach", worktreePath, ref); err != nil {
+		_ = os.RemoveAll(parent)
+		return "", nil, fmt.Errorf("failed to add worktree at %q: %w", ref, err)
+	}
+
+	cleanup := func() {
+		if _, err := r.run("worktree", "remove", "--force", worktreePath); err != nil {
+			// Best-effort fallback: drop the files ourselves and let git prune
+			// the now-missing worktree registration.
+			_ = os.RemoveAll(parent)
+			_, _ = r.run("worktree", "prune")
+			return
+		}
+		_ = os.RemoveAll(parent)
+	}
+
+	return worktreePath, cleanup, nil
+}
+
 // WithBranch executes a function while checked out to the specified branch,
 // then restores the original position afterward.
 // If the branch is already checked out in another worktree, it uses that worktree path instead.

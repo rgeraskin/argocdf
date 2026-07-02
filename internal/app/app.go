@@ -9,6 +9,8 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/charmbracelet/log"
 
@@ -60,11 +62,21 @@ type App struct {
 	// of the base and target branches, or the base branch tip as a fallback.
 	baseRef string
 
-	// Render cache (nil when disabled or bypassed for this run)
+	// Ephemeral worktree paths and their resolved commits. All renders run
+	// against these fixed, committed trees instead of checking out branches in
+	// the user's working tree. Populated by setupWorktrees.
+	baseWorktree   string
+	targetWorktree string
+	baseCommit     string
+	targetCommit   string
+
+	// Render cache (nil when disabled for this run)
 	cache       *rendercache.Cache
 	kubeVersion string
-	cacheHits   int
-	cacheMisses int
+	// cacheHits/cacheMisses are incremented from parallel render goroutines and
+	// must be accessed atomically.
+	cacheHits   atomic.Int64
+	cacheMisses atomic.Int64
 }
 
 // New creates a new App with the given configuration.
@@ -101,6 +113,7 @@ func (a *App) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to get changed files: %w", err)
 	}
+
 	a.logger.Info("Changed files", "count", len(changedFiles.AllPaths()))
 
 	// Filter affected applications
@@ -110,6 +123,17 @@ func (a *App) Run(ctx context.Context) error {
 	if len(affectedApps) == 0 {
 		a.logger.Info("No applications affected by changes")
 		return nil
+	}
+
+	// Set up ephemeral worktrees for the base and target trees. All renders run
+	// against these fixed paths, so we never checkout branches in (or otherwise
+	// mutate) the user's working tree, and both sides can render in parallel.
+	// The deferred cleanup removes the worktrees on normal exit and on
+	// signal/context cancellation (which unwinds Run via render errors).
+	cleanupWorktrees, err := a.setupWorktrees()
+	defer cleanupWorktrees()
+	if err != nil {
+		return fmt.Errorf("failed to set up worktrees: %w", err)
 	}
 
 	// Process applications (with recursion for apps-of-apps)
@@ -188,21 +212,12 @@ func (a *App) initialize(ctx context.Context) error {
 		a.logger.Warn("Failed to initialize render cache, continuing without it", "error", err)
 		a.cache = nil
 	}
-	// Bypass the cache entirely when the working tree is dirty: rendering runs
-	// from a working-tree checkout that may include uncommitted changes the git
-	// tree hash does not capture.
+	// Note: the cache no longer needs the dirty-working-tree bypass that used to
+	// live here. Renders now always run from committed ephemeral worktrees (see
+	// setupWorktrees), so the git tree hash always captures the rendered content
+	// and cache entries are always valid.
 	if a.cache != nil {
-		status, serr := git.RunGitCommand(a.cfg.RepoPath, "status", "--porcelain")
-		switch {
-		case serr != nil:
-			a.logger.Debug("Could not determine working tree status; disabling render cache", "error", serr)
-			a.cache = nil
-		case strings.TrimSpace(status) != "":
-			a.logger.Debug("Working tree is dirty; disabling render cache for this run")
-			a.cache = nil
-		default:
-			a.logger.Debug("Render cache enabled", "dir", a.cache.Dir())
-		}
+		a.logger.Debug("Render cache enabled", "dir", a.cache.Dir())
 	}
 
 	// Create renderer
@@ -290,6 +305,72 @@ func (a *App) effectiveBaseBranch() string {
 	a.logger.Debug("local base branch is ahead of or diverged from remote; using local base",
 		"base", base, "remote", remoteRef)
 	return base
+}
+
+// setupWorktrees creates ephemeral detached worktrees for the base ref and the
+// target branch tip and resolves their commit hashes (reused for cache keys).
+// It always returns a non-nil cleanup function so callers can defer it
+// unconditionally, even on error (partial worktrees are cleaned up).
+//
+// Behavior note: the target side renders the COMMITTED target branch tip, not
+// the user's (possibly dirty) working tree. warnIfWorkingTreeDirty surfaces
+// this to the user.
+func (a *App) setupWorktrees() (func(), error) {
+	var cleanups []func()
+	cleanupAll := func() {
+		// Remove in reverse creation order.
+		for i := len(cleanups) - 1; i >= 0; i-- {
+			cleanups[i]()
+		}
+	}
+
+	a.warnIfWorkingTreeDirty()
+
+	basePath, baseCleanup, err := a.repo.AddWorktree(a.baseRef)
+	if err != nil {
+		return cleanupAll, fmt.Errorf("failed to create base worktree at %s: %w", a.baseRef, err)
+	}
+	cleanups = append(cleanups, baseCleanup)
+	a.baseWorktree = basePath
+
+	targetPath, targetCleanup, err := a.repo.AddWorktree(a.cfg.TargetBranch)
+	if err != nil {
+		return cleanupAll, fmt.Errorf("failed to create target worktree at %s: %w", a.cfg.TargetBranch, err)
+	}
+	cleanups = append(cleanups, targetCleanup)
+	a.targetWorktree = targetPath
+
+	// Resolve commits once from the main repo's object database (no checkout);
+	// renderCacheKey reuses these for every app.
+	a.baseCommit, err = a.repo.CommitHash(a.baseRef)
+	if err != nil {
+		return cleanupAll, fmt.Errorf("failed to resolve base commit: %w", err)
+	}
+	a.targetCommit, err = a.repo.CommitHash(a.cfg.TargetBranch)
+	if err != nil {
+		return cleanupAll, fmt.Errorf("failed to resolve target commit: %w", err)
+	}
+
+	a.logger.Debug("Created ephemeral worktrees",
+		"base", a.baseWorktree, "baseCommit", a.baseCommit,
+		"target", a.targetWorktree, "targetCommit", a.targetCommit)
+
+	return cleanupAll, nil
+}
+
+// warnIfWorkingTreeDirty logs a one-time warning when the user's working tree
+// has uncommitted changes. Since rendering now runs from the committed target
+// tip, those changes are not reflected in the diff.
+func (a *App) warnIfWorkingTreeDirty() {
+	status, err := git.RunGitCommand(a.cfg.RepoPath, "status", "--porcelain")
+	if err != nil {
+		a.logger.Debug("Could not determine working tree status", "error", err)
+		return
+	}
+	if strings.TrimSpace(status) != "" {
+		a.logger.Warn("Uncommitted changes are not included in the diff; the target side renders the committed tip",
+			"target", a.cfg.TargetBranch)
+	}
 }
 
 // fetchApplications retrieves ArgoCD applications from the cluster.
@@ -422,32 +503,39 @@ func (a *App) processApplications(ctx context.Context, apps []cluster.Applicatio
 		})
 	}
 
-	// Process queue
+	// Process the queue in waves. Each wave drains the current pending batch and
+	// renders those apps concurrently with a bounded worker pool. The queue
+	// itself stays single-threaded: after a wave completes we run the
+	// (sequential) child-discovery logic per app, which may enqueue the next
+	// wave. This preserves all existing requeue/dedup semantics without locking
+	// the queue.
 	for !queue.IsEmpty() {
-		queuedApp := queue.Next()
-		if queuedApp == nil {
-			break
-		}
-
-		a.logger.Info("Processing application", "name", queuedApp.Name, "depth", queuedApp.Depth)
-
-		appDiff, err := a.processOneApp(ctx, queuedApp)
-		if err != nil {
-			a.logger.Warn("Error processing application", "name", queuedApp.Name, "error", err)
-			appDiff = &types.AppDiff{
-				Name:               queuedApp.Name,
-				Namespace:          queuedApp.Namespace,
-				ParentAppName:      queuedApp.ParentApp,
-				ParentAppNamespace: queuedApp.ParentNamespace,
-				Error:              err,
+		// Drain the current pending batch into a wave.
+		var wave []*diff.QueuedApp
+		for {
+			qa := queue.Next()
+			if qa == nil {
+				break
 			}
+			wave = append(wave, qa)
 		}
-		key := fmt.Sprintf("%s/%s", appDiff.Namespace, appDiff.Name)
-		results[key] = appDiff
 
-		// Look for new and modified Application CRDs in the diff (apps-of-apps pattern)
-		diffResult, _ := appDiff.DiffResult.(*diff.ManifestSetDiff)
-		if !a.cfg.NoRecursive && appDiff.Error == nil && diffResult != nil && diffResult.HasChanges {
+		// Render the wave concurrently; results are index-aligned with wave.
+		waveDiffs := a.processWave(ctx, wave)
+
+		// Sequentially collect results and run child discovery, which may
+		// enqueue the next wave.
+		for i, queuedApp := range wave {
+			appDiff := waveDiffs[i]
+			key := fmt.Sprintf("%s/%s", appDiff.Namespace, appDiff.Name)
+			results[key] = appDiff
+
+			// Look for new and modified Application CRDs in the diff (apps-of-apps pattern)
+			diffResult, _ := appDiff.DiffResult.(*diff.ManifestSetDiff)
+			if a.cfg.NoRecursive || appDiff.Error != nil || diffResult == nil || !diffResult.HasChanges {
+				continue
+			}
+
 			// Find newly added child applications
 			newApps, err := a.discoverer.FindNewApplications(appDiff.RenderedOld, appDiff.RenderedNew)
 			if err != nil {
@@ -519,10 +607,57 @@ func (a *App) processApplications(ctx context.Context, apps []cluster.Applicatio
 	}
 
 	if a.cache != nil {
-		a.logger.Info("Render cache", "hits", a.cacheHits, "misses", a.cacheMisses)
+		a.logger.Info("Render cache", "hits", a.cacheHits.Load(), "misses", a.cacheMisses.Load())
 	}
 
 	return resultSlice, nil
+}
+
+// processWave renders a batch of queued apps concurrently using a bounded
+// worker pool (a.cfg.Concurrency). It returns a slice of AppDiffs index-aligned
+// with wave; render errors are captured as AppDiff.Error rather than aborting
+// the wave. Each goroutine writes to a distinct output index, and the shared
+// cache counters are atomic, so no additional locking is required.
+func (a *App) processWave(ctx context.Context, wave []*diff.QueuedApp) []*types.AppDiff {
+	out := make([]*types.AppDiff, len(wave))
+
+	concurrency := a.cfg.Concurrency
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	if concurrency > len(wave) {
+		concurrency = len(wave)
+	}
+
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, concurrency)
+	for i := range wave {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			queuedApp := wave[i]
+			a.logger.Info("Processing application", "name", queuedApp.Name, "depth", queuedApp.Depth)
+
+			appDiff, err := a.processOneApp(ctx, queuedApp)
+			if err != nil {
+				a.logger.Warn("Error processing application", "name", queuedApp.Name, "error", err)
+				appDiff = &types.AppDiff{
+					Name:               queuedApp.Name,
+					Namespace:          queuedApp.Namespace,
+					ParentAppName:      queuedApp.ParentApp,
+					ParentAppNamespace: queuedApp.ParentNamespace,
+					Error:              err,
+				}
+			}
+			out[i] = appDiff
+		}(i)
+	}
+	wg.Wait()
+
+	return out
 }
 
 // processOneApp processes a single application and returns its diff.
@@ -553,16 +688,16 @@ func (a *App) processOneApp(ctx context.Context, queuedApp *diff.QueuedApp) (*ty
 	appNew.Name = queuedApp.Name
 	appNew.Namespace = queuedApp.Namespace
 
-	// Render from the base ref (merge base) using old spec, so the base side
-	// matches the merge-base semantics used for change detection
-	renderedOld, sourceTypeOld, err := a.renderBranch(ctx, appOld, a.baseRef, "new app")
+	// Render from the base worktree (merge base) using old spec, so the base
+	// side matches the merge-base semantics used for change detection.
+	renderedOld, sourceTypeOld, err := a.renderBranch(ctx, appOld, a.baseWorktree, a.baseCommit, a.baseRef, "new app")
 	if err != nil {
 		return nil, fmt.Errorf("failed to render base branch: %w", err)
 	}
 	appDiff.SourceType = sourceTypeOld
 
-	// Render from target branch using new spec
-	renderedNew, sourceTypeNew, err := a.renderBranch(ctx, appNew, a.cfg.TargetBranch, "deleted app")
+	// Render from the target worktree (committed target tip) using new spec.
+	renderedNew, sourceTypeNew, err := a.renderBranch(ctx, appNew, a.targetWorktree, a.targetCommit, a.cfg.TargetBranch, "deleted app")
 	if err != nil {
 		return nil, fmt.Errorf("failed to render target branch: %w", err)
 	}
@@ -583,52 +718,48 @@ func (a *App) processOneApp(ctx context.Context, queuedApp *diff.QueuedApp) (*ty
 	return appDiff, nil
 }
 
-// renderBranch renders an application from the given branch, consulting the
-// persistent render cache first. On a cache hit it returns the cached manifests
-// and SKIPS the branch checkout entirely (the main speedup). On a miss it
-// checks out the branch, renders, and stores the result.
+// renderBranch renders an application from the given ephemeral worktree,
+// consulting the persistent render cache first. On a cache hit it returns the
+// cached manifests and SKIPS rendering entirely (the main speedup). On a miss
+// it renders from the worktree path and stores the result.
 //
-// missingKind describes how a missing source path is interpreted for logging
-// (e.g. "new app" on the base branch, "deleted app" on the target branch).
+// worktreePath is the fixed checkout to render from; commit is its resolved
+// hash (used for the cache key). label is a human-readable branch/ref name for
+// logging. missingKind describes how a missing source path is interpreted
+// (e.g. "new app" on the base side, "deleted app" on the target side).
 func (a *App) renderBranch(
 	ctx context.Context,
 	app *cluster.Application,
-	branch, missingKind string,
+	worktreePath, commit, label, missingKind string,
 ) ([]byte, types.SourceType, error) {
-	// Compute the cache key without checking out (git rev-parse reads the object
-	// database directly). An empty key means "bypass the cache for this render".
-	key, haveKey := a.renderCacheKey(app, branch)
+	// Compute the cache key from the precomputed commit (git rev-parse reads the
+	// object database directly). An empty key means "bypass the cache".
+	key, haveKey := a.renderCacheKey(app, commit)
 
 	if a.cache != nil && haveKey {
 		if entry, ok := a.cache.Get(key); ok {
-			a.cacheHits++
-			a.logger.Debug("Render cache hit", "app", app.Name, "branch", branch)
+			a.cacheHits.Add(1)
+			a.logger.Debug("Render cache hit", "app", app.Name, "branch", label)
 			return entry.Manifests, types.SourceType(entry.SourceType), nil
 		}
-		a.cacheMisses++
-		a.logger.Debug("Render cache miss", "app", app.Name, "branch", branch)
+		a.cacheMisses.Add(1)
+		a.logger.Debug("Render cache miss", "app", app.Name, "branch", label)
 	}
 
 	var (
 		manifests  []byte
 		sourceType types.SourceType
 	)
-	err := a.repo.WithBranch(branch, func() error {
-		if !a.sourcePathsExist(app, a.repo.Path()) {
-			a.logger.Debug("Source path does not exist, treating as "+missingKind,
-				"app", app.Name, "branch", branch)
-			return nil
-		}
-		result, rerr := a.renderer.RenderApplication(ctx, app, a.repo.Path())
+	if !a.sourcePathsExist(app, worktreePath) {
+		a.logger.Debug("Source path does not exist, treating as "+missingKind,
+			"app", app.Name, "branch", label)
+	} else {
+		result, rerr := a.renderer.RenderApplication(ctx, app, worktreePath)
 		if rerr != nil {
-			return rerr
+			return nil, "", rerr
 		}
 		manifests = result.Manifests
 		sourceType = result.SourceType
-		return nil
-	})
-	if err != nil {
-		return nil, "", err
 	}
 
 	// Store on a real render only. When haveKey is false the source path was
@@ -640,24 +771,18 @@ func (a *App) renderBranch(
 			SourceType: string(sourceType),
 		}); perr != nil {
 			a.logger.Warn("Failed to write render cache entry",
-				"app", app.Name, "branch", branch, "error", perr)
+				"app", app.Name, "branch", label, "error", perr)
 		}
 	}
 
 	return manifests, sourceType, nil
 }
 
-// renderCacheKey computes the cache key for rendering app at branch. It returns
-// ok=false whenever caching should be bypassed for this render (cache disabled,
-// commit unresolvable, or a local source tree hash unavailable).
-func (a *App) renderCacheKey(app *cluster.Application, branch string) (string, bool) {
+// renderCacheKey computes the cache key for rendering app at the given commit.
+// It returns ok=false whenever caching should be bypassed for this render
+// (cache disabled or a local source tree hash unavailable).
+func (a *App) renderCacheKey(app *cluster.Application, commit string) (string, bool) {
 	if a.cache == nil {
-		return "", false
-	}
-
-	commit, err := a.repo.CommitHash(branch)
-	if err != nil {
-		a.logger.Debug("Cannot resolve commit for cache key", "branch", branch, "error", err)
 		return "", false
 	}
 
