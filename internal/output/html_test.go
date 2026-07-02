@@ -16,8 +16,10 @@ func TestNewHTMLWriter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp file: %v", err)
 	}
-	tmpFile.Close()
-	defer os.Remove(tmpFile.Name())
+	_ = tmpFile.Close()
+	defer func() {
+		_ = os.Remove(tmpFile.Name())
+	}()
 
 	tests := []struct {
 		name        string
@@ -47,7 +49,9 @@ func TestNewHTMLWriter(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewHTMLWriter() error = %v", err)
 			}
-			defer w.Flush()
+			defer func() {
+				_ = w.Flush()
+			}()
 
 			if w.sideBySide != tt.sideBySide {
 				t.Errorf("sideBySide = %v, want %v", w.sideBySide, tt.sideBySide)
@@ -64,8 +68,10 @@ func TestHTMLWriterWriteHeader(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp file: %v", err)
 	}
-	tmpFile.Close()
-	defer os.Remove(tmpFile.Name())
+	_ = tmpFile.Close()
+	defer func() {
+		_ = os.Remove(tmpFile.Name())
+	}()
 
 	w, err := NewHTMLWriter(tmpFile.Name(), false, false, false)
 	if err != nil {
@@ -76,7 +82,7 @@ func TestHTMLWriterWriteHeader(t *testing.T) {
 	if err := w.WriteHeader(title); err != nil {
 		t.Fatalf("WriteHeader() error = %v", err)
 	}
-	w.Flush()
+	_ = w.Flush()
 
 	// Read and verify content
 	content, err := os.ReadFile(tmpFile.Name())
@@ -101,8 +107,10 @@ func TestHTMLWriterWriteAppDiff(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp file: %v", err)
 	}
-	tmpFile.Close()
-	defer os.Remove(tmpFile.Name())
+	_ = tmpFile.Close()
+	defer func() {
+		_ = os.Remove(tmpFile.Name())
+	}()
 
 	w, err := NewHTMLWriter(tmpFile.Name(), false, false, false)
 	if err != nil {
@@ -110,7 +118,7 @@ func TestHTMLWriterWriteAppDiff(t *testing.T) {
 	}
 
 	// Write header first
-	w.WriteHeader("Test")
+	_ = w.WriteHeader("Test")
 
 	// Test app with changes
 	appDiff := &types.AppDiff{
@@ -133,7 +141,7 @@ func TestHTMLWriterWriteAppDiff(t *testing.T) {
 	if err := w.WriteAppDiff(appDiff, 0); err != nil {
 		t.Fatalf("WriteAppDiff() error = %v", err)
 	}
-	w.Flush()
+	_ = w.Flush()
 
 	// Read and verify content
 	content, err := os.ReadFile(tmpFile.Name())
@@ -164,15 +172,17 @@ func TestHTMLWriterWriteAppDiffWithError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp file: %v", err)
 	}
-	tmpFile.Close()
-	defer os.Remove(tmpFile.Name())
+	_ = tmpFile.Close()
+	defer func() {
+		_ = os.Remove(tmpFile.Name())
+	}()
 
 	w, err := NewHTMLWriter(tmpFile.Name(), false, false, false)
 	if err != nil {
 		t.Fatalf("NewHTMLWriter() error = %v", err)
 	}
 
-	w.WriteHeader("Test")
+	_ = w.WriteHeader("Test")
 
 	// Test app with error
 	appDiff := &types.AppDiff{
@@ -184,7 +194,7 @@ func TestHTMLWriterWriteAppDiffWithError(t *testing.T) {
 	if err := w.WriteAppDiff(appDiff, 0); err != nil {
 		t.Fatalf("WriteAppDiff() error = %v", err)
 	}
-	w.Flush()
+	_ = w.Flush()
 
 	content, err := os.ReadFile(tmpFile.Name())
 	if err != nil {
@@ -205,15 +215,17 @@ func TestHTMLWriterWriteSummary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp file: %v", err)
 	}
-	tmpFile.Close()
-	defer os.Remove(tmpFile.Name())
+	_ = tmpFile.Close()
+	defer func() {
+		_ = os.Remove(tmpFile.Name())
+	}()
 
 	w, err := NewHTMLWriter(tmpFile.Name(), false, false, false)
 	if err != nil {
 		t.Fatalf("NewHTMLWriter() error = %v", err)
 	}
 
-	w.WriteHeader("Test")
+	_ = w.WriteHeader("Test")
 
 	summary := Summary{
 		TotalApps:       5,
@@ -227,7 +239,7 @@ func TestHTMLWriterWriteSummary(t *testing.T) {
 	if err := w.WriteSummary(summary); err != nil {
 		t.Fatalf("WriteSummary() error = %v", err)
 	}
-	w.Flush()
+	_ = w.Flush()
 
 	content, err := os.ReadFile(tmpFile.Name())
 	if err != nil {
@@ -248,19 +260,21 @@ func TestHTMLWriterWriteFooter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp file: %v", err)
 	}
-	tmpFile.Close()
-	defer os.Remove(tmpFile.Name())
+	_ = tmpFile.Close()
+	defer func() {
+		_ = os.Remove(tmpFile.Name())
+	}()
 
 	w, err := NewHTMLWriter(tmpFile.Name(), false, false, false)
 	if err != nil {
 		t.Fatalf("NewHTMLWriter() error = %v", err)
 	}
 
-	w.WriteHeader("Test")
+	_ = w.WriteHeader("Test")
 	if err := w.WriteFooter(); err != nil {
 		t.Fatalf("WriteFooter() error = %v", err)
 	}
-	w.Flush()
+	_ = w.Flush()
 
 	content, err := os.ReadFile(tmpFile.Name())
 	if err != nil {

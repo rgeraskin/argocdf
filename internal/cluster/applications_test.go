@@ -239,7 +239,7 @@ func TestConvertOne(t *testing.T) {
 				return
 			}
 			if tt.check != nil {
-				tt.check(app)
+				_ = tt.check(app)
 			}
 		})
 	}

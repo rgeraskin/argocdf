@@ -165,7 +165,7 @@ func TestConfigValidate(t *testing.T) {
 			name: "repo path is file not directory",
 			config: func() *Config {
 				f, _ := os.CreateTemp(t.TempDir(), "file")
-				f.Close()
+				_ = f.Close()
 				return &Config{
 					RepoPath:     f.Name(),
 					StdoutFormat: "fields",

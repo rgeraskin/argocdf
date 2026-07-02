@@ -48,10 +48,14 @@ func (r *HelmRenderer) Render(ctx context.Context, app *cluster.Application, sou
 
 	// Cleanup temp resources after helm command completes
 	if tempDir != "" {
-		defer SafeRemoveAll(tempDir)
+		defer func() {
+			_ = SafeRemoveAll(tempDir)
+		}()
 	}
 	for _, f := range tempFiles {
-		defer os.Remove(f)
+		defer func(path string) {
+			_ = os.Remove(path)
+		}(f)
 	}
 
 	// For local charts, ensure dependencies are built
@@ -85,7 +89,7 @@ func (r *HelmRenderer) buildArgs(ctx context.Context, app *cluster.Application, 
 	var tempFiles []string
 
 	// Determine release name
-	releaseName := app.ObjectMeta.Name
+	releaseName := app.Name
 	if source.Helm != nil && source.Helm.ReleaseName != "" {
 		releaseName = source.Helm.ReleaseName
 	}
@@ -131,10 +135,10 @@ func (r *HelmRenderer) buildArgs(ctx context.Context, app *cluster.Application, 
 		if err != nil {
 			// Cleanup any temp files created before the error
 			for _, f := range tempFiles {
-				os.Remove(f)
+				_ = os.Remove(f)
 			}
 			if tempDir != "" {
-				SafeRemoveAll(tempDir)
+				_ = SafeRemoveAll(tempDir)
 			}
 			return nil, "", nil, err
 		}
@@ -175,7 +179,7 @@ func (r *HelmRenderer) handleRemoteChart(ctx context.Context, source *cluster.Ap
 		"HELM_DATA_HOME="+filepath.Join(tempDir, "data"),
 	)
 	if output, err := addCmd.CombinedOutput(); err != nil {
-		SafeRemoveAll(tempDir)
+		_ = SafeRemoveAll(tempDir)
 		if ctx.Err() != nil {
 			return "", "", ctx.Err()
 		}
@@ -187,7 +191,7 @@ func (r *HelmRenderer) handleRemoteChart(ctx context.Context, source *cluster.Ap
 	updateCmd := exec.CommandContext(ctx, "helm", updateArgs...)
 	updateCmd.Env = addCmd.Env
 	if output, err := updateCmd.CombinedOutput(); err != nil {
-		SafeRemoveAll(tempDir)
+		_ = SafeRemoveAll(tempDir)
 		if ctx.Err() != nil {
 			return "", "", ctx.Err()
 		}
@@ -222,11 +226,11 @@ func (r *HelmRenderer) addHelmOptions(args []string, helm *cluster.ApplicationSo
 			return nil, tempFiles, fmt.Errorf("failed to create temp file for inline values: %w", err)
 		}
 		if _, err := tmpFile.WriteString(helm.Values); err != nil {
-			tmpFile.Close()
-			os.Remove(tmpFile.Name())
+			_ = tmpFile.Close()
+			_ = os.Remove(tmpFile.Name())
 			return nil, tempFiles, fmt.Errorf("failed to write inline values: %w", err)
 		}
-		tmpFile.Close()
+		_ = tmpFile.Close()
 		tempFiles = append(tempFiles, tmpFile.Name())
 		args = append(args, "--values", tmpFile.Name())
 	}
@@ -244,11 +248,11 @@ func (r *HelmRenderer) addHelmOptions(args []string, helm *cluster.ApplicationSo
 			return nil, tempFiles, fmt.Errorf("failed to create temp file for values object: %w", err)
 		}
 		if _, err := tmpFile.Write(valuesYAML); err != nil {
-			tmpFile.Close()
-			os.Remove(tmpFile.Name())
+			_ = tmpFile.Close()
+			_ = os.Remove(tmpFile.Name())
 			return nil, tempFiles, fmt.Errorf("failed to write values object: %w", err)
 		}
-		tmpFile.Close()
+		_ = tmpFile.Close()
 		tempFiles = append(tempFiles, tmpFile.Name())
 		args = append(args, "--values", tmpFile.Name())
 	}

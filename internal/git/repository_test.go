@@ -110,7 +110,9 @@ func TestGetWorktreeForBranch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() {
+		_ = os.RemoveAll(tmpDir)
+	}()
 
 	// Initialize a git repo
 	mainRepo := filepath.Join(tmpDir, "main-repo")

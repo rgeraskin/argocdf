@@ -66,7 +66,9 @@ func (r *KustomizeRenderer) Render(ctx context.Context, app *cluster.Application
 		if err != nil {
 			return nil, fmt.Errorf("failed to copy kustomize directory: %w", err)
 		}
-		defer SafeRemoveAll(tempDir)
+		defer func() {
+			_ = SafeRemoveAll(tempDir)
+		}()
 		workDir = tempDir
 
 		// Apply kustomize-specific options using edit commands
@@ -392,7 +394,7 @@ func (r *KustomizeRenderer) copyToTemp(srcDir string) (string, error) {
 	}
 
 	if err := copyDir(srcDir, tempDir); err != nil {
-		SafeRemoveAll(tempDir)
+		_ = SafeRemoveAll(tempDir)
 		return "", err
 	}
 
@@ -440,7 +442,9 @@ func copyFile(src, dst string) error {
 	if err != nil {
 		return fmt.Errorf("failed to open source file %s: %w", src, err)
 	}
-	defer srcFile.Close()
+	defer func() {
+		_ = srcFile.Close()
+	}()
 
 	srcInfo, err := srcFile.Stat()
 	if err != nil {
@@ -451,7 +455,9 @@ func copyFile(src, dst string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create destination file %s: %w", dst, err)
 	}
-	defer dstFile.Close()
+	defer func() {
+		_ = dstFile.Close()
+	}()
 
 	if _, err := io.Copy(dstFile, srcFile); err != nil {
 		return fmt.Errorf("failed to copy file content: %w", err)

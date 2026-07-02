@@ -421,7 +421,7 @@ func (h *HTMLWriter) writeFieldChangesHTML(result *diff.DiffResult) {
 func (h *HTMLWriter) WriteTree(tree *diff.AppTree) error {
 	tree.Walk(func(node *diff.AppTreeNode, depth int) {
 		if appDiff, ok := node.AppDiff.(*types.AppDiff); ok {
-			h.WriteAppDiff(appDiff, depth)
+			_ = h.WriteAppDiff(appDiff, depth)
 		}
 	})
 	return nil

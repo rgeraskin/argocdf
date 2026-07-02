@@ -28,8 +28,6 @@ type MarkdownWriter struct {
 	format       MarkdownFormat
 	summaryOnly  bool
 	contextLines int // for unified diff context in md-unified format
-	// Pre-computed summary for Atlantis format (needs to be written at header)
-	pendingSummary *Summary
 }
 
 // NewMarkdownWriter creates a new MarkdownWriter.
@@ -309,7 +307,7 @@ func (m *MarkdownWriter) writeDetailedDiffAtlantis(result *diff.ManifestSetDiff)
 func (m *MarkdownWriter) WriteTree(tree *diff.AppTree) error {
 	tree.Walk(func(node *diff.AppTreeNode, depth int) {
 		if appDiff, ok := node.AppDiff.(*types.AppDiff); ok {
-			m.WriteAppDiff(appDiff, depth)
+			_ = m.WriteAppDiff(appDiff, depth)
 		}
 	})
 	return nil

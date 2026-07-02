@@ -17,7 +17,9 @@ func TestNewMarkdownWriter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() {
+		_ = os.RemoveAll(tempDir)
+	}()
 
 	t.Run("creates file successfully", func(t *testing.T) {
 		filePath := filepath.Join(tempDir, "test.md")
@@ -25,7 +27,9 @@ func TestNewMarkdownWriter(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewMarkdownWriter() error = %v", err)
 		}
-		defer w.Flush()
+		defer func() {
+			_ = w.Flush()
+		}()
 
 		// File should exist
 		if _, err := os.Stat(filePath); os.IsNotExist(err) {
@@ -71,7 +75,9 @@ func TestMarkdownWriter_WriteHeader(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tempDir, _ := os.MkdirTemp("", "markdown-test-")
-			defer os.RemoveAll(tempDir)
+			defer func() {
+		_ = os.RemoveAll(tempDir)
+	}()
 
 			filePath := filepath.Join(tempDir, "test.md")
 			w, _ := NewMarkdownWriter(filePath, tt.format, 3)
@@ -166,7 +172,9 @@ func TestMarkdownWriter_WriteAppDiff_GitHub(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tempDir, _ := os.MkdirTemp("", "markdown-test-")
-			defer os.RemoveAll(tempDir)
+			defer func() {
+		_ = os.RemoveAll(tempDir)
+	}()
 
 			filePath := filepath.Join(tempDir, "test.md")
 			w, _ := NewMarkdownWriter(filePath, MarkdownFormatGitHub, 3)
@@ -174,7 +182,7 @@ func TestMarkdownWriter_WriteAppDiff_GitHub(t *testing.T) {
 			if err := w.WriteAppDiff(tt.appDiff, 0); err != nil {
 				t.Errorf("WriteAppDiff() error = %v", err)
 			}
-			w.Flush()
+			_ = w.Flush()
 
 			content, _ := os.ReadFile(filePath)
 			for _, expected := range tt.contains {
@@ -188,7 +196,9 @@ func TestMarkdownWriter_WriteAppDiff_GitHub(t *testing.T) {
 
 func TestMarkdownWriter_WriteAppDiff_Atlantis(t *testing.T) {
 	tempDir, _ := os.MkdirTemp("", "markdown-test-")
-	defer os.RemoveAll(tempDir)
+	defer func() {
+		_ = os.RemoveAll(tempDir)
+	}()
 
 	filePath := filepath.Join(tempDir, "test.md")
 	w, _ := NewMarkdownWriter(filePath, MarkdownFormatAtlantis, 3)
@@ -207,7 +217,7 @@ func TestMarkdownWriter_WriteAppDiff_Atlantis(t *testing.T) {
 	if err := w.WriteAppDiff(appDiff, 0); err != nil {
 		t.Errorf("WriteAppDiff() error = %v", err)
 	}
-	w.Flush()
+	_ = w.Flush()
 
 	content, _ := os.ReadFile(filePath)
 
@@ -269,7 +279,9 @@ func TestMarkdownWriter_WriteSummary(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tempDir, _ := os.MkdirTemp("", "markdown-test-")
-			defer os.RemoveAll(tempDir)
+			defer func() {
+		_ = os.RemoveAll(tempDir)
+	}()
 
 			filePath := filepath.Join(tempDir, "test.md")
 			w, _ := NewMarkdownWriter(filePath, tt.format, 3)
@@ -277,7 +289,7 @@ func TestMarkdownWriter_WriteSummary(t *testing.T) {
 			if err := w.WriteSummary(tt.summary); err != nil {
 				t.Errorf("WriteSummary() error = %v", err)
 			}
-			w.Flush()
+			_ = w.Flush()
 
 			content, _ := os.ReadFile(filePath)
 			for _, expected := range tt.contains {
@@ -291,7 +303,9 @@ func TestMarkdownWriter_WriteSummary(t *testing.T) {
 
 func TestMarkdownWriter_WriteFooter(t *testing.T) {
 	tempDir, _ := os.MkdirTemp("", "markdown-test-")
-	defer os.RemoveAll(tempDir)
+	defer func() {
+		_ = os.RemoveAll(tempDir)
+	}()
 
 	filePath := filepath.Join(tempDir, "test.md")
 	w, _ := NewMarkdownWriter(filePath, MarkdownFormatGitHub, 3)
@@ -299,7 +313,7 @@ func TestMarkdownWriter_WriteFooter(t *testing.T) {
 	if err := w.WriteFooter(); err != nil {
 		t.Errorf("WriteFooter() error = %v", err)
 	}
-	w.Flush()
+	_ = w.Flush()
 
 	content, _ := os.ReadFile(filePath)
 	if !strings.Contains(string(content), "Generated at") {
@@ -312,7 +326,9 @@ func TestMarkdownWriter_WriteFooter(t *testing.T) {
 
 func TestMarkdownWriter_WriteTree(t *testing.T) {
 	tempDir, _ := os.MkdirTemp("", "markdown-test-")
-	defer os.RemoveAll(tempDir)
+	defer func() {
+		_ = os.RemoveAll(tempDir)
+	}()
 
 	filePath := filepath.Join(tempDir, "test.md")
 	w, _ := NewMarkdownWriter(filePath, MarkdownFormatGitHub, 3)
@@ -336,7 +352,7 @@ func TestMarkdownWriter_WriteTree(t *testing.T) {
 	if err := w.WriteTree(tree); err != nil {
 		t.Errorf("WriteTree() error = %v", err)
 	}
-	w.Flush()
+	_ = w.Flush()
 
 	content, _ := os.ReadFile(filePath)
 	if !strings.Contains(string(content), "parent-app") {
@@ -349,7 +365,9 @@ func TestMarkdownWriter_WriteTree(t *testing.T) {
 
 func TestMarkdownWriter_HTMLEscaping(t *testing.T) {
 	tempDir, _ := os.MkdirTemp("", "markdown-test-")
-	defer os.RemoveAll(tempDir)
+	defer func() {
+		_ = os.RemoveAll(tempDir)
+	}()
 
 	filePath := filepath.Join(tempDir, "test.md")
 	w, _ := NewMarkdownWriter(filePath, MarkdownFormatGitHub, 3)
@@ -360,8 +378,8 @@ func TestMarkdownWriter_HTMLEscaping(t *testing.T) {
 		Error: errors.New("<malicious> error & message"),
 	}
 
-	w.WriteAppDiff(appDiff, 0)
-	w.Flush()
+	_ = w.WriteAppDiff(appDiff, 0)
+	_ = w.Flush()
 
 	content, _ := os.ReadFile(filePath)
 	contentStr := string(content)

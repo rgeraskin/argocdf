@@ -80,12 +80,12 @@ func NewTerminalWriter(format string, contextLines int) *TerminalWriter {
 func (t *TerminalWriter) WriteHeader(title string) error {
 	if t.unifiedDiff {
 		// Output as comments for valid unified diff format (use titleStyle without margins)
-		fmt.Fprintf(t.out, "# %s\n", titleStyle.Render(title))
-		fmt.Fprintf(t.out, "# %s\n", strings.Repeat("=", len(title)))
+		_, _ = fmt.Fprintf(t.out, "# %s\n", titleStyle.Render(title))
+		_, _ = fmt.Fprintf(t.out, "# %s\n", strings.Repeat("=", len(title)))
 		return nil
 	}
-	fmt.Fprintln(t.out, headerStyle.Render(title))
-	fmt.Fprintln(t.out, strings.Repeat("=", len(title)))
+	_, _ = fmt.Fprintln(t.out, headerStyle.Render(title))
+	_, _ = fmt.Fprintln(t.out, strings.Repeat("=", len(title)))
 	return nil
 }
 
@@ -99,7 +99,7 @@ func (t *TerminalWriter) WriteAppDiff(appDiff *types.AppDiff, depth int) error {
 	indent := strings.Repeat("  ", depth)
 
 	// Add blank line before app (provides spacing between apps)
-	fmt.Fprintln(t.out)
+	_, _ = fmt.Fprintln(t.out)
 
 	// Write app name with tree indicator
 	prefix := "├─"
@@ -111,27 +111,27 @@ func (t *TerminalWriter) WriteAppDiff(appDiff *types.AppDiff, depth int) error {
 	if appDiff.Namespace != "" {
 		appLine += dimStyle.Render(fmt.Sprintf(" (%s)", appDiff.Namespace))
 	}
-	fmt.Fprintln(t.out, appLine)
+	_, _ = fmt.Fprintln(t.out, appLine)
 
 	// Handle error
 	if appDiff.Error != nil {
-		fmt.Fprintf(t.out, "%s  %s\n", indent, errorStyle.Render("Error: "+appDiff.Error.Error()))
+		_, _ = fmt.Fprintf(t.out, "%s  %s\n", indent, errorStyle.Render("Error: "+appDiff.Error.Error()))
 		return nil
 	}
 
 	// Type assert DiffResult
 	result, ok := appDiff.DiffResult.(*diff.ManifestSetDiff)
 	if !ok || result == nil {
-		fmt.Fprintf(t.out, "%s  %s\n", indent, dimStyle.Render("No diff available"))
+		_, _ = fmt.Fprintf(t.out, "%s  %s\n", indent, dimStyle.Render("No diff available"))
 		return nil
 	}
 
 	// Show parse errors if present
 	if len(result.ParseErrors) > 0 {
-		fmt.Fprintf(t.out, "%s  %s\n", indent, errorStyle.Render(fmt.Sprintf("⚠ %d YAML parse error(s)", len(result.ParseErrors))))
+		_, _ = fmt.Fprintf(t.out, "%s  %s\n", indent, errorStyle.Render(fmt.Sprintf("⚠ %d YAML parse error(s)", len(result.ParseErrors))))
 		if !t.summaryOnly {
 			for _, err := range result.ParseErrors {
-				fmt.Fprintf(t.out, "%s    %s\n", indent, dimStyle.Render("• "+err))
+				_, _ = fmt.Fprintf(t.out, "%s    %s\n", indent, dimStyle.Render("• "+err))
 			}
 		}
 	}
@@ -140,20 +140,20 @@ func (t *TerminalWriter) WriteAppDiff(appDiff *types.AppDiff, depth int) error {
 	if !result.HasChanges {
 		// Don't show "No changes" if there were parse errors
 		if len(result.ParseErrors) == 0 {
-			fmt.Fprintf(t.out, "%s  %s\n", indent, dimStyle.Render("No changes"))
+			_, _ = fmt.Fprintf(t.out, "%s  %s\n", indent, dimStyle.Render("No changes"))
 		}
 		return nil
 	}
 
 	// Write summary counts
 	if len(result.Added) > 0 {
-		fmt.Fprintf(t.out, "%s  %s\n", indent, addedStyle.Render(fmt.Sprintf("+ %d added", len(result.Added))))
+		_, _ = fmt.Fprintf(t.out, "%s  %s\n", indent, addedStyle.Render(fmt.Sprintf("+ %d added", len(result.Added))))
 	}
 	if len(result.Removed) > 0 {
-		fmt.Fprintf(t.out, "%s  %s\n", indent, removedStyle.Render(fmt.Sprintf("- %d removed", len(result.Removed))))
+		_, _ = fmt.Fprintf(t.out, "%s  %s\n", indent, removedStyle.Render(fmt.Sprintf("- %d removed", len(result.Removed))))
 	}
 	if len(result.Modified) > 0 {
-		fmt.Fprintf(t.out, "%s  %s\n", indent, modifiedStyle.Render(fmt.Sprintf("~ %d modified", len(result.Modified))))
+		_, _ = fmt.Fprintf(t.out, "%s  %s\n", indent, modifiedStyle.Render(fmt.Sprintf("~ %d modified", len(result.Modified))))
 	}
 
 	// Show detailed diff unless summaryOnly is set
@@ -179,26 +179,26 @@ func (t *TerminalWriter) writeAppDiffUnified(appDiff *types.AppDiff) error {
 	if appDiff.Namespace != "" {
 		appName += fmt.Sprintf(" (%s)", appDiff.Namespace)
 	}
-	fmt.Fprintf(t.out, "# %s\n", appNameStyle.Render("Application: "+appName))
+	_, _ = fmt.Fprintf(t.out, "# %s\n", appNameStyle.Render("Application: "+appName))
 
 	// Handle error
 	if appDiff.Error != nil {
-		fmt.Fprintf(t.out, "# %s\n\n", errorStyle.Render("Error: "+appDiff.Error.Error()))
+		_, _ = fmt.Fprintf(t.out, "# %s\n\n", errorStyle.Render("Error: "+appDiff.Error.Error()))
 		return nil
 	}
 
 	// Type assert DiffResult
 	result, ok := appDiff.DiffResult.(*diff.ManifestSetDiff)
 	if !ok || result == nil {
-		fmt.Fprintf(t.out, "# %s\n\n", dimStyle.Render("No diff available"))
+		_, _ = fmt.Fprintf(t.out, "# %s\n\n", dimStyle.Render("No diff available"))
 		return nil
 	}
 
 	// Show parse errors if present
 	if len(result.ParseErrors) > 0 {
-		fmt.Fprintf(t.out, "# %s\n", errorStyle.Render(fmt.Sprintf("⚠ %d YAML parse error(s)", len(result.ParseErrors))))
+		_, _ = fmt.Fprintf(t.out, "# %s\n", errorStyle.Render(fmt.Sprintf("⚠ %d YAML parse error(s)", len(result.ParseErrors))))
 		for _, err := range result.ParseErrors {
-			fmt.Fprintf(t.out, "# %s\n", dimStyle.Render("  • "+err))
+			_, _ = fmt.Fprintf(t.out, "# %s\n", dimStyle.Render("  • "+err))
 		}
 	}
 
@@ -206,28 +206,28 @@ func (t *TerminalWriter) writeAppDiffUnified(appDiff *types.AppDiff) error {
 	if !result.HasChanges {
 		// Don't show "No changes" if there were parse errors
 		if len(result.ParseErrors) == 0 {
-			fmt.Fprintf(t.out, "# %s\n\n", dimStyle.Render("No changes"))
+			_, _ = fmt.Fprintf(t.out, "# %s\n\n", dimStyle.Render("No changes"))
 		} else {
-			fmt.Fprintln(t.out) // Just add blank line after errors
+			_, _ = fmt.Fprintln(t.out) // Just add blank line after errors
 		}
 		return nil
 	}
 
 	// Write summary counts as comments
 	if len(result.Added) > 0 {
-		fmt.Fprintf(t.out, "# %s\n", addedStyle.Render(fmt.Sprintf("+ %d added", len(result.Added))))
+		_, _ = fmt.Fprintf(t.out, "# %s\n", addedStyle.Render(fmt.Sprintf("+ %d added", len(result.Added))))
 	}
 	if len(result.Removed) > 0 {
-		fmt.Fprintf(t.out, "# %s\n", removedStyle.Render(fmt.Sprintf("- %d removed", len(result.Removed))))
+		_, _ = fmt.Fprintf(t.out, "# %s\n", removedStyle.Render(fmt.Sprintf("- %d removed", len(result.Removed))))
 	}
 	if len(result.Modified) > 0 {
-		fmt.Fprintf(t.out, "# %s\n", modifiedStyle.Render(fmt.Sprintf("~ %d modified", len(result.Modified))))
+		_, _ = fmt.Fprintf(t.out, "# %s\n", modifiedStyle.Render(fmt.Sprintf("~ %d modified", len(result.Modified))))
 	}
 
 	// Generate unified diffs for all manifests
 	diffs, err := GenerateManifestUnifiedDiffs(result, t.contextLines)
 	if err != nil {
-		fmt.Fprintf(t.out, "# %s\n\n", errorStyle.Render("Error generating diff: "+err.Error()))
+		_, _ = fmt.Fprintf(t.out, "# %s\n\n", errorStyle.Render("Error generating diff: "+err.Error()))
 		return nil
 	}
 
@@ -243,21 +243,21 @@ func (t *TerminalWriter) writeAppDiffUnified(appDiff *types.AppDiff) error {
 				}
 				switch {
 				case strings.HasPrefix(line, "+++") || strings.HasPrefix(line, "---"):
-					fmt.Fprintln(t.out, dimStyle.Render(line))
+					_, _ = fmt.Fprintln(t.out, dimStyle.Render(line))
 				case strings.HasPrefix(line, "@@"):
-					fmt.Fprintln(t.out, dimStyle.Render(line))
+					_, _ = fmt.Fprintln(t.out, dimStyle.Render(line))
 				case strings.HasPrefix(line, "+"):
-					fmt.Fprintln(t.out, addedStyle.Render(line))
+					_, _ = fmt.Fprintln(t.out, addedStyle.Render(line))
 				case strings.HasPrefix(line, "-"):
-					fmt.Fprintln(t.out, removedStyle.Render(line))
+					_, _ = fmt.Fprintln(t.out, removedStyle.Render(line))
 				default:
-					fmt.Fprintln(t.out, line)
+					_, _ = fmt.Fprintln(t.out, line)
 				}
 			}
 		}
 	}
 
-	fmt.Fprintln(t.out)
+	_, _ = fmt.Fprintln(t.out)
 	return nil
 }
 
@@ -265,17 +265,17 @@ func (t *TerminalWriter) writeAppDiffUnified(appDiff *types.AppDiff) error {
 func (t *TerminalWriter) writeDetailedDiff(result *diff.ManifestSetDiff, indent string) {
 	// Added manifests
 	for _, m := range result.Added {
-		fmt.Fprintf(t.out, "%s    %s\n", indent, addedStyle.Render("+ "+m.Key()))
+		_, _ = fmt.Fprintf(t.out, "%s    %s\n", indent, addedStyle.Render("+ "+m.Key()))
 	}
 
 	// Removed manifests
 	for _, m := range result.Removed {
-		fmt.Fprintf(t.out, "%s    %s\n", indent, removedStyle.Render("- "+m.Key()))
+		_, _ = fmt.Fprintf(t.out, "%s    %s\n", indent, removedStyle.Render("- "+m.Key()))
 	}
 
 	// Modified manifests with field-level changes
 	for _, md := range result.Modified {
-		fmt.Fprintf(t.out, "%s    %s\n", indent, modifiedStyle.Render("~ "+md.Key))
+		_, _ = fmt.Fprintf(t.out, "%s    %s\n", indent, modifiedStyle.Render("~ "+md.Key))
 		if md.Diff != nil {
 			t.writeFieldChanges(md.Diff, indent+"      ")
 		}
@@ -287,13 +287,13 @@ func (t *TerminalWriter) writeFieldChanges(result *diff.DiffResult, indent strin
 	for _, change := range result.Changes {
 		switch change.Type {
 		case diff.ChangeTypeAdded:
-			fmt.Fprintf(t.out, "%s%s\n", indent, addedStyle.Render(fmt.Sprintf("+ %s: %v", change.Path, change.NewValue)))
+			_, _ = fmt.Fprintf(t.out, "%s%s\n", indent, addedStyle.Render(fmt.Sprintf("+ %s: %v", change.Path, change.NewValue)))
 		case diff.ChangeTypeRemoved:
-			fmt.Fprintf(t.out, "%s%s\n", indent, removedStyle.Render(fmt.Sprintf("- %s: %v", change.Path, change.OldValue)))
+			_, _ = fmt.Fprintf(t.out, "%s%s\n", indent, removedStyle.Render(fmt.Sprintf("- %s: %v", change.Path, change.OldValue)))
 		case diff.ChangeTypeModified:
-			fmt.Fprintf(t.out, "%s%s\n", indent, modifiedStyle.Render(fmt.Sprintf("~ %s:", change.Path)))
-			fmt.Fprintf(t.out, "%s  %s\n", indent, removedStyle.Render(fmt.Sprintf("- %v", change.OldValue)))
-			fmt.Fprintf(t.out, "%s  %s\n", indent, addedStyle.Render(fmt.Sprintf("+ %v", change.NewValue)))
+			_, _ = fmt.Fprintf(t.out, "%s%s\n", indent, modifiedStyle.Render(fmt.Sprintf("~ %s:", change.Path)))
+			_, _ = fmt.Fprintf(t.out, "%s  %s\n", indent, removedStyle.Render(fmt.Sprintf("- %v", change.OldValue)))
+			_, _ = fmt.Fprintf(t.out, "%s  %s\n", indent, addedStyle.Render(fmt.Sprintf("+ %v", change.NewValue)))
 		}
 	}
 }
@@ -310,19 +310,19 @@ func (t *TerminalWriter) writeExternalDiff(_ *types.AppDiff, result *diff.Manife
 
 	// Show added manifests with their names
 	for _, m := range result.Added {
-		fmt.Fprintf(t.out, "\n%s    %s\n", indent, addedStyle.Render("+ "+m.Key()))
+		_, _ = fmt.Fprintf(t.out, "\n%s    %s\n", indent, addedStyle.Render("+ "+m.Key()))
 		t.runExternalDiff(parts, "", m.Raw, indent)
 	}
 
 	// Show removed manifests with their names
 	for _, m := range result.Removed {
-		fmt.Fprintf(t.out, "\n%s    %s\n", indent, removedStyle.Render("- "+m.Key()))
+		_, _ = fmt.Fprintf(t.out, "\n%s    %s\n", indent, removedStyle.Render("- "+m.Key()))
 		t.runExternalDiff(parts, m.Raw, "", indent)
 	}
 
 	// Show modified manifests with their names
 	for _, md := range result.Modified {
-		fmt.Fprintf(t.out, "\n%s    %s\n", indent, modifiedStyle.Render("~ "+md.Key))
+		_, _ = fmt.Fprintf(t.out, "\n%s    %s\n", indent, modifiedStyle.Render("~ "+md.Key))
 		if md.Old != nil && md.New != nil {
 			t.runExternalDiff(parts, md.Old.Raw, md.New.Raw, indent)
 		}
@@ -334,24 +334,28 @@ func (t *TerminalWriter) runExternalDiff(cmdParts []string, oldContent, newConte
 	// Create temp files
 	oldFile, err := os.CreateTemp("", "argocdf-old-*.yaml")
 	if err != nil {
-		fmt.Fprintf(t.out, "%s      %s\n", indent, errorStyle.Render("Failed to create temp file: "+err.Error()))
+		_, _ = fmt.Fprintf(t.out, "%s      %s\n", indent, errorStyle.Render("Failed to create temp file: "+err.Error()))
 		return
 	}
-	defer os.Remove(oldFile.Name())
+	defer func() {
+		_ = os.Remove(oldFile.Name())
+	}()
 
 	newFile, err := os.CreateTemp("", "argocdf-new-*.yaml")
 	if err != nil {
-		fmt.Fprintf(t.out, "%s      %s\n", indent, errorStyle.Render("Failed to create temp file: "+err.Error()))
+		_, _ = fmt.Fprintf(t.out, "%s      %s\n", indent, errorStyle.Render("Failed to create temp file: "+err.Error()))
 		return
 	}
-	defer os.Remove(newFile.Name())
+	defer func() {
+		_ = os.Remove(newFile.Name())
+	}()
 
 	// Write content
-	oldFile.WriteString(oldContent)
-	oldFile.Close()
+	_, _ = oldFile.WriteString(oldContent)
+	_ = oldFile.Close()
 
-	newFile.WriteString(newContent)
-	newFile.Close()
+	_, _ = newFile.WriteString(newContent)
+	_ = newFile.Close()
 
 	// Execute the external diff command
 	args := append(cmdParts[1:], oldFile.Name(), newFile.Name())
@@ -366,11 +370,11 @@ func (t *TerminalWriter) runExternalDiff(cmdParts []string, oldContent, newConte
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			// Exit code 1 is expected when files differ
 			if exitErr.ExitCode() > 1 {
-				fmt.Fprintf(t.out, "%s      %s\n", indent, errorStyle.Render("External diff failed: "+err.Error()))
+				_, _ = fmt.Fprintf(t.out, "%s      %s\n", indent, errorStyle.Render("External diff failed: "+err.Error()))
 			}
 		} else {
 			// Non-exit error (e.g., command not found)
-			fmt.Fprintf(t.out, "%s      %s\n", indent, errorStyle.Render("External diff failed: "+err.Error()))
+			_, _ = fmt.Fprintf(t.out, "%s      %s\n", indent, errorStyle.Render("External diff failed: "+err.Error()))
 		}
 	}
 }
@@ -379,7 +383,7 @@ func (t *TerminalWriter) runExternalDiff(cmdParts []string, oldContent, newConte
 func (t *TerminalWriter) WriteTree(tree *diff.AppTree) error {
 	tree.Walk(func(node *diff.AppTreeNode, depth int) {
 		if appDiff, ok := node.AppDiff.(*types.AppDiff); ok {
-			t.WriteAppDiff(appDiff, depth)
+			_ = t.WriteAppDiff(appDiff, depth)
 		}
 	})
 	return nil
@@ -392,33 +396,33 @@ func (t *TerminalWriter) WriteSummary(summary Summary) error {
 		return t.writeSummaryUnified(summary)
 	}
 
-	fmt.Fprintln(t.out, summaryStyle.Render("Summary"))
-	fmt.Fprintln(t.out, strings.Repeat("-", 40))
+	_, _ = fmt.Fprintln(t.out, summaryStyle.Render("Summary"))
+	_, _ = fmt.Fprintln(t.out, strings.Repeat("-", 40))
 
-	fmt.Fprintf(t.out, "Applications affected: %d\n", summary.TotalApps)
+	_, _ = fmt.Fprintf(t.out, "Applications affected: %d\n", summary.TotalApps)
 
 	if summary.AppsWithChanges > 0 {
-		fmt.Fprintf(t.out, "Applications changed: %s\n",
+		_, _ = fmt.Fprintf(t.out, "Applications changed: %s\n",
 			modifiedStyle.Render(fmt.Sprintf("%d", summary.AppsWithChanges)))
 	} else {
-		fmt.Fprintln(t.out, "Applications changed: 0")
+		_, _ = fmt.Fprintln(t.out, "Applications changed: 0")
 	}
 
 	// Resources line (always show if there are any changes)
 	if summary.TotalAdded > 0 || summary.TotalRemoved > 0 || summary.TotalModified > 0 {
-		fmt.Fprintf(t.out, "Resources: %s, %s, %s\n",
+		_, _ = fmt.Fprintf(t.out, "Resources: %s, %s, %s\n",
 			addedStyle.Render(fmt.Sprintf("+%d added", summary.TotalAdded)),
 			removedStyle.Render(fmt.Sprintf("-%d removed", summary.TotalRemoved)),
 			modifiedStyle.Render(fmt.Sprintf("~%d modified", summary.TotalModified)))
 	}
 
 	if summary.AppsWithErrors > 0 {
-		fmt.Fprintf(t.out, "Errors: %s\n",
+		_, _ = fmt.Fprintf(t.out, "Errors: %s\n",
 			errorStyle.Render(fmt.Sprintf("%d", summary.AppsWithErrors)))
 	}
 
 	if summary.NewApplications > 0 {
-		fmt.Fprintf(t.out, "New Application CRDs discovered: %s\n",
+		_, _ = fmt.Fprintf(t.out, "New Application CRDs discovered: %s\n",
 			addedStyle.Render(fmt.Sprintf("%d", summary.NewApplications)))
 	}
 
@@ -428,33 +432,33 @@ func (t *TerminalWriter) WriteSummary(summary Summary) error {
 // writeSummaryUnified writes the summary as comments for valid unified diff format.
 func (t *TerminalWriter) writeSummaryUnified(summary Summary) error {
 	// Use titleStyle instead of summaryStyle to avoid MarginTop adding a newline
-	fmt.Fprintf(t.out, "# %s\n", titleStyle.Render("Summary"))
-	fmt.Fprintf(t.out, "# %s\n", strings.Repeat("-", 40))
+	_, _ = fmt.Fprintf(t.out, "# %s\n", titleStyle.Render("Summary"))
+	_, _ = fmt.Fprintf(t.out, "# %s\n", strings.Repeat("-", 40))
 
-	fmt.Fprintf(t.out, "# Applications affected: %d\n", summary.TotalApps)
+	_, _ = fmt.Fprintf(t.out, "# Applications affected: %d\n", summary.TotalApps)
 
 	if summary.AppsWithChanges > 0 {
-		fmt.Fprintf(t.out, "# Applications changed: %s\n",
+		_, _ = fmt.Fprintf(t.out, "# Applications changed: %s\n",
 			modifiedStyle.Render(fmt.Sprintf("%d", summary.AppsWithChanges)))
 	} else {
-		fmt.Fprintln(t.out, "# Applications changed: 0")
+		_, _ = fmt.Fprintln(t.out, "# Applications changed: 0")
 	}
 
 	// Resources line (always show if there are any changes)
 	if summary.TotalAdded > 0 || summary.TotalRemoved > 0 || summary.TotalModified > 0 {
-		fmt.Fprintf(t.out, "# Resources: %s, %s, %s\n",
+		_, _ = fmt.Fprintf(t.out, "# Resources: %s, %s, %s\n",
 			addedStyle.Render(fmt.Sprintf("+%d added", summary.TotalAdded)),
 			removedStyle.Render(fmt.Sprintf("-%d removed", summary.TotalRemoved)),
 			modifiedStyle.Render(fmt.Sprintf("~%d modified", summary.TotalModified)))
 	}
 
 	if summary.AppsWithErrors > 0 {
-		fmt.Fprintf(t.out, "# Errors: %s\n",
+		_, _ = fmt.Fprintf(t.out, "# Errors: %s\n",
 			errorStyle.Render(fmt.Sprintf("%d", summary.AppsWithErrors)))
 	}
 
 	if summary.NewApplications > 0 {
-		fmt.Fprintf(t.out, "# New Application CRDs discovered: %s\n",
+		_, _ = fmt.Fprintf(t.out, "# New Application CRDs discovered: %s\n",
 			addedStyle.Render(fmt.Sprintf("%d", summary.NewApplications)))
 	}
 

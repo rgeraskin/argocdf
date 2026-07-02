@@ -16,7 +16,9 @@ func TestGetRenderer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() {
+		_ = os.RemoveAll(tempDir)
+	}()
 
 	// Create a subdirectory with Chart.yaml (simulates a Helm chart)
 	helmChartDir := filepath.Join(tempDir, "helm-chart")
@@ -178,7 +180,7 @@ func TestAddHelmOptionsValuesObject(t *testing.T) {
 			// Cleanup temp files after test
 			defer func() {
 				for _, f := range tempFiles {
-					os.Remove(f)
+					_ = os.Remove(f)
 				}
 			}()
 
@@ -219,7 +221,9 @@ func TestGetRendererPrecedence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() {
+		_ = os.RemoveAll(tempDir)
+	}()
 
 	// Create a directory with both Chart.yaml and set Kustomize config
 	// Kustomize config should win since it's explicit

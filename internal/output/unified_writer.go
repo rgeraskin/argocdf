@@ -105,7 +105,7 @@ func (u *UnifiedWriter) WriteAppDiff(appDiff *types.AppDiff, _ int) error {
 func (u *UnifiedWriter) WriteTree(tree *diff.AppTree) error {
 	tree.Walk(func(node *diff.AppTreeNode, depth int) {
 		if appDiff, ok := node.AppDiff.(*types.AppDiff); ok {
-			u.WriteAppDiff(appDiff, depth)
+			_ = u.WriteAppDiff(appDiff, depth)
 		}
 	})
 	return nil

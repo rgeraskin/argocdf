@@ -97,7 +97,7 @@ func (r *MultiSourceRenderer) prepareRefSources(sources []cluster.ApplicationSou
 
 	cleanup := func() {
 		for _, dir := range tempDirs {
-			SafeRemoveAll(dir)
+			_ = SafeRemoveAll(dir)
 		}
 	}
 

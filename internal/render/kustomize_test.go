@@ -92,7 +92,9 @@ func TestHasKustomization(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() {
+		_ = os.RemoveAll(tempDir)
+	}()
 
 	// Test directory without kustomization
 	if renderer.hasKustomization(tempDir) {
@@ -151,7 +153,9 @@ func TestFindKustomizationFile(t *testing.T) {
 			if err != nil {
 				t.Fatalf("failed to create temp dir: %v", err)
 			}
-			defer os.RemoveAll(tempDir)
+			defer func() {
+		_ = os.RemoveAll(tempDir)
+	}()
 
 			// Create the test files
 			for _, file := range tt.files {
@@ -192,7 +196,9 @@ func TestIsKustomizeDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() {
+		_ = os.RemoveAll(tempDir)
+	}()
 
 	// Without kustomization file
 	if IsKustomizeDirectory(tempDir) {
@@ -216,7 +222,9 @@ func TestRenderPlainYAML(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() {
+		_ = os.RemoveAll(tempDir)
+	}()
 
 	// Create some YAML files
 	yaml1 := `apiVersion: v1
@@ -325,7 +333,9 @@ patches:
 			if err != nil {
 				t.Fatalf("failed to create temp dir: %v", err)
 			}
-			defer os.RemoveAll(tempDir)
+			defer func() {
+		_ = os.RemoveAll(tempDir)
+	}()
 
 			// Write initial kustomization.yaml
 			kustFile := filepath.Join(tempDir, "kustomization.yaml")
@@ -368,7 +378,9 @@ func TestApplyPatchesNoKustomization(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() {
+		_ = os.RemoveAll(tempDir)
+	}()
 
 	// Try to apply patches without kustomization file
 	err = renderer.applyPatches(tempDir, []cluster.KustomizePatch{})
@@ -403,7 +415,9 @@ func TestKustomizeEditNamePrefix(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() {
+		_ = os.RemoveAll(tempDir)
+	}()
 
 	// Create kustomization.yaml
 	kustContent := `apiVersion: kustomize.config.k8s.io/v1beta1
@@ -440,7 +454,9 @@ func TestKustomizeEditImages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() {
+		_ = os.RemoveAll(tempDir)
+	}()
 
 	// Create kustomization.yaml
 	kustContent := `apiVersion: kustomize.config.k8s.io/v1beta1
@@ -477,7 +493,9 @@ func TestKustomizeEditLabels(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() {
+		_ = os.RemoveAll(tempDir)
+	}()
 
 	// Create kustomization.yaml
 	kustContent := `apiVersion: kustomize.config.k8s.io/v1beta1
@@ -514,7 +532,9 @@ func TestKustomizeEditNamespace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() {
+		_ = os.RemoveAll(tempDir)
+	}()
 
 	// Create kustomization.yaml
 	kustContent := `apiVersion: kustomize.config.k8s.io/v1beta1
@@ -551,7 +571,9 @@ func TestKustomizeRenderWithOptions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() {
+		_ = os.RemoveAll(tempDir)
+	}()
 
 	// Create a simple kustomization with a deployment
 	kustContent := `apiVersion: kustomize.config.k8s.io/v1beta1

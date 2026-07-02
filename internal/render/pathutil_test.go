@@ -14,7 +14,9 @@ func TestValidatePathContainment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() {
+		_ = os.RemoveAll(tempDir)
+	}()
 
 	// Create subdirectory
 	subDir := filepath.Join(tempDir, "subdir")
@@ -114,7 +116,7 @@ func TestSafeRemoveAll(t *testing.T) {
 		// Create a file inside
 		testFile := filepath.Join(tempDir, "test.txt")
 		if err := os.WriteFile(testFile, []byte("test"), 0644); err != nil {
-			os.RemoveAll(tempDir)
+			_ = os.RemoveAll(tempDir)
 			t.Fatalf("failed to create test file: %v", err)
 		}
 
@@ -126,7 +128,7 @@ func TestSafeRemoveAll(t *testing.T) {
 		// Verify it's removed
 		if _, err := os.Stat(tempDir); !os.IsNotExist(err) {
 			t.Error("SafeRemoveAll() did not remove the directory")
-			os.RemoveAll(tempDir) // cleanup
+			_ = os.RemoveAll(tempDir) // cleanup
 		}
 	})
 
@@ -155,7 +157,9 @@ func TestResolveAndValidatePath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() {
+		_ = os.RemoveAll(tempDir)
+	}()
 
 	// Create subdirectory for testing
 	subDir := filepath.Join(tempDir, "subdir")
@@ -245,14 +249,18 @@ func TestValidatePathContainment_Symlinks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() {
+		_ = os.RemoveAll(tempDir)
+	}()
 
 	// Create outside directory
 	outsideDir, err := os.MkdirTemp("", "outside-test-")
 	if err != nil {
 		t.Fatalf("failed to create outside dir: %v", err)
 	}
-	defer os.RemoveAll(outsideDir)
+	defer func() {
+		_ = os.RemoveAll(outsideDir)
+	}()
 
 	// Create a file in the outside directory
 	outsideFile := filepath.Join(outsideDir, "secret.txt")

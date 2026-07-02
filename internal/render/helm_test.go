@@ -14,7 +14,9 @@ func TestResolveValueFilePath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() {
+		_ = os.RemoveAll(tempDir)
+	}()
 
 	// Create subdirectories
 	repoPath := filepath.Join(tempDir, "repo")
@@ -232,7 +234,9 @@ func TestEnsureDependencies_NoChartYaml(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() {
+		_ = os.RemoveAll(tempDir)
+	}()
 
 	r := NewHelmRenderer(RenderOptions{})
 
@@ -249,7 +253,9 @@ func TestEnsureDependencies_NoDependencies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() {
+		_ = os.RemoveAll(tempDir)
+	}()
 
 	chartYaml := `
 apiVersion: v2
