@@ -6,11 +6,55 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/rgeraskin/argocdf/internal/cluster"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+// TestChartDepMutex verifies the keyed mutex used to serialize
+// `helm dependency build` per chart path: the same path returns the same
+// mutex, distinct paths return distinct mutexes, and the returned mutex
+// actually serializes concurrent access (run with -race).
+func TestChartDepMutex(t *testing.T) {
+	// Same path -> same mutex instance.
+	muA1 := chartDepMutex("/tmp/chart-a")
+	muA2 := chartDepMutex("/tmp/chart-a")
+	if muA1 != muA2 {
+		t.Error("expected identical mutex for identical chart path")
+	}
+	// Distinct paths -> distinct mutexes.
+	muB := chartDepMutex("/tmp/chart-b")
+	if muA1 == muB {
+		t.Error("expected distinct mutexes for distinct chart paths")
+	}
+
+	// The mutex must serialize concurrent access to a shared counter guarded by
+	// the mutex for a single path. Under -race this fails if the mutex does not
+	// actually protect the critical section.
+	const goroutines = 50
+	const increments = 200
+	counter := 0
+	var wg sync.WaitGroup
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < increments; j++ {
+				mu := chartDepMutex("/tmp/shared-chart")
+				mu.Lock()
+				counter++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+
+	if want := goroutines * increments; counter != want {
+		t.Errorf("counter = %d, want %d (lost updates indicate a broken mutex)", counter, want)
+	}
+}
 
 func TestResolveValueFilePath(t *testing.T) {
 	// Create temp directories for testing

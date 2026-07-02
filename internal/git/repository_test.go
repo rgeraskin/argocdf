@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -298,6 +299,79 @@ func TestWithBranchPanicRestoresWorktreePath(t *testing.T) {
 
 	if repo.Path() != originalPath {
 		t.Errorf("path after panic = %q, want %q", repo.Path(), originalPath)
+	}
+}
+
+func TestAddWorktree(t *testing.T) {
+	// AddWorktree must create a detached worktree checked out at the given ref,
+	// and cleanup must remove both the worktree files and its registration.
+	repoDir := initFixtureRepo(t)
+	commitFile(t, repoDir, "second.txt", "second", "second commit")
+
+	repo, err := Open(repoDir)
+	if err != nil {
+		t.Fatalf("failed to open repo: %v", err)
+	}
+
+	// Use the first commit so we can verify the worktree is at the requested ref.
+	firstCommit, err := repo.CommitHash("HEAD~1")
+	if err != nil {
+		t.Fatalf("failed to resolve HEAD~1: %v", err)
+	}
+
+	worktreePath, cleanup, err := repo.AddWorktree(firstCommit)
+	if err != nil {
+		t.Fatalf("AddWorktree failed: %v", err)
+	}
+
+	// The worktree directory must exist.
+	if info, statErr := os.Stat(worktreePath); statErr != nil || !info.IsDir() {
+		t.Fatalf("worktree path %q not a directory: %v", worktreePath, statErr)
+	}
+
+	// The worktree HEAD must match the requested commit (detached).
+	wtRepo, err := Open(worktreePath)
+	if err != nil {
+		t.Fatalf("failed to open worktree repo: %v", err)
+	}
+	head, err := wtRepo.Head()
+	if err != nil {
+		t.Fatalf("failed to get worktree HEAD: %v", err)
+	}
+	if head != firstCommit {
+		t.Errorf("worktree HEAD = %q, want %q", head, firstCommit)
+	}
+	if branch, _ := wtRepo.HeadBranch(); branch != "" {
+		t.Errorf("expected detached HEAD, got branch %q", branch)
+	}
+
+	// The first-commit tree must not contain second.txt.
+	if _, statErr := os.Stat(filepath.Join(worktreePath, "second.txt")); !os.IsNotExist(statErr) {
+		t.Errorf("second.txt should not exist in worktree at first commit")
+	}
+
+	// The worktree must be registered.
+	list, err := repo.run("worktree", "list", "--porcelain")
+	if err != nil {
+		t.Fatalf("worktree list failed: %v", err)
+	}
+	resolvedWT, _ := filepath.EvalSymlinks(worktreePath)
+	if !strings.Contains(list, worktreePath) && !strings.Contains(list, resolvedWT) {
+		t.Errorf("worktree %q not registered in list:\n%s", worktreePath, list)
+	}
+
+	// Cleanup must remove the worktree directory and its registration.
+	cleanup()
+
+	if _, statErr := os.Stat(worktreePath); !os.IsNotExist(statErr) {
+		t.Errorf("worktree path still exists after cleanup: %v", statErr)
+	}
+	list, err = repo.run("worktree", "list", "--porcelain")
+	if err != nil {
+		t.Fatalf("worktree list after cleanup failed: %v", err)
+	}
+	if strings.Contains(list, worktreePath) || (resolvedWT != "" && strings.Contains(list, resolvedWT)) {
+		t.Errorf("worktree still registered after cleanup:\n%s", list)
 	}
 }
 
