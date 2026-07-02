@@ -64,10 +64,13 @@ func NewManifestParser() *ManifestParser {
 	return &ManifestParser{}
 }
 
-// ParseResult contains parsed manifests and any parse errors encountered.
+// ParseResult contains parsed manifests and any parse issues encountered.
 type ParseResult struct {
 	Manifests   []Manifest
 	ParseErrors []string
+	// ParseWarnings contains non-fatal issues (e.g., duplicate YAML map keys
+	// resolved with last-wins semantics). The document is still kept.
+	ParseWarnings []string
 }
 
 // ParseManifests parses a multi-document YAML into Manifests.
@@ -77,20 +80,43 @@ type ParseResult struct {
 // - Continuing with valid documents provides a better user experience
 // Only documents that can be parsed as valid Kubernetes objects (with apiVersion,
 // kind, and metadata.name) are included in the result.
-// Parse errors (e.g., duplicate YAML keys) are collected and returned in ParseResult.
+//
+// Each document is first decoded into a yaml.Node (which does NOT error on
+// duplicate map keys), then any duplicate keys are resolved with last-wins
+// semantics (matching kubectl/ArgoCD apply behavior) and recorded in
+// ParseWarnings. Genuine YAML syntax errors are collected in ParseErrors and
+// the offending document is skipped.
 func (p *ManifestParser) ParseManifests(content string) ParseResult {
 	decoder := yaml.NewDecoder(strings.NewReader(content))
 	var result ParseResult
 
 	for {
-		var rawObj map[string]interface{}
-		err := decoder.Decode(&rawObj)
+		var node yaml.Node
+		err := decoder.Decode(&node)
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			// Collect YAML parse errors (e.g., duplicate keys, malformed YAML)
-			// These indicate issues in the source templates that should be fixed
+			// Genuine YAML syntax error (malformed YAML). Decoding into a
+			// yaml.Node does not fail on duplicate keys, so anything that
+			// errors here is a real structural problem. yaml.v3's decoder
+			// cannot advance past a structural syntax error (it would return
+			// the same error indefinitely), so we record it and stop rather
+			// than spin forever. Documents parsed before the error are kept.
+			errMsg := strings.ReplaceAll(fmt.Sprintf("%v", err), "\n", " ")
+			result.ParseErrors = append(result.ParseErrors, errMsg)
+			log.Errorf("Skipping invalid YAML document: %s", errMsg)
+			break
+		}
+
+		// Resolve duplicate map keys (last wins), collecting the duplicated
+		// leaf key names so we can attach kind/name context after decode.
+		var dupKeys []string
+		dedupNode(&node, &dupKeys)
+
+		// Decode the (deduplicated) node into a map.
+		var rawObj map[string]interface{}
+		if err := node.Decode(&rawObj); err != nil {
 			errMsg := strings.ReplaceAll(fmt.Sprintf("%v", err), "\n", " ")
 			result.ParseErrors = append(result.ParseErrors, errMsg)
 			log.Errorf("Skipping invalid YAML document: %s", errMsg)
@@ -121,10 +147,56 @@ func (p *ManifestParser) ParseManifests(content string) ParseResult {
 			continue
 		}
 
+		// Record duplicate-key warnings now that kind/name are known.
+		for _, k := range dupKeys {
+			w := fmt.Sprintf("resource %s/%s: duplicate key %q (using last value)", manifest.Kind, manifest.Name, k)
+			result.ParseWarnings = append(result.ParseWarnings, w)
+			log.Warnf("Duplicate YAML key resolved with last-wins: %s", w)
+		}
+
 		result.Manifests = append(result.Manifests, manifest)
 	}
 
 	return result
+}
+
+// dedupNode walks a yaml.Node tree and, for every mapping node, removes
+// duplicate keys keeping the LAST occurrence (matching YAML/kubectl last-wins
+// semantics). The leaf name of each duplicated key is appended to dups.
+func dedupNode(node *yaml.Node, dups *[]string) {
+	if node == nil {
+		return
+	}
+	switch node.Kind {
+	case yaml.DocumentNode:
+		for _, c := range node.Content {
+			dedupNode(c, dups)
+		}
+	case yaml.MappingNode:
+		seen := make(map[string]int) // key value -> index of the key node in newContent
+		newContent := make([]*yaml.Node, 0, len(node.Content))
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			keyNode := node.Content[i]
+			valNode := node.Content[i+1]
+			if idx, ok := seen[keyNode.Value]; ok {
+				// Duplicate: last wins. Replace the previously kept key/value
+				// pair in place so the later value takes precedence.
+				*dups = append(*dups, keyNode.Value)
+				newContent[idx] = keyNode
+				newContent[idx+1] = valNode
+			} else {
+				seen[keyNode.Value] = len(newContent)
+				newContent = append(newContent, keyNode, valNode)
+			}
+			// Recurse into the value node to dedup nested mappings.
+			dedupNode(valNode, dups)
+		}
+		node.Content = newContent
+	case yaml.SequenceNode:
+		for _, c := range node.Content {
+			dedupNode(c, dups)
+		}
+	}
 }
 
 // getString safely extracts a string from a map.
@@ -178,9 +250,15 @@ type ManifestSetDiff struct {
 	// HasChanges is true if there are any differences
 	HasChanges bool
 
-	// ParseErrors contains YAML parse errors from both old and new content
-	// These indicate issues in the source templates (e.g., duplicate keys)
+	// ParseErrors contains fatal YAML parse errors from both old and new
+	// content (e.g., malformed YAML). The offending document is dropped.
 	ParseErrors []string
+
+	// ParseWarnings contains non-fatal issues from both old and new content
+	// (e.g., duplicate map keys resolved with last-wins semantics, or multiple
+	// rendered documents sharing the same manifest identity). The affected
+	// documents are still kept and diffed.
+	ParseWarnings []string
 }
 
 // ManifestDiffer compares two sets of manifests.
@@ -211,6 +289,11 @@ func (d *ManifestDiffer) DiffManifests(oldContent, newContent string) (*Manifest
 	result.ParseErrors = append(result.ParseErrors, oldResult.ParseErrors...)
 	result.ParseErrors = append(result.ParseErrors, newResult.ParseErrors...)
 
+	// Collect parse warnings from both old and new content. Duplicate-manifest
+	// warnings are already populated by DiffManifestSets.
+	result.ParseWarnings = append(result.ParseWarnings, oldResult.ParseWarnings...)
+	result.ParseWarnings = append(result.ParseWarnings, newResult.ParseWarnings...)
+
 	return result, nil
 }
 
@@ -218,16 +301,14 @@ func (d *ManifestDiffer) DiffManifests(oldContent, newContent string) (*Manifest
 func (d *ManifestDiffer) DiffManifestSets(oldManifests, newManifests []Manifest) (*ManifestSetDiff, error) {
 	result := &ManifestSetDiff{}
 
-	// Build maps for lookup
-	oldMap := make(map[string]Manifest)
-	for _, m := range oldManifests {
-		oldMap[m.Key()] = m
-	}
-
-	newMap := make(map[string]Manifest)
-	for _, m := range newManifests {
-		newMap[m.Key()] = m
-	}
+	// Build maps for lookup. If a render emits multiple documents with the same
+	// manifest identity (namespace/group/Kind/name), the map keeps only the last
+	// one (matching ArgoCD's apply behavior) but we surface a warning so the
+	// collision is visible rather than silently hidden.
+	oldMap, oldDupWarnings := buildManifestMap(oldManifests)
+	newMap, newDupWarnings := buildManifestMap(newManifests)
+	result.ParseWarnings = append(result.ParseWarnings, oldDupWarnings...)
+	result.ParseWarnings = append(result.ParseWarnings, newDupWarnings...)
 
 	// Find added and modified
 	for key, newM := range newMap {
@@ -273,6 +354,33 @@ func (d *ManifestDiffer) DiffManifestSets(oldManifests, newManifests []Manifest)
 	})
 
 	return result, nil
+}
+
+// buildManifestMap indexes manifests by their Key(). When multiple manifests
+// share the same key, the last one wins (matching ArgoCD server-side apply,
+// which only applies one) and a warning is produced per colliding key.
+func buildManifestMap(manifests []Manifest) (map[string]Manifest, []string) {
+	m := make(map[string]Manifest, len(manifests))
+	counts := make(map[string]int, len(manifests))
+	var order []string
+	for _, man := range manifests {
+		k := man.Key()
+		if counts[k] == 0 {
+			order = append(order, k)
+		}
+		counts[k]++
+		m[k] = man
+	}
+
+	var warnings []string
+	for _, k := range order {
+		if counts[k] > 1 {
+			warnings = append(warnings, fmt.Sprintf(
+				"duplicate manifest %s: %d documents share this identity; ArgoCD will only apply one",
+				k, counts[k]))
+		}
+	}
+	return m, warnings
 }
 
 // ExtractApplications extracts ArgoCD Application manifests from parsed manifests.

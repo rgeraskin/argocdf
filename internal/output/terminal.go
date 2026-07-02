@@ -38,6 +38,10 @@ var (
 			Bold(true).
 			Foreground(lipgloss.Color("196"))
 
+	warningStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("214"))
+
 	dimStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("240"))
 
@@ -136,6 +140,16 @@ func (t *TerminalWriter) WriteAppDiff(appDiff *types.AppDiff, depth int) error {
 		}
 	}
 
+	// Show parse warnings if present (non-fatal; documents are still diffed)
+	if len(result.ParseWarnings) > 0 {
+		_, _ = fmt.Fprintf(t.out, "%s  %s\n", indent, warningStyle.Render(fmt.Sprintf("⚠ %d warning(s)", len(result.ParseWarnings))))
+		if !t.summaryOnly {
+			for _, warn := range result.ParseWarnings {
+				_, _ = fmt.Fprintf(t.out, "%s    %s\n", indent, dimStyle.Render("• "+warn))
+			}
+		}
+	}
+
 	// No changes
 	if !result.HasChanges {
 		// Don't show "No changes" if there were parse errors
@@ -199,6 +213,14 @@ func (t *TerminalWriter) writeAppDiffUnified(appDiff *types.AppDiff) error {
 		_, _ = fmt.Fprintf(t.out, "# %s\n", errorStyle.Render(fmt.Sprintf("⚠ %d YAML parse error(s)", len(result.ParseErrors))))
 		for _, err := range result.ParseErrors {
 			_, _ = fmt.Fprintf(t.out, "# %s\n", dimStyle.Render("  • "+err))
+		}
+	}
+
+	// Show parse warnings if present (non-fatal; documents are still diffed)
+	if len(result.ParseWarnings) > 0 {
+		_, _ = fmt.Fprintf(t.out, "# %s\n", warningStyle.Render(fmt.Sprintf("⚠ %d warning(s)", len(result.ParseWarnings))))
+		for _, warn := range result.ParseWarnings {
+			_, _ = fmt.Fprintf(t.out, "# %s\n", dimStyle.Render("  • "+warn))
 		}
 	}
 

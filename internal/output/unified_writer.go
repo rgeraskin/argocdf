@@ -68,6 +68,14 @@ func (u *UnifiedWriter) WriteAppDiff(appDiff *types.AppDiff, _ int) error {
 		}
 	}
 
+	// Show parse warnings if present (non-fatal; documents are still diffed)
+	if len(result.ParseWarnings) > 0 {
+		u.write(fmt.Sprintf("# ⚠ %d warning(s):\n", len(result.ParseWarnings)))
+		for _, warn := range result.ParseWarnings {
+			u.write(fmt.Sprintf("#   • %s\n", warn))
+		}
+	}
+
 	// No changes
 	if !result.HasChanges {
 		// Don't show "No changes" if there were parse errors
