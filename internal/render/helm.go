@@ -41,7 +41,7 @@ func (r *HelmRenderer) Render(ctx context.Context, app *cluster.Application, sou
 	}
 
 	// Determine chart location and build args
-	args, tempDir, tempFiles, err := r.buildArgs(ctx, app, source, repoPath)
+	args, env, tempDir, tempFiles, err := r.buildArgs(ctx, app, source, repoPath)
 	if err != nil {
 		return nil, err
 	}
@@ -68,6 +68,11 @@ func (r *HelmRenderer) Render(ctx context.Context, app *cluster.Application, sou
 
 	// Run helm template with context
 	cmd := exec.CommandContext(ctx, "helm", args...)
+	if env != nil {
+		// Use the isolated environment so helm sees the temp repo config
+		// created by handleRemoteChart
+		cmd.Env = env
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -83,8 +88,10 @@ func (r *HelmRenderer) Render(ctx context.Context, app *cluster.Application, sou
 }
 
 // buildArgs builds the helm template command arguments.
-// Returns args, tempDir (for remote chart cleanup), tempFiles (for inline values cleanup), and error.
-func (r *HelmRenderer) buildArgs(ctx context.Context, app *cluster.Application, source *cluster.ApplicationSource, repoPath string) ([]string, string, []string, error) {
+// Returns args, env (isolated environment for remote charts, nil otherwise),
+// tempDir (for remote chart cleanup), tempFiles (for inline values cleanup), and error.
+func (r *HelmRenderer) buildArgs(ctx context.Context, app *cluster.Application, source *cluster.ApplicationSource, repoPath string) ([]string, []string, string, []string, error) {
+	var env []string
 	var tempDir string
 	var tempFiles []string
 
@@ -99,18 +106,23 @@ func (r *HelmRenderer) buildArgs(ctx context.Context, app *cluster.Application, 
 	// Determine chart location
 	if source.Chart != "" {
 		// Remote chart from repository
-		chartRef, tempDirPath, err := r.handleRemoteChart(ctx, source)
+		chartRef, chartEnv, tempDirPath, err := r.handleRemoteChart(ctx, source)
 		if err != nil {
-			return nil, "", nil, err
+			return nil, nil, "", nil, err
 		}
+		env = chartEnv
 		tempDir = tempDirPath
 		args = append(args, chartRef)
+		// For remote charts, targetRevision is the chart version
+		if source.TargetRevision != "" && source.TargetRevision != "HEAD" {
+			args = append(args, "--version", source.TargetRevision)
+		}
 	} else if source.Path != "" {
 		// Local chart from repository
 		chartPath := filepath.Join(repoPath, source.Path)
 		args = append(args, chartPath)
 	} else {
-		return nil, "", nil, fmt.Errorf("no chart or path specified in source")
+		return nil, nil, "", nil, fmt.Errorf("no chart or path specified in source")
 	}
 
 	// Add namespace
@@ -140,32 +152,43 @@ func (r *HelmRenderer) buildArgs(ctx context.Context, app *cluster.Application, 
 			if tempDir != "" {
 				_ = SafeRemoveAll(tempDir)
 			}
-			return nil, "", nil, err
+			return nil, nil, "", nil, err
 		}
 	}
 
-	return args, tempDir, tempFiles, nil
+	return args, env, tempDir, tempFiles, nil
+}
+
+// isolatedHelmEnv returns an environment with helm cache/config/data homes
+// isolated to tempDir, so repo operations don't touch the user's helm config.
+func isolatedHelmEnv(tempDir string) []string {
+	return append(os.Environ(),
+		"HELM_CACHE_HOME="+filepath.Join(tempDir, "cache"),
+		"HELM_CONFIG_HOME="+filepath.Join(tempDir, "config"),
+		"HELM_DATA_HOME="+filepath.Join(tempDir, "data"),
+	)
 }
 
 // handleRemoteChart handles fetching a chart from a remote repository.
-func (r *HelmRenderer) handleRemoteChart(ctx context.Context, source *cluster.ApplicationSource) (string, string, error) {
+// Returns the chart reference, the isolated environment to use for helm
+// commands (nil when the default environment suffices), and a temp directory
+// to cleanup (empty when none was created).
+func (r *HelmRenderer) handleRemoteChart(ctx context.Context, source *cluster.ApplicationSource) (string, []string, string, error) {
 	repoURL := source.RepoURL
 
 	if strings.HasPrefix(repoURL, "oci://") {
-		// OCI registry - helm can pull directly
-		chartRef := repoURL + "/" + source.Chart
-		if source.TargetRevision != "" && source.TargetRevision != "HEAD" {
-			return chartRef + ":" + source.TargetRevision, "", nil
-		}
-		return chartRef, "", nil
+		// OCI registry - helm can pull directly; the chart version is
+		// passed separately via --version
+		return repoURL + "/" + source.Chart, nil, "", nil
 	}
 
 	// HTTP/HTTPS repo - need to add repo first
 	// Create a temp directory for repo operations
 	tempDir, err := os.MkdirTemp("", "argocdf-helm-")
 	if err != nil {
-		return "", "", fmt.Errorf("failed to create temp dir: %w", err)
+		return "", nil, "", fmt.Errorf("failed to create temp dir: %w", err)
 	}
+	env := isolatedHelmEnv(tempDir)
 
 	// Generate a unique repo name
 	repoName := "argocdf-temp-" + source.Chart
@@ -173,33 +196,29 @@ func (r *HelmRenderer) handleRemoteChart(ctx context.Context, source *cluster.Ap
 	// Add the repo with context
 	addArgs := []string{"repo", "add", repoName, repoURL, "--force-update"}
 	addCmd := exec.CommandContext(ctx, "helm", addArgs...)
-	addCmd.Env = append(os.Environ(),
-		"HELM_CACHE_HOME="+filepath.Join(tempDir, "cache"),
-		"HELM_CONFIG_HOME="+filepath.Join(tempDir, "config"),
-		"HELM_DATA_HOME="+filepath.Join(tempDir, "data"),
-	)
+	addCmd.Env = env
 	if output, err := addCmd.CombinedOutput(); err != nil {
 		_ = SafeRemoveAll(tempDir)
 		if ctx.Err() != nil {
-			return "", "", ctx.Err()
+			return "", nil, "", ctx.Err()
 		}
-		return "", "", fmt.Errorf("failed to add helm repo: %v\noutput: %s", err, output)
+		return "", nil, "", fmt.Errorf("failed to add helm repo: %v\noutput: %s", err, output)
 	}
 
 	// Update the repo with context
 	updateArgs := []string{"repo", "update", repoName}
 	updateCmd := exec.CommandContext(ctx, "helm", updateArgs...)
-	updateCmd.Env = addCmd.Env
+	updateCmd.Env = env
 	if output, err := updateCmd.CombinedOutput(); err != nil {
 		_ = SafeRemoveAll(tempDir)
 		if ctx.Err() != nil {
-			return "", "", ctx.Err()
+			return "", nil, "", ctx.Err()
 		}
-		return "", "", fmt.Errorf("failed to update helm repo: %v\noutput: %s", err, output)
+		return "", nil, "", fmt.Errorf("failed to update helm repo: %v\noutput: %s", err, output)
 	}
 
 	chartRef := repoName + "/" + source.Chart
-	return chartRef, tempDir, nil
+	return chartRef, env, tempDir, nil
 }
 
 // addHelmOptions adds Helm-specific options to the command arguments.
@@ -275,10 +294,9 @@ func (r *HelmRenderer) addHelmOptions(args []string, helm *cluster.ApplicationSo
 		args = append(args, "--set-file", fmt.Sprintf("%s=%s", fileParam.Name, resolvedPath))
 	}
 
-	// Add helm version
-	if helm.Version != "" {
-		args = append(args, "--version", helm.Version)
-	}
+	// Note: helm.Version is the Helm binary version to use for templating
+	// (e.g. "3"), not a chart version, so it is intentionally not passed
+	// as --version. The tool always uses the helm binary on PATH.
 
 	return args, tempFiles, nil
 }

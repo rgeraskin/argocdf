@@ -5,7 +5,11 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/rgeraskin/argocdf/internal/cluster"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestResolveValueFilePath(t *testing.T) {
@@ -308,6 +312,173 @@ func TestHelmSkipRefresh(t *testing.T) {
 				t.Errorf("HelmSkipRefresh = %v, want %v", r.opts.HelmSkipRefresh, tt.wantSkipRefresh)
 			}
 		})
+	}
+}
+
+// countArg counts how many times an argument appears in args.
+func countArg(args []string, arg string) int {
+	count := 0
+	for _, a := range args {
+		if a == arg {
+			count++
+		}
+	}
+	return count
+}
+
+// argValue returns the value following the first occurrence of flag in args,
+// or "" if the flag is not present.
+func argValue(args []string, flag string) string {
+	for i, a := range args {
+		if a == flag && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
+func TestBuildArgs_LocalChartIgnoresHelmVersion(t *testing.T) {
+	// helm.Version is the Helm binary version ("3"), not a chart version,
+	// so it must not be passed as --version.
+	app := &cluster.Application{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-app"},
+	}
+	source := &cluster.ApplicationSource{
+		RepoURL: "https://github.com/example/repo.git",
+		Path:    "charts/myapp",
+		Helm: &cluster.ApplicationSourceHelm{
+			Version: "3",
+		},
+	}
+
+	r := NewHelmRenderer(RenderOptions{})
+	args, env, tempDir, tempFiles, err := r.buildArgs(context.TODO(), app, source, t.TempDir())
+	if err != nil {
+		t.Fatalf("buildArgs() unexpected error = %v", err)
+	}
+	if count := countArg(args, "--version"); count != 0 {
+		t.Errorf("buildArgs() args = %v, want no --version flag, got %d", args, count)
+	}
+	if env != nil {
+		t.Errorf("buildArgs() env = %v, want nil for local charts", env)
+	}
+	if tempDir != "" {
+		t.Errorf("buildArgs() tempDir = %q, want empty for local charts", tempDir)
+	}
+	if len(tempFiles) != 0 {
+		t.Errorf("buildArgs() tempFiles = %v, want none", tempFiles)
+	}
+}
+
+func TestBuildArgs_OCIChart(t *testing.T) {
+	tests := []struct {
+		name           string
+		targetRevision string
+		helmVersion    string
+		wantVersion    string
+	}{
+		{
+			name:           "pinned revision becomes --version",
+			targetRevision: "1.2.3",
+			wantVersion:    "1.2.3",
+		},
+		{
+			name:           "HEAD revision omits --version",
+			targetRevision: "HEAD",
+			wantVersion:    "",
+		},
+		{
+			name:           "empty revision omits --version",
+			targetRevision: "",
+			wantVersion:    "",
+		},
+		{
+			name:           "helm.Version does not produce a second --version",
+			targetRevision: "1.2.3",
+			helmVersion:    "3",
+			wantVersion:    "1.2.3",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			app := &cluster.Application{
+				ObjectMeta: metav1.ObjectMeta{Name: "my-app"},
+			}
+			source := &cluster.ApplicationSource{
+				RepoURL:        "oci://registry.example.com/charts",
+				Chart:          "mychart",
+				TargetRevision: tt.targetRevision,
+			}
+			if tt.helmVersion != "" {
+				source.Helm = &cluster.ApplicationSourceHelm{Version: tt.helmVersion}
+			}
+
+			r := NewHelmRenderer(RenderOptions{})
+			args, env, tempDir, _, err := r.buildArgs(context.TODO(), app, source, "")
+			if err != nil {
+				t.Fatalf("buildArgs() unexpected error = %v", err)
+			}
+
+			// Chart ref must be untagged; the version goes via --version
+			wantRef := "oci://registry.example.com/charts/mychart"
+			if countArg(args, wantRef) != 1 {
+				t.Errorf("buildArgs() args = %v, want untagged chart ref %q", args, wantRef)
+			}
+			for _, a := range args {
+				if strings.HasPrefix(a, wantRef+":") {
+					t.Errorf("buildArgs() args = %v, chart ref must not include a tag", args)
+				}
+			}
+
+			wantCount := 0
+			if tt.wantVersion != "" {
+				wantCount = 1
+			}
+			if count := countArg(args, "--version"); count != wantCount {
+				t.Errorf("buildArgs() args = %v, want %d --version flag(s), got %d", args, wantCount, count)
+			}
+			if got := argValue(args, "--version"); got != tt.wantVersion {
+				t.Errorf("buildArgs() --version = %q, want %q", got, tt.wantVersion)
+			}
+
+			// OCI charts don't need an isolated environment or temp dir
+			if env != nil {
+				t.Errorf("buildArgs() env = %v, want nil for OCI charts", env)
+			}
+			if tempDir != "" {
+				t.Errorf("buildArgs() tempDir = %q, want empty for OCI charts", tempDir)
+			}
+		})
+	}
+}
+
+func TestIsolatedHelmEnv(t *testing.T) {
+	tempDir := t.TempDir()
+	env := isolatedHelmEnv(tempDir)
+
+	wantVars := map[string]string{
+		"HELM_CACHE_HOME":  filepath.Join(tempDir, "cache"),
+		"HELM_CONFIG_HOME": filepath.Join(tempDir, "config"),
+		"HELM_DATA_HOME":   filepath.Join(tempDir, "data"),
+	}
+	for name, wantValue := range wantVars {
+		found := false
+		for _, entry := range env {
+			if entry == name+"="+wantValue {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("isolatedHelmEnv() missing %s=%s in %v", name, wantValue, env)
+		}
+	}
+
+	// The isolated env must extend the process environment, not replace it,
+	// so helm still finds PATH, HOME, etc.
+	if len(env) < len(os.Environ()) {
+		t.Errorf("isolatedHelmEnv() len = %d, want at least %d (os.Environ())", len(env), len(os.Environ()))
 	}
 }
 
