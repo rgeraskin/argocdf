@@ -10,6 +10,7 @@ import (
 	"github.com/rgeraskin/argocdf/internal/git"
 	"github.com/rgeraskin/argocdf/internal/output"
 	"github.com/rgeraskin/argocdf/internal/render"
+	"github.com/rgeraskin/argocdf/internal/rendercache"
 )
 
 // Factory creates and configures all dependencies.
@@ -52,6 +53,26 @@ func (f *Factory) CreateRenderFactory(kubeVersion string) *render.Factory {
 		HelmSkipRefresh:         f.config.HelmSkipRefresh,
 	}
 	return render.NewFactory(opts)
+}
+
+// CreateRenderCache creates the persistent render cache, or returns nil when
+// caching is disabled via --no-cache. When the cache directory cannot be
+// prepared it returns an error; callers degrade to normal rendering.
+func (f *Factory) CreateRenderCache() (*rendercache.Cache, error) {
+	if f.config.NoCache {
+		return nil, nil
+	}
+
+	dir := f.config.CacheDir
+	if dir == "" {
+		d, err := rendercache.DefaultDir()
+		if err != nil {
+			return nil, err
+		}
+		dir = d
+	}
+
+	return rendercache.New(dir, f.logger)
 }
 
 // CreateManifestDiffer creates a manifest differ.

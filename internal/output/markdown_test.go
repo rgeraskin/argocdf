@@ -76,8 +76,8 @@ func TestMarkdownWriter_WriteHeader(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			tempDir, _ := os.MkdirTemp("", "markdown-test-")
 			defer func() {
-		_ = os.RemoveAll(tempDir)
-	}()
+				_ = os.RemoveAll(tempDir)
+			}()
 
 			filePath := filepath.Join(tempDir, "test.md")
 			w, _ := NewMarkdownWriter(filePath, tt.format, 3)
@@ -173,8 +173,8 @@ func TestMarkdownWriter_WriteAppDiff_GitHub(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			tempDir, _ := os.MkdirTemp("", "markdown-test-")
 			defer func() {
-		_ = os.RemoveAll(tempDir)
-	}()
+				_ = os.RemoveAll(tempDir)
+			}()
 
 			filePath := filepath.Join(tempDir, "test.md")
 			w, _ := NewMarkdownWriter(filePath, MarkdownFormatGitHub, 3)
@@ -280,8 +280,8 @@ func TestMarkdownWriter_WriteSummary(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			tempDir, _ := os.MkdirTemp("", "markdown-test-")
 			defer func() {
-		_ = os.RemoveAll(tempDir)
-	}()
+				_ = os.RemoveAll(tempDir)
+			}()
 
 			filePath := filepath.Join(tempDir, "test.md")
 			w, _ := NewMarkdownWriter(filePath, tt.format, 3)

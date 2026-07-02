@@ -42,6 +42,10 @@ var (
 
 	// Helm options
 	helmSkipRefresh bool
+
+	// Render cache options
+	noCache  bool
+	cacheDir string
 )
 
 func main() {
@@ -127,6 +131,12 @@ Examples:
 	rootCmd.Flags().IntVarP(&unifiedContext, "context-lines", "U", config.DefaultUnifiedContext,
 		"Number of context lines in unified diff output (-1 for unlimited)")
 
+	// Render cache flags
+	rootCmd.Flags().BoolVar(&noCache, "no-cache", false,
+		"Disable the persistent render cache")
+	rootCmd.Flags().StringVar(&cacheDir, "cache-dir", "",
+		"Render cache directory (default: <user cache dir>/argocdf/render)")
+
 	// Recursion flags
 	rootCmd.Flags().BoolVar(&noRecursive, "no-recursive", false, "Disable apps-of-apps recursion")
 	rootCmd.Flags().IntVar(&maxDepth, "max-depth", config.DefaultMaxDepth, "Maximum recursion depth")
@@ -199,6 +209,8 @@ func runMain(cmd *cobra.Command, args []string) error {
 		KustomizeBuildOptions:   kustomizeBuildOptions,
 		KustomizeLoadRestrictor: kustomizeLoadRestrictor,
 		HelmSkipRefresh:         helmSkipRefresh,
+		NoCache:                 noCache,
+		CacheDir:                cacheDir,
 	}
 
 	// Auto-detect missing values

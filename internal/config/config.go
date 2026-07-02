@@ -64,6 +64,10 @@ type Config struct {
 
 	// Helm options
 	HelmSkipRefresh bool
+
+	// Render cache options
+	NoCache  bool   // Disable the persistent render cache
+	CacheDir string // Cache directory (empty = os.UserCacheDir()/argocdf/render)
 }
 
 // ParseFileOutput parses a "format:path" string into a FileOutput.
