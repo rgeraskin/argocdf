@@ -434,3 +434,51 @@ func TestTreeHash(t *testing.T) {
 		t.Error("expected error for missing path")
 	}
 }
+
+func TestRemoteRefAndAncestry(t *testing.T) {
+	dir := initFixtureRepo(t)
+	gitRun(t, dir, "checkout", "-B", "main")
+
+	repo, err := Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	c1, err := repo.CommitHash("HEAD")
+	if err != nil {
+		t.Fatalf("CommitHash: %v", err)
+	}
+
+	// No origin ref yet.
+	if repo.RemoteRefExists("origin/main") {
+		t.Fatal("RemoteRefExists(origin/main) = true before ref created")
+	}
+
+	// Advance main and register origin/main at the new tip.
+	commitFile(t, dir, "next.txt", "next", "c2")
+	c2, err := repo.CommitHash("HEAD")
+	if err != nil {
+		t.Fatalf("CommitHash: %v", err)
+	}
+	gitRun(t, dir, "update-ref", "refs/remotes/origin/main", c2)
+
+	if !repo.RemoteRefExists("origin/main") {
+		t.Error("RemoteRefExists(origin/main) = false after ref created")
+	}
+
+	// c1 is an ancestor of c2, but not vice versa.
+	if !repo.IsAncestor(c1, c2) {
+		t.Errorf("IsAncestor(%s, %s) = false, want true", c1, c2)
+	}
+	if repo.IsAncestor(c2, c1) {
+		t.Errorf("IsAncestor(%s, %s) = true, want false", c2, c1)
+	}
+
+	// One commit between c1 and c2.
+	n, err := repo.CountCommitsBetween(c1, c2)
+	if err != nil {
+		t.Fatalf("CountCommitsBetween: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("CountCommitsBetween(c1, c2) = %d, want 1", n)
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -90,6 +91,32 @@ func (r *Repository) CommitHash(ref string) (string, error) {
 // MergeBase returns the best common ancestor commit of two refs.
 func (r *Repository) MergeBase(ref1, ref2 string) (string, error) {
 	return r.run("merge-base", ref1, ref2)
+}
+
+// RemoteRefExists reports whether the given ref resolves to a commit. It is
+// intended for remote-tracking refs like "origin/main", but works for any ref.
+func (r *Repository) RemoteRefExists(ref string) bool {
+	return r.runSilent("rev-parse", "--verify", ref+"^{commit}")
+}
+
+// IsAncestor reports whether ancestor is an ancestor of descendant (i.e. the
+// history at descendant contains ancestor). Returns false on any git error.
+func (r *Repository) IsAncestor(ancestor, descendant string) bool {
+	return r.runSilent("merge-base", "--is-ancestor", ancestor, descendant)
+}
+
+// CountCommitsBetween returns the number of commits reachable from to but not
+// from, i.e. `git rev-list --count from..to`.
+func (r *Repository) CountCommitsBetween(from, to string) (int, error) {
+	out, err := r.run("rev-list", "--count", from+".."+to)
+	if err != nil {
+		return 0, err
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(out))
+	if err != nil {
+		return 0, fmt.Errorf("unexpected rev-list output %q: %w", out, err)
+	}
+	return n, nil
 }
 
 // TreeHash returns the git object (tree or blob) hash for the given path at the

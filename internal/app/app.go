@@ -3,6 +3,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -20,6 +21,28 @@ import (
 	"github.com/rgeraskin/argocdf/internal/rendercache"
 	"github.com/rgeraskin/argocdf/internal/types"
 )
+
+// ErrChangesPresent is returned by Run (only when Config.ExitCode is set) after
+// output has been written, to signal that at least one application changed. main
+// maps it to the detailed exit code 2, following the convention of `diff` and
+// `terraform plan -detailed-exitcode`.
+var ErrChangesPresent = errors.New("changes present")
+
+// ExitCodeFor maps a Run result to a process exit code:
+//
+//	0 = success, no changes
+//	1 = error
+//	2 = changes present (Config.ExitCode enabled)
+func ExitCodeFor(err error) int {
+	switch {
+	case err == nil:
+		return 0
+	case errors.Is(err, ErrChangesPresent):
+		return 2
+	default:
+		return 1
+	}
+}
 
 // App is the main application orchestrator.
 type App struct {
@@ -105,6 +128,12 @@ func (a *App) Run(ctx context.Context) error {
 		return fmt.Errorf("failed to write output: %w", err)
 	}
 
+	// After output is fully flushed, signal "changes present" so the caller can
+	// map it to a detailed exit code (used by CI). Errors don't reach here.
+	if a.cfg.ExitCode && summary.AppsWithChanges > 0 {
+		return ErrChangesPresent
+	}
+
 	return nil
 }
 
@@ -185,16 +214,71 @@ func (a *App) initialize(ctx context.Context) error {
 // change detection and base-side rendering both use PR-style diff semantics.
 // Falls back to the base branch tip if the merge base cannot be resolved
 // (e.g., unrelated histories).
+//
+// It prefers the remote-tracking ref origin/<base> over the local base branch
+// when the local branch is stale (strictly behind origin/<base>), or when no
+// local base branch exists. A stale local base makes upstream commits that
+// landed on origin/<base> after the PR branch was cut appear as part of the PR
+// diff. No network fetch is performed; only refs already present locally are
+// consulted.
 func (a *App) resolveBaseRef() string {
-	mergeBase, err := a.repo.MergeBase(a.cfg.BaseBranch, a.cfg.TargetBranch)
+	effectiveBase := a.effectiveBaseBranch()
+
+	mergeBase, err := a.repo.MergeBase(effectiveBase, a.cfg.TargetBranch)
 	if err != nil {
 		a.logger.Warn("Failed to resolve merge base, using base branch tip",
-			"base", a.cfg.BaseBranch,
+			"base", effectiveBase,
 			"target", a.cfg.TargetBranch,
 			"error", err)
-		return a.cfg.BaseBranch
+		return effectiveBase
 	}
 	return mergeBase
+}
+
+// effectiveBaseBranch chooses between the local base branch and its
+// remote-tracking ref origin/<base>. See resolveBaseRef for the rationale.
+func (a *App) effectiveBaseBranch() string {
+	base := a.cfg.BaseBranch
+
+	// An explicitly remote base (e.g. "origin/main") is used verbatim; there is
+	// no "origin/origin/main" to consult.
+	if strings.HasPrefix(base, "origin/") {
+		return base
+	}
+
+	remoteRef := "origin/" + base
+	if !a.repo.RemoteRefExists(remoteRef) {
+		return base
+	}
+
+	localHash, localErr := a.repo.CommitHash(base)
+	if localErr != nil {
+		// No local base branch (common in CI checkouts) but origin/<base>
+		// exists: use the remote ref.
+		a.logger.Debug("local base branch not found; using remote-tracking ref",
+			"base", base, "remote", remoteRef)
+		return remoteRef
+	}
+
+	remoteHash, remoteErr := a.repo.CommitHash(remoteRef)
+	if remoteErr != nil || localHash == remoteHash {
+		return base
+	}
+
+	// Local and remote differ. Prefer origin/<base> only when the local base is
+	// strictly behind it (it's an ancestor); otherwise the local base is ahead or
+	// diverged and we keep it.
+	if a.repo.IsAncestor(base, remoteRef) {
+		n, _ := a.repo.CountCommitsBetween(base, remoteRef)
+		a.logger.Warn(fmt.Sprintf("local base branch is %d commit(s) behind %s; using %s",
+			n, remoteRef, remoteRef),
+			"base", base, "remote", remoteRef)
+		return remoteRef
+	}
+
+	a.logger.Debug("local base branch is ahead of or diverged from remote; using local base",
+		"base", base, "remote", remoteRef)
+	return base
 }
 
 // fetchApplications retrieves ArgoCD applications from the cluster.

@@ -108,6 +108,7 @@ func (f *Factory) CreateOutputWriter() (output.Writer, error) {
 			if err != nil {
 				return nil, err
 			}
+			mdWriter.SetMarker(f.config.Marker)
 			writers = append(writers, mdWriter)
 
 		case "md-unified":
@@ -115,6 +116,7 @@ func (f *Factory) CreateOutputWriter() (output.Writer, error) {
 			if err != nil {
 				return nil, err
 			}
+			mdWriter.SetMarker(f.config.Marker)
 			writers = append(writers, mdWriter)
 
 		case "html-side-by-side":

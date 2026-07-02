@@ -22,12 +22,28 @@ const (
 	MarkdownFormatAtlantis MarkdownFormat = "atlantis"
 )
 
+// markerBase is the invisible HTML comment marker emitted as the first line of
+// markdown output. CI can match on it to find and upsert its own PR comment.
+const markerBase = "argocdf-diff"
+
+// CommentMarker returns the invisible HTML comment marker that identifies an
+// argocdf markdown report. An empty id yields the default marker
+// ("<!-- argocdf-diff -->"); a non-empty id scopes it ("<!-- argocdf-diff:<id> -->")
+// so multiple independent reports can coexist on a single PR.
+func CommentMarker(id string) string {
+	if id == "" {
+		return "<!-- " + markerBase + " -->"
+	}
+	return fmt.Sprintf("<!-- %s:%s -->", markerBase, id)
+}
+
 // MarkdownWriter writes diff output as GitHub-compatible markdown.
 type MarkdownWriter struct {
 	baseFileWriter
 	format       MarkdownFormat
 	summaryOnly  bool
-	contextLines int // for unified diff context in md-unified format
+	contextLines int    // for unified diff context in md-unified format
+	markerID     string // marker id for the PR-comment upsert marker (empty = default)
 }
 
 // NewMarkdownWriter creates a new MarkdownWriter.
@@ -45,15 +61,20 @@ func NewMarkdownWriter(filePath string, format MarkdownFormat, contextLines int)
 	}, nil
 }
 
-// WriteHeader writes the markdown header.
+// SetMarker sets the marker id used for the PR-comment upsert marker. An empty
+// id keeps the default marker.
+func (m *MarkdownWriter) SetMarker(id string) {
+	m.markerID = id
+}
+
+// WriteHeader writes the markdown header, preceded by the invisible comment
+// marker so CI can find and update its own PR comment.
 func (m *MarkdownWriter) WriteHeader(title string) error {
-	if m.format == MarkdownFormatAtlantis {
-		// Atlantis format: title only, summary will be written separately
-		_, err := io.WriteString(m.file, fmt.Sprintf("## %s\n\n", html.EscapeString(title)))
+	if _, err := io.WriteString(m.file, CommentMarker(m.markerID)+"\n"); err != nil {
 		return err
 	}
-
-	// GitHub format: simple header
+	// Both GitHub and Atlantis formats use a simple title header; the Atlantis
+	// summary is written separately later.
 	_, err := io.WriteString(m.file, fmt.Sprintf("## %s\n\n", html.EscapeString(title)))
 	return err
 }

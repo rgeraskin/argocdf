@@ -68,6 +68,10 @@ type Config struct {
 	// Render cache options
 	NoCache  bool   // Disable the persistent render cache
 	CacheDir string // Cache directory (empty = os.UserCacheDir()/argocdf/render)
+
+	// CI options
+	ExitCode bool   // Exit 2 when changes are present (like `diff`/`terraform plan -detailed-exitcode`)
+	Marker   string // Optional marker id for the PR-comment upsert marker (empty = default marker)
 }
 
 // ParseFileOutput parses a "format:path" string into a FileOutput.
