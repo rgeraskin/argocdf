@@ -177,37 +177,51 @@ func (d *Differ) compareMaps(path string, oldMap, newMap map[string]interface{},
 // This produces better diffs for Kubernetes resources where list items often have
 // a "name" field (containers, volumes, env vars, ports, etc.).
 func (d *Differ) compareSlices(path string, oldSlice, newSlice []interface{}, result *DiffResult) {
-	// Try name-based matching first
-	oldByName, oldOrder := d.indexSliceByName(oldSlice)
-	newByName, newOrder := d.indexSliceByName(newSlice)
+	// Use name-based matching only when it is fully sound for BOTH slices:
+	// every item is a map with an extractable name, and names are unique within
+	// each slice. Otherwise fall back to index-based comparison so that items
+	// without a name (e.g. a toleration with only {operator: Exists}) are never
+	// silently dropped, and duplicate names (e.g. two ports differing only by
+	// protocol) never collapse into a single entry or get double-reported.
+	oldByName, oldOrder, oldOK := d.indexSliceByName(oldSlice)
+	newByName, newOrder, newOK := d.indexSliceByName(newSlice)
 
-	// If both slices have named items (at least some), use name-based comparison
-	if len(oldByName) > 0 || len(newByName) > 0 {
+	if oldOK && newOK {
 		d.compareSlicesByName(path, oldByName, oldOrder, newByName, newOrder, result)
 		return
 	}
 
-	// Fall back to index-based comparison for slices without named items
+	// Fall back to index-based comparison when name matching is not sound.
 	d.compareSlicesByIndex(path, oldSlice, newSlice, result)
 }
 
-// indexSliceByName extracts items with a "name" field and returns them indexed by name.
-// Also returns the order of names for consistent output.
-// Items without names are not included in the map.
-func (d *Differ) indexSliceByName(slice []interface{}) (map[string]interface{}, []string) {
+// indexSliceByName indexes slice items by their extracted name and reports
+// whether name-based matching is sound for this slice. It is sound only when
+// every item is a map with an extractable name and all names are unique within
+// the slice. An empty slice is vacuously sound. When matching is not sound the
+// returned map and order are nil and the caller must fall back to index-based
+// comparison.
+func (d *Differ) indexSliceByName(slice []interface{}) (map[string]interface{}, []string, bool) {
 	byName := make(map[string]interface{})
-	var order []string
+	order := make([]string, 0, len(slice))
 
 	for _, item := range slice {
-		if m, ok := item.(map[string]interface{}); ok {
-			if name, ok := d.extractItemName(m); ok {
-				byName[name] = item
-				order = append(order, name)
-			}
+		m, ok := item.(map[string]interface{})
+		if !ok {
+			return nil, nil, false
 		}
+		name, ok := d.extractItemName(m)
+		if !ok {
+			return nil, nil, false
+		}
+		if _, dup := byName[name]; dup {
+			return nil, nil, false
+		}
+		byName[name] = item
+		order = append(order, name)
 	}
 
-	return byName, order
+	return byName, order, true
 }
 
 // extractItemName tries to extract a unique identifier from a slice item.

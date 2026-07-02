@@ -38,6 +38,46 @@ func TestManifestKey(t *testing.T) {
 			},
 			wantKey: "kube-system/Deployment/coredns",
 		},
+		{
+			name: "core group apiVersion omits group segment",
+			manifest: Manifest{
+				APIVersion: "v1",
+				Namespace:  "default",
+				Kind:       "ConfigMap",
+				Name:       "my-config",
+			},
+			wantKey: "default/ConfigMap/my-config",
+		},
+		{
+			name: "namespaced resource with non-core group includes group",
+			manifest: Manifest{
+				APIVersion: "cert-manager.io/v1",
+				Namespace:  "default",
+				Kind:       "Certificate",
+				Name:       "my-cert",
+			},
+			wantKey: "default/cert-manager.io/Certificate/my-cert",
+		},
+		{
+			name: "cluster-scoped resource with group",
+			manifest: Manifest{
+				APIVersion: "rbac.authorization.k8s.io/v1",
+				Kind:       "ClusterRole",
+				Name:       "admin",
+			},
+			wantKey: "rbac.authorization.k8s.io/ClusterRole/admin",
+		},
+		{
+			name: "version bump within a group keeps the same key",
+			manifest: Manifest{
+				APIVersion: "cert-manager.io/v1beta1",
+				Namespace:  "default",
+				Kind:       "Certificate",
+				Name:       "my-cert",
+			},
+			// group but not version is included, so v1beta1 and v1 share a key.
+			wantKey: "default/cert-manager.io/Certificate/my-cert",
+		},
 	}
 
 	for _, tt := range tests {
@@ -329,6 +369,99 @@ data:
 			}
 		})
 	}
+}
+
+func TestDiffManifestSets_APIGroupDisambiguation(t *testing.T) {
+	differ := NewManifestDiffer()
+
+	t.Run("same kind and name in different groups are distinct manifests", func(t *testing.T) {
+		// Two "Certificate" resources with the same name/namespace but from
+		// different API groups must be tracked independently. Modifying one must
+		// not affect the other, and neither may be dropped from the comparison.
+		oldContent := `apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: my-cert
+  namespace: default
+spec:
+  secretName: cm-secret
+---
+apiVersion: other-operator.io/v1
+kind: Certificate
+metadata:
+  name: my-cert
+  namespace: default
+spec:
+  secretName: oo-secret`
+		newContent := `apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: my-cert
+  namespace: default
+spec:
+  secretName: cm-secret-changed
+---
+apiVersion: other-operator.io/v1
+kind: Certificate
+metadata:
+  name: my-cert
+  namespace: default
+spec:
+  secretName: oo-secret`
+
+		result, err := differ.DiffManifests(oldContent, newContent)
+		if err != nil {
+			t.Fatalf("DiffManifests() error = %v", err)
+		}
+
+		// The cert-manager Certificate changed; the other-operator one did not.
+		if len(result.Modified) != 1 {
+			t.Errorf("Modified = %d, want 1", len(result.Modified))
+		}
+		if result.UnchangedCount != 1 {
+			t.Errorf("UnchangedCount = %d, want 1", result.UnchangedCount)
+		}
+		if len(result.Added) != 0 || len(result.Removed) != 0 {
+			t.Errorf("Added/Removed = %d/%d, want 0/0", len(result.Added), len(result.Removed))
+		}
+		if len(result.Modified) == 1 {
+			wantKey := "default/cert-manager.io/Certificate/my-cert"
+			if result.Modified[0].Key != wantKey {
+				t.Errorf("Modified key = %q, want %q", result.Modified[0].Key, wantKey)
+			}
+		}
+	})
+
+	t.Run("version bump within a group is reported as modified", func(t *testing.T) {
+		// Bumping v1beta1 -> v1 within the same group must compare as a
+		// modification, not as add+remove.
+		oldContent := `apiVersion: cert-manager.io/v1beta1
+kind: Certificate
+metadata:
+  name: my-cert
+  namespace: default
+spec:
+  secretName: cm-secret`
+		newContent := `apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: my-cert
+  namespace: default
+spec:
+  secretName: cm-secret`
+
+		result, err := differ.DiffManifests(oldContent, newContent)
+		if err != nil {
+			t.Fatalf("DiffManifests() error = %v", err)
+		}
+
+		if len(result.Modified) != 1 {
+			t.Errorf("Modified = %d, want 1 (version bump should be a modification)", len(result.Modified))
+		}
+		if len(result.Added) != 0 || len(result.Removed) != 0 {
+			t.Errorf("Added/Removed = %d/%d, want 0/0 (must not be add+remove)", len(result.Added), len(result.Removed))
+		}
+	})
 }
 
 func TestExtractApplications(t *testing.T) {

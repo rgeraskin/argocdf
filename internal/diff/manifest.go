@@ -26,12 +26,34 @@ type Manifest struct {
 	Namespace  string
 }
 
-// Key returns a unique identifier for this manifest (namespace/kind/name).
+// Key returns a unique identifier for this manifest.
+// The identifier includes the API group (but not the version) so that resources
+// with the same kind and name in different API groups (e.g. two "Certificate"
+// resources from different operators) do not collide. Version bumps within a
+// single group (e.g. v1beta1 -> v1) still share a key and thus compare as
+// modified rather than as add+remove.
+// Format: [namespace/][group/]Kind/name — the namespace and group segments are
+// omitted when empty (cluster-scoped resources and the core API group).
 func (m *Manifest) Key() string {
+	parts := make([]string, 0, 4)
 	if m.Namespace != "" {
-		return fmt.Sprintf("%s/%s/%s", m.Namespace, m.Kind, m.Name)
+		parts = append(parts, m.Namespace)
 	}
-	return fmt.Sprintf("%s/%s", m.Kind, m.Name)
+	if group := apiGroup(m.APIVersion); group != "" {
+		parts = append(parts, group)
+	}
+	parts = append(parts, m.Kind, m.Name)
+	return strings.Join(parts, "/")
+}
+
+// apiGroup returns the API group portion of an apiVersion string.
+// For "group/version" (e.g. "cert-manager.io/v1") it returns the group; for a
+// core-group apiVersion (e.g. "v1") it returns an empty string.
+func apiGroup(apiVersion string) string {
+	if i := strings.Index(apiVersion, "/"); i >= 0 {
+		return apiVersion[:i]
+	}
+	return ""
 }
 
 // ManifestParser parses YAML manifests.
