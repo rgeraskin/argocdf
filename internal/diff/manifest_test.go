@@ -736,3 +736,71 @@ spec:
 		t.Errorf("HasChanges = false, want true")
 	}
 }
+
+func TestDiffManifests_SideLabeledWarnings(t *testing.T) {
+	differ := NewManifestDiffer()
+
+	clean := `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app
+data:
+  a: "1"`
+
+	// Same ConfigMap but with a duplicate key in data (parse warning).
+	dupKey := `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app
+data:
+  a: "1"
+  a: "2"`
+
+	// Warning only in the target content is labeled [target].
+	result, err := differ.DiffManifests(clean, dupKey)
+	if err != nil {
+		t.Fatalf("DiffManifests() error = %v", err)
+	}
+	if len(result.ParseWarnings) == 0 {
+		t.Fatal("expected parse warnings, got none")
+	}
+	for _, w := range result.ParseWarnings {
+		if !strings.HasPrefix(w, "[target] ") {
+			t.Errorf("warning %q should be labeled [target]", w)
+		}
+	}
+
+	// The same issue on both sides yields one [base] and one [target] entry.
+	result, err = differ.DiffManifests(dupKey, dupKey)
+	if err != nil {
+		t.Fatalf("DiffManifests() error = %v", err)
+	}
+	var base, target bool
+	for _, w := range result.ParseWarnings {
+		if strings.HasPrefix(w, "[base] ") {
+			base = true
+		}
+		if strings.HasPrefix(w, "[target] ") {
+			target = true
+		}
+	}
+	if !base || !target {
+		t.Errorf("expected both [base] and [target] warnings, got %v", result.ParseWarnings)
+	}
+
+	// Duplicate manifests only in the old set are labeled [base].
+	twoDocs := clean + "\n---\n" + clean
+	result, err = differ.DiffManifests(twoDocs, clean)
+	if err != nil {
+		t.Fatalf("DiffManifests() error = %v", err)
+	}
+	foundBaseDup := false
+	for _, w := range result.ParseWarnings {
+		if strings.HasPrefix(w, "[base] duplicate manifest") {
+			foundBaseDup = true
+		}
+	}
+	if !foundBaseDup {
+		t.Errorf("expected [base]-labeled duplicate-manifest warning, got %v", result.ParseWarnings)
+	}
+}
