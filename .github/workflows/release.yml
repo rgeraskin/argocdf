@@ -1,0 +1,35 @@
+name: release
+
+"on":
+  push:
+    # run only against version tags
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          # Pinned: our .goreleaser.yaml still uses the deprecated-but-functional
+          # `brews` (Formula). Do NOT use "~> v2" / "latest" here — a future
+          # release that removes `brews` would break publishing without warning.
+          version: "2.16.0"
+          args: release --clean
+        env:
+          # GH_PAT needs `contents: write` on this repo and the homebrew tap
+          # repo so GoReleaser can push the generated Formula.
+          GITHUB_TOKEN: ${{ secrets.GH_PAT }}

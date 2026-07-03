@@ -17,9 +17,14 @@ import (
 	"github.com/rgeraskin/argocdf/internal/rendercache"
 )
 
+// Build metadata. Defaults are overridden at release time by GoReleaser via
+// -ldflags "-X main.Version=... -X main.Commit=... -X main.Date=...". For plain
+// `go install`/`go build` (no ldflags) they fall back to the embedded build
+// info, so the version is never hardcoded in more than one place.
 var (
-	// Version is set at build time
 	Version = "dev"
+	Commit  = ""
+	Date    = ""
 
 	// Config flags
 	kubeconfigPath string
@@ -170,7 +175,7 @@ Examples:
 		Use:   "version",
 		Short: "Print version information",
 		Run: func(cmd *cobra.Command, args []string) {
-			cmd.Printf("argocdf version %s\n", Version)
+			cmd.Printf("argocdf version %s\n", versionString())
 		},
 	})
 

@@ -1,0 +1,46 @@
+name: ci
+
+"on":
+  push:
+    branches:
+      - master
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        # Do not init the e2e submodule: it is an SSH-only fixtures repo with no
+        # Go sources, so `go test ./...` never needs it and cloning would fail.
+        with:
+          submodules: false
+      - name: Set up mise
+        uses: jdx/mise-action@v2
+        with:
+          # Only the toolchain unit tests need; skip kind/kubectl/yq (e2e-only).
+          install_args: go golangci-lint
+      - name: Vet
+        run: go vet ./...
+      - name: Build
+        run: go build ./...
+      - name: Test
+        run: go test ./...
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: Set up mise
+        uses: jdx/mise-action@v2
+        with:
+          install_args: go golangci-lint
+      - name: Lint
+        run: golangci-lint run ./...

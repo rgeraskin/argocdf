@@ -3,4 +3,5 @@ testdata
 /argocdf
 /argocdf-report.html
 reports
+/dist/
 .claude/worktrees/

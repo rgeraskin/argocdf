@@ -1,0 +1,79 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+# vim: set ts=2 sw=2 tw=0 fo=cnqoj
+
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - main: ./cmd/argocdf
+    binary: argocdf
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.Version={{ .Version }}
+      - -X main.Commit={{ .Commit }}
+      - -X main.Date={{ .Date }}
+    goos:
+      - linux
+      - windows
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - formats:
+      - tar.gz
+    # this name template makes the OS and Arch compatible with the results of `uname`.
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+      {{- if .Arm }}v{{ .Arm }}{{ end }}
+    # use zip for windows archives
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "^ci:"
+
+# NOTE: `brews` is deprecated in favor of `homebrew_casks` but still fully
+# functional in the pinned GoReleaser version (it emits a warning, then writes a
+# real Formula). A Formula is the right abstraction for a CLI and, unlike a Cask,
+# its binary is not Gatekeeper-quarantined, so no xattr dequarantine hack is
+# needed. The GoReleaser version is pinned in .github/workflows/release.yml so a
+# future release that actually removes `brews` cannot break us unexpectedly.
+brews:
+  - name: argocdf
+    homepage: https://github.com/rgeraskin/argocdf
+    description: ArgoCD Diff Tool - show manifest diffs for ArgoCD apps affected by a PR
+    license: MIT
+
+    # argocdf shells out to helm and kustomize to render manifests.
+    dependencies:
+      - name: helm
+      - name: kustomize
+
+    directory: Formula
+    repository:
+      owner: rgeraskin
+      name: homebrew-homebrew
