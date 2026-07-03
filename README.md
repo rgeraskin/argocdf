@@ -9,24 +9,45 @@
 - **Helm rendering**: Renders Helm charts (local and remote repositories, including OCI)
 - **Kustomize rendering**: Renders Kustomize directories
 - **Apps-of-apps**: Recursively discovers and diffs child applications from rendered manifests
-- **Multiple outputs**: Terminal (colored) and HTML report formats
+- **Multiple outputs**: Colored terminal, GitHub-flavored markdown, unified diff, and interactive HTML report
 - **Semantic diffing**: Identifies added, removed, and modified resources by kind/name/namespace
+- **Parallel rendering**: Renders affected applications concurrently from ephemeral git worktrees
+- **Persistent cache**: Content-addressed render/chart cache speeds up repeat runs
+- **CI-friendly**: `diff`-style exit codes and stable PR-comment markers for automated pipelines
 
 ## Requirements
 
-- Go 1.21+
 - `helm` binary in PATH (for Helm chart rendering)
 - `kustomize` binary in PATH (for Kustomize rendering)
 - Access to a Kubernetes cluster with ArgoCD Applications
+- Go 1.24+ (only if installing via `go install` or building from source)
 
 ## Installation
 
-```bash
-# From source
-go install github.com/rgeraskin/argocdf/cmd/argocdf@latest
+### Homebrew
 
-# Or build locally
-make build
+```bash
+brew install rgeraskin/homebrew/argocdf
+```
+
+### Go
+
+```bash
+go install github.com/rgeraskin/argocdf/cmd/argocdf@latest
+```
+
+### Binary download
+
+Grab a prebuilt archive for your OS/arch from the
+[releases page](https://github.com/rgeraskin/argocdf/releases), then extract
+`argocdf` into a directory on your `PATH`.
+
+### From source
+
+```bash
+git clone https://github.com/rgeraskin/argocdf.git
+cd argocdf
+mise run build   # produces ./argocdf
 ```
 
 ## Usage
@@ -89,6 +110,8 @@ ARGOCDF_EXTERNAL_DIFF="delta --side-by-side" argocdf
 | `--kustomize-enable-helm` | Enable Helm chart inflation via kustomize | `false` |
 | `--kustomize-build-options` | Additional kustomize build options (space-separated) | (none) |
 | `--kustomize-load-restrictor` | Load restrictor mode (e.g., `LoadRestrictionsNone`) | (none) |
+| `--helm-skip-refresh` | Skip refreshing the repo cache during `helm dependency build` | `true` |
+| `--no-api-versions` | Do not pass cluster-discovered API versions to helm via `--api-versions` | `false` |
 
 ### Output Flags
 
@@ -111,6 +134,34 @@ ARGOCDF_EXTERNAL_DIFF="delta --side-by-side" argocdf
 |------|-------------|---------|
 | `--no-recursive` | Disable apps-of-apps recursion | `false` |
 | `--max-depth` | Maximum recursion depth | `10` |
+
+### Concurrency Flags
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--concurrency` | Applications to render in parallel (`1` = sequential) | Number of CPUs |
+
+### CI Flags
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--exit-code` | Exit `0` if no changes, `1` on error, `2` if changes are present (like `diff`) | `false` |
+| `--marker` | Marker id for the markdown PR-comment upsert marker | `<!-- argocdf-diff -->` |
+
+### Cache Flags
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--no-cache` | Disable the persistent render cache | `false` |
+| `--cache-dir` | Base directory for render and chart caches | `<user cache dir>/argocdf` |
+
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `argocdf version` | Print version, commit, and build date |
+| `argocdf cache info` | Show cache location, entry count, and total size |
+| `argocdf cache clean` | Remove the entire cache directory |
 
 ## Output Examples
 
@@ -183,21 +234,34 @@ spec:
 
 ## Development
 
+This project uses [mise](https://mise.jdx.dev/) to pin toolchain versions
+(`.mise.toml`) and define tasks. Run `mise tasks` to list them.
+
 ```bash
-# Build
-make build
+# Build (produces ./argocdf)
+mise run build
 
 # Run tests
-make test
+mise run test
 
-# Run with verbose output
-make dev
+# Run in development mode
+mise run dev
 
 # Format code
-make fmt
+mise run fmt
 
 # Run linter
-make lint
+mise run lint
+
+# Run all checks (vet + lint + test), as CI does
+mise run check
+```
+
+### End-to-end tests
+
+```bash
+mise run e2e:bootstrap   # create a kind cluster with ArgoCD CRDs
+mise run e2e:clean       # tear it down
 ```
 
 ## Project Structure
@@ -205,39 +269,24 @@ make lint
 ```
 argocdf/
 ├── cmd/argocdf/
-│   └── main.go                 # CLI entry point (Cobra)
+│   ├── main.go                 # CLI entry point (Cobra), flags, cache/version commands
+│   └── version.go              # Version string assembly (ldflags + build info)
 ├── internal/
-│   ├── app/
-│   │   ├── app.go              # Main orchestrator
-│   │   └── factory.go          # Dependency injection
-│   ├── config/
-│   │   ├── config.go           # Configuration struct
-│   │   └── detect.go           # Auto-detection logic
-│   ├── cluster/
-│   │   ├── client.go           # K8s client-go wrapper
-│   │   └── applications.go     # ArgoCD Application operations
-│   ├── git/
-│   │   ├── repository.go       # Repository operations
-│   │   └── diff.go             # Changed files detection
-│   ├── render/
-│   │   ├── renderer.go         # Renderer interface
-│   │   ├── helm.go             # Helm rendering
-│   │   ├── kustomize.go        # Kustomize rendering
-│   │   └── multisource.go      # Multi-source handling
-│   ├── diff/
-│   │   ├── differ.go           # Diff interface
-│   │   ├── manifest.go         # Manifest comparison
-│   │   └── apps.go             # Recursive app discovery
-│   ├── output/
-│   │   ├── output.go           # Output interface
-│   │   ├── terminal.go         # Terminal output
-│   │   └── html.go             # HTML report
-│   ├── types/
-│   │   └── types.go            # Shared types
-│   └── errors/
-│       └── errors.go           # Custom error types
+│   ├── app/                    # Main orchestrator and dependency-injection factory
+│   ├── config/                 # Configuration struct and auto-detection logic
+│   ├── cluster/                # K8s client-go wrapper, ArgoCD Application operations
+│   ├── git/                    # Repository operations, changed-files detection, worktrees
+│   ├── render/                 # Helm/Kustomize rendering, multi-source, chart cache
+│   ├── rendercache/            # Persistent content-addressed render cache
+│   ├── diff/                   # Manifest comparison and recursive apps-of-apps discovery
+│   ├── output/                 # Terminal, markdown, unified, and HTML writers
+│   ├── types/                  # Shared types
+│   └── errors/                 # Custom error types
+├── e2e/                        # End-to-end test fixtures (git submodule)
+├── .goreleaser.yaml            # Release build configuration
+├── .github/workflows/          # CI and release pipelines
+├── .mise.toml                  # Toolchain versions and task definitions
 ├── go.mod
-├── Makefile
 └── README.md
 ```
 
