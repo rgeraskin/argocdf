@@ -7,10 +7,10 @@ This document outlines the key implementation differences between `argocdf` (thi
 | Aspect | ArgoCD | argocdf |
 |--------|--------|---------|
 | **Where rendering happens** | Dedicated `argocd-repo-server` pod with timeout (90s default) | In-process, same machine as CLI |
-| **Caching** | Aggressive caching with commit SHA as key; Redis-backed | No caching |
-| **Parallel execution** | Parallel Helm manifest generation (v3.0+) | Sequential |
-| **Timeout handling** | Configurable via `ARGOCD_EXEC_TIMEOUT` | No timeout |
-| **Repository clone** | Maintains local clone, reused across requests | Fresh operations each time |
+| **Caching** | Aggressive caching with commit SHA as key; Redis-backed | Persistent file-based caches: content-addressed render cache (keyed by spec, options, and git tree/blob hashes) plus a download cache for pinned remote charts; `--no-cache` disables |
+| **Parallel execution** | Parallel Helm manifest generation (v3.0+) | Parallel rendering within each wave via `--concurrency` (default `min(4, NumCPU)`); discovery between waves is single-threaded |
+| **Timeout handling** | Configurable via `ARGOCD_EXEC_TIMEOUT` | No configurable timeout; SIGINT/SIGTERM cancel in-flight renders via context |
+| **Repository clone** | Maintains local clone, reused across requests | Renders from ephemeral worktrees of the local clone; external `$ref` repos are cloned fresh per render |
 
 ArgoCD's repo-server is designed for scale - it caches manifests, handles concurrent requests, and isolates manifest generation from the controller. argocdf runs everything in a single process which is fine for a preview tool but wouldn't scale for production.
 
@@ -73,12 +73,13 @@ resource.customizations: |
 
 ```go
 IgnoredFields: map[string]bool{
-    "metadata.resourceVersion": true,
-    "metadata.uid":             true,
-    "metadata.generation":      true,
+    "metadata.resourceVersion":   true,
+    "metadata.uid":               true,
+    "metadata.generation":        true,
     "metadata.creationTimestamp": true,
-    "metadata.managedFields":   true,
-    "status":                   true,
+    "metadata.managedFields":     true,
+    "metadata.annotations.kubectl.kubernetes.io/last-applied-configuration": true,
+    "status": true,
 }
 ```
 
@@ -94,14 +95,13 @@ IgnoredFields: map[string]bool{
 | Aspect | ArgoCD | argocdf |
 |--------|--------|---------|
 | **Version bundled** | Specific Helm version bundled in container image | Uses system `helm` binary |
-| **API versions** | Uses `--api-versions` from cluster capabilities | Uses `--kube-version` only |
+| **API versions** | Uses `--api-versions` from cluster capabilities | ✅ Same — discovered from the cluster and passed via `--api-versions` (opt out with `--no-api-versions`), plus sanitized `--kube-version`. Per-source `helm.kubeVersion`/`helm.apiVersions` overrides are not honored |
 | **Namespace handling** | Full namespace resolution with cluster defaults | Basic `--namespace` flag |
 | **Hooks** | Filters Helm hooks during rendering | No hook filtering |
 | **Pass credentials** | Supports `--pass-credentials` for private repos | Not implemented |
 
 ### Missing Helm features:
 
-- `--api-versions` for full API capability detection
 - Helm hook filtering (`helm.sh/hook` annotations)
 - `--pass-credentials` for authenticated chart pulls
 - Skip CRDs option (`--skip-crds`)
@@ -121,10 +121,15 @@ IgnoredFields: map[string]bool{
 | **`--enable-helm`** | Configurable globally or per-app | ✅ Supported via `--kustomize-enable-helm` CLI flag |
 | **Build options** | Configurable via `kustomize.buildOptions` | ✅ Supported via `--kustomize-build-options` CLI flag |
 | **Load restrictor** | Configurable | ✅ Supported via `--kustomize-load-restrictor` CLI flag |
+| **`kustomize.version`** (per-app binary version) | Supported via configured tool versions | ❌ Not supported — always uses the system `kustomize` binary |
+| **`kustomize.kubeVersion` / `kustomize.apiVersions`** | Passed through to Helm inflation | ❌ Not supported |
+| **`ignoreMissingComponents`** | Supported | ❌ Not supported |
 
 ### Implementation approach:
 
-argocdf uses `kustomize edit` commands to apply Application-level overrides before running `kustomize build`, matching ArgoCD's approach. This modifies the kustomization.yaml in place (changes are uncommitted and discarded on git operations).
+argocdf uses `kustomize edit` commands to apply Application-level overrides before running `kustomize build`, matching ArgoCD's approach. When overrides are present, the repository tree is first copied to a temp directory and edits are applied there — the user's checkout and the render worktrees are never modified.
+
+Source-type detection also matches ArgoCD's repo-server: explicit tool config (`helm:`, `kustomize:`, `directory:`) takes precedence, otherwise the source path is inspected (`Chart.yaml` → Helm, kustomization file → Kustomize, else plain directory). This applies identically to single- and multi-source apps.
 
 ```yaml
 # Fully supported via Application spec:
@@ -159,8 +164,9 @@ spec:
 | Aspect | ArgoCD | argocdf |
 |--------|--------|---------|
 | **Ref source authentication** | Uses stored credentials/SSH keys | Relies on git CLI credentials |
-| **Repository caching** | Reuses cached clones | Fresh clone each time |
-| **Cross-repo values** | Full `$values` reference support | Basic `$ref` support |
+| **Repository caching** | Reuses cached clones | Ref sources pointing at the diffed repo use the local branch checkout (so PR edits to `$values` files diff correctly); external ref repos are cloned fresh each render |
+| **Cross-repo values** | Full `$values` reference support | ✅ `$ref` resolution in `valueFiles` and `fileParameters`, with path-containment validation |
+| **Source type detection** | Per-source, explicit config then filesystem discovery | ✅ Same logic as single-source apps (explicit config, then `Chart.yaml` auto-detection) |
 | **Source ordering** | Deterministic merge order | Sequential rendering |
 
 ## 8. Config Management Plugins (CMP)
@@ -204,8 +210,8 @@ data:
 |--------|--------|---------|
 | **Retry logic** | Built-in retry for transient failures | No retry |
 | **Rate limiting** | Respects API rate limits | No rate limiting |
-| **Repository lock** | Exclusive lock for manifest generation | No locking |
-| **Graceful degradation** | Continues with partial failures | Fails fast |
+| **Repository lock** | Exclusive lock for manifest generation | Per-chart lock serializing `helm dependency build`; no global repo lock |
+| **Graceful degradation** | Continues with partial failures | Continues with partial failures — per-app render errors are reported in the output and reflected in the exit code, other apps still render |
 
 ## 11. Normalization Differences
 
