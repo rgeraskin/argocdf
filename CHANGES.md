@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.2.1
+
+- Fix: when no applications are affected, still write a complete report to file outputs (markdown/HTML/unified) instead of leaving a 0-byte file — preserves the markdown upsert marker so CI can overwrite a stale PR comment. Terminal output stays quiet (the run already logs the empty result).
+
 ## 0.2.0
 
 - Upgrade Argo CD dependency from v2.14.21 to v3.3.11 (module path `argo-cd/v3`, k8s.io libs to 0.34.0)
