@@ -27,6 +27,47 @@ type Writer interface {
 	Flush() error
 }
 
+// PersistentWriter is implemented by writers that persist their output to a
+// file consumed after the run finishes (e.g. a PR-comment markdown file read by
+// CI). For these, a "no applications affected" report is still worth emitting so
+// the file is self-describing and its upsert marker is present. Ephemeral
+// writers (the terminal) deliberately do not implement it: the run already logs
+// the empty result to the console, so stdout stays quiet in that case.
+//
+// The marker method is unexported, so only writers in this package can be
+// persistent; callers use the interface solely to classify writers.
+type PersistentWriter interface {
+	Writer
+	persistent()
+}
+
+// FileOnly returns a Writer that fans out only to the persistent (file-backed)
+// writers within w, unwrapping a MultiWriter. If w has no persistent writers it
+// returns a NullWriter, so callers can write unconditionally without producing
+// terminal output. It is used for the no-applications-affected report, which
+// must reach files (marker + self-describing body) but must not touch stdout.
+func FileOnly(w Writer) Writer {
+	var persistent []Writer
+	if mw, ok := w.(*MultiWriter); ok {
+		for _, sub := range mw.writers {
+			if _, ok := sub.(PersistentWriter); ok {
+				persistent = append(persistent, sub)
+			}
+		}
+	} else if _, ok := w.(PersistentWriter); ok {
+		persistent = append(persistent, w)
+	}
+
+	switch len(persistent) {
+	case 0:
+		return NewNullWriter()
+	case 1:
+		return persistent[0]
+	default:
+		return NewMultiWriter(persistent...)
+	}
+}
+
 // Summary contains summary information about the diff.
 type Summary struct {
 	TotalApps       int

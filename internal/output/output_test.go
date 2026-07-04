@@ -3,11 +3,63 @@ package output
 
 import (
 	"errors"
+	"path/filepath"
 	"testing"
 
 	"github.com/rgeraskin/argocdf/internal/diff"
 	"github.com/rgeraskin/argocdf/internal/types"
 )
+
+// TestFileOnly verifies that FileOnly keeps only persistent (file-backed)
+// writers, dropping the terminal writer. This is what keeps the no-apps-affected
+// report off stdout while still writing the PR-comment file.
+func TestFileOnly(t *testing.T) {
+	tempDir := t.TempDir()
+	newMD := func(name string) *MarkdownWriter {
+		w, err := NewMarkdownWriter(filepath.Join(tempDir, name), MarkdownFormatGitHub, 0)
+		if err != nil {
+			t.Fatalf("NewMarkdownWriter() error = %v", err)
+		}
+		return w
+	}
+
+	t.Run("terminal only yields NullWriter", func(t *testing.T) {
+		got := FileOnly(NewTerminalWriter("fields", 3))
+		if _, ok := got.(*NullWriter); !ok {
+			t.Errorf("FileOnly(terminal) = %T, want *NullWriter", got)
+		}
+	})
+
+	t.Run("terminal plus one file yields the bare file writer", func(t *testing.T) {
+		md := newMD("one.md")
+		defer func() { _ = md.Flush() }()
+		got := FileOnly(NewMultiWriter(NewTerminalWriter("fields", 3), md))
+		if got != md {
+			t.Errorf("FileOnly(terminal+md) = %v, want the markdown writer itself", got)
+		}
+	})
+
+	t.Run("terminal plus multiple files yields a MultiWriter of just the files", func(t *testing.T) {
+		md1, md2 := newMD("a.md"), newMD("b.md")
+		defer func() { _ = md1.Flush(); _ = md2.Flush() }()
+		got := FileOnly(NewMultiWriter(NewTerminalWriter("fields", 3), md1, md2))
+		mw, ok := got.(*MultiWriter)
+		if !ok {
+			t.Fatalf("FileOnly(...) = %T, want *MultiWriter", got)
+		}
+		if len(mw.writers) != 2 {
+			t.Errorf("MultiWriter has %d writers, want 2 (terminal dropped)", len(mw.writers))
+		}
+	})
+
+	t.Run("a bare file writer passes through", func(t *testing.T) {
+		md := newMD("bare.md")
+		defer func() { _ = md.Flush() }()
+		if got := FileOnly(md); got != md {
+			t.Errorf("FileOnly(md) = %v, want the markdown writer itself", got)
+		}
+	})
+}
 
 func TestNullWriter(t *testing.T) {
 	w := NewNullWriter()

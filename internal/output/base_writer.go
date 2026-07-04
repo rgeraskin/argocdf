@@ -38,6 +38,10 @@ func (b *baseFileWriter) write(s string) {
 	}
 }
 
+// persistent marks every file-backed writer as a PersistentWriter (see the
+// interface in output.go). It carries no behavior; its presence is the signal.
+func (b *baseFileWriter) persistent() {}
+
 // close closes the underlying file and returns any write errors that occurred.
 // Returns the first write error if any, otherwise returns the close error.
 func (b *baseFileWriter) close() error {

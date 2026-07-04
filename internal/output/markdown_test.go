@@ -454,6 +454,59 @@ func TestMarkdownWriter_HTMLEscaping(t *testing.T) {
 	}
 }
 
+// TestMarkdownWriter_NoAppsAffected verifies the contract that App.Run relies on
+// when zero applications are affected: the report must still carry the upsert
+// marker (so CI can overwrite a stale PR comment) and a non-empty,
+// self-describing body (so the file is distinguishable from a 0-byte crash).
+// It drives the same writer sequence App.writeOutput uses for an empty tree.
+func TestMarkdownWriter_NoAppsAffected(t *testing.T) {
+	tempDir, _ := os.MkdirTemp("", "markdown-test-")
+	defer func() {
+		_ = os.RemoveAll(tempDir)
+	}()
+
+	filePath := filepath.Join(tempDir, "pr-comment.md")
+	w, err := NewMarkdownWriter(filePath, MarkdownFormatGitHub, 0)
+	if err != nil {
+		t.Fatalf("NewMarkdownWriter() error = %v", err)
+	}
+
+	// Same calls App.writeOutput makes, with the empty tree/summary the
+	// no-apps-affected path produces.
+	tree := diff.NewAppTree(nil)
+	summary := ComputeSummary(nil)
+	if err := w.WriteHeader("ArgoCD Diff: main → feature"); err != nil {
+		t.Fatalf("WriteHeader() error = %v", err)
+	}
+	if err := w.WriteTree(tree); err != nil {
+		t.Fatalf("WriteTree() error = %v", err)
+	}
+	if err := w.WriteSummary(summary); err != nil {
+		t.Fatalf("WriteSummary() error = %v", err)
+	}
+	if err := w.WriteFooter(); err != nil {
+		t.Fatalf("WriteFooter() error = %v", err)
+	}
+	if err := w.Flush(); err != nil {
+		t.Fatalf("Flush() error = %v", err)
+	}
+
+	content, _ := os.ReadFile(filePath)
+	contentStr := string(content)
+
+	if len(content) == 0 {
+		t.Fatal("no-apps-affected report is empty; a 0-byte file is indistinguishable from a crash")
+	}
+	// Marker must be the very first line so CI can find and upsert its comment.
+	if lines := strings.SplitN(contentStr, "\n", 2); lines[0] != CommentMarker("") {
+		t.Errorf("first line = %q, want marker %q", lines[0], CommentMarker(""))
+	}
+	// Body must communicate the result, not just be structurally present.
+	if !strings.Contains(contentStr, "0 applications affected") {
+		t.Errorf("report missing '0 applications affected', got: %s", contentStr)
+	}
+}
+
 func TestMarkdownFormat_Values(t *testing.T) {
 	// Verify format constants
 	if MarkdownFormatGitHub != "github" {

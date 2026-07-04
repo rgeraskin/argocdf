@@ -137,6 +137,16 @@ func (a *App) Run(ctx context.Context) error {
 
 	if len(affectedApps) == 0 {
 		a.logger.Info("No applications affected by changes")
+		// "No applications affected" is a result, not an absence of one. Emit it
+		// (empty tree, zero summary) to the file writers only, so each produces a
+		// self-describing report instead of a 0-byte file indistinguishable from a
+		// crash, and the markdown writer keeps its upsert marker so CI can overwrite
+		// a stale PR comment. The terminal stays quiet: the INFO log above already
+		// told the user. There is nothing to render, so worktree setup and
+		// processing are skipped entirely.
+		if err := a.writeOutput(output.FileOnly(a.writer), diff.NewAppTree(nil), output.ComputeSummary(nil)); err != nil {
+			return fmt.Errorf("failed to write output: %w", err)
+		}
 		return nil
 	}
 
@@ -163,7 +173,7 @@ func (a *App) Run(ctx context.Context) error {
 	summary := output.ComputeSummary(appDiffs)
 
 	// Write output
-	if err := a.writeOutput(tree, summary); err != nil {
+	if err := a.writeOutput(a.writer, tree, summary); err != nil {
 		return fmt.Errorf("failed to write output: %w", err)
 	}
 
@@ -849,25 +859,27 @@ func (a *App) sourcePathsExist(app *cluster.Application, repoPath string) bool {
 	return true
 }
 
-// writeOutput writes the results to the configured output.
-func (a *App) writeOutput(tree *diff.AppTree, summary output.Summary) error {
+// writeOutput writes the results to the given writer. The normal path passes
+// a.writer (all configured outputs); the no-applications-affected path passes a
+// file-only subset so the terminal stays quiet (see Run).
+func (a *App) writeOutput(w output.Writer, tree *diff.AppTree, summary output.Summary) error {
 	title := fmt.Sprintf("ArgoCD Diff: %s → %s", a.cfg.BaseBranch, a.cfg.TargetBranch)
 
-	if err := a.writer.WriteHeader(title); err != nil {
+	if err := w.WriteHeader(title); err != nil {
 		return err
 	}
 
-	if err := a.writer.WriteTree(tree); err != nil {
+	if err := w.WriteTree(tree); err != nil {
 		return err
 	}
 
-	if err := a.writer.WriteSummary(summary); err != nil {
+	if err := w.WriteSummary(summary); err != nil {
 		return err
 	}
 
-	if err := a.writer.WriteFooter(); err != nil {
+	if err := w.WriteFooter(); err != nil {
 		return err
 	}
 
-	return a.writer.Flush()
+	return w.Flush()
 }
