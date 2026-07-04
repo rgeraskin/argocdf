@@ -249,14 +249,51 @@ argocdf -f html-side-by-side:report.html
 
 1. **Connects to cluster**: Uses kubeconfig to connect to the Kubernetes cluster
 2. **Fetches applications**: Lists ArgoCD Applications from the specified namespace(s)
-3. **Analyzes changes**: Compares git branches to find changed files
+3. **Analyzes changes**: Compares git branches (from their merge base) to find changed files
 4. **Filters affected apps**: Identifies applications whose source paths have changes
-5. **Renders manifests**: For each affected app:
-   - Checks out base branch → renders manifests
-   - Checks out target branch → renders manifests
+5. **Renders manifests**: For each affected app, renders both sides from ephemeral
+   worktrees (the merge base and the target branch tip) — the user's working tree
+   is never touched
 6. **Computes diffs**: Compares rendered manifests to identify changes
-7. **Recursive discovery**: If diffs contain new Application CRDs, adds them to the queue
+7. **Recursive discovery**: If diffs contain new or modified Application CRDs,
+   adds them to the queue (see below)
 8. **Outputs results**: Displays colored terminal output and/or generates HTML report
+
+### Apps-of-Apps Rendering Order
+
+A PR can change parents and children of an apps-of-apps hierarchy at the same
+time, and a parent's change may itself rewrite a child's spec (e.g. its Helm
+values). The children a parent manages — and the specs it gives them — are only
+knowable by *rendering the parent*, so there is no dependency graph to sort
+up front. Instead, argocdf processes the queue in **waves** and corrects
+mis-ordered renders by requeueing:
+
+1. **Wave 0** renders every directly affected app concurrently, using its live
+   cluster spec.
+2. After the wave completes, each app's rendered output is scanned (on both
+   sides) for Application CRDs. When a parent's diff shows a child was **added**,
+   the child is enqueued for the next wave. When a child was **modified**, the
+   child is enqueued — or, if it already rendered this wave with its cluster
+   spec, **requeued**: its stale result is discarded and it re-renders in the
+   next wave.
+3. A discovered child renders its base side with the spec extracted from the
+   parent's *merge-base* render and its target side with the spec from the
+   parent's *target-branch* render — so children always reflect the values the
+   PR actually gives them, not what the cluster currently has.
+4. Waves repeat until the queue is empty. Multi-level chains
+   (parent → child → grandchild) propagate naturally, one level per wave.
+
+Two guards bound the recursion: `--max-depth`, and a spec-identity check that
+refuses to requeue an app with the same specs it was already processed with —
+this is what terminates self-managing root apps and mutually-referencing apps.
+
+**Concurrency model**: `--concurrency` parallelizes rendering only *within* a
+wave. The wave boundary is a hard barrier — discovery, queueing, and requeueing
+run single-threaded between waves — so parallel rendering cannot reorder
+parent/child processing or race the recursion guards. Concurrent renders that
+share a chart directory serialize `helm dependency build` behind a per-chart
+lock. This invariant is pinned by `TestProcessApplicationsWaveBarrier` in
+`internal/app/app_test.go`.
 
 ## Multi-Source Applications
 

@@ -2,20 +2,26 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/log"
 
 	"github.com/rgeraskin/argocdf/internal/cluster"
 	"github.com/rgeraskin/argocdf/internal/config"
+	"github.com/rgeraskin/argocdf/internal/diff"
 	"github.com/rgeraskin/argocdf/internal/git"
+	"github.com/rgeraskin/argocdf/internal/render"
 	"github.com/rgeraskin/argocdf/internal/testutil"
+	"github.com/rgeraskin/argocdf/internal/types"
 )
 
 func TestFilterAffectedApps(t *testing.T) {
@@ -525,5 +531,283 @@ func TestResolveBaseRefKeepsLocalWhenAhead(t *testing.T) {
 	// merge-base(local main=c2, feature) = c2, i.e. the local (ahead) base is used.
 	if got != c2 {
 		t.Errorf("resolveBaseRef() = %q, want local base c2 (%q); origin was c1 (%q)", got, c2, c1)
+	}
+}
+
+// fakeRenderCall records one RenderApplication invocation. start/end are
+// samples of a shared monotonic counter, so call intervals can be ordered
+// against each other without wall-clock time.
+type fakeRenderCall struct {
+	app      string
+	revision string // TargetRevision of the spec the app was rendered with
+	start    int
+	end      int
+}
+
+// fakeRenderer is an applicationRenderer that simulates a three-level
+// apps-of-apps hierarchy without invoking helm/kustomize:
+//
+//   - "parent" renders a child Application CRD whose spec differs between the
+//     base worktree (targetRevision base-values) and the target worktree
+//     (target-values) — i.e. the PR modifies the child through the parent.
+//   - "child" renders a ConfigMap stamped with the revision it was rendered
+//     with; when rendered with the git-derived target spec it additionally
+//     emits a grandchild Application CRD.
+//   - "grandchild" renders a ConfigMap stamped with its revision.
+//
+// Every call is recorded with start/end sequence numbers so the test can
+// assert wave-barrier ordering. The premature child render (cluster spec) is
+// artificially slow so that an implementation without the wave barrier would
+// start the corrected render while the stale one is still in flight and fail
+// the ordering assertions.
+type fakeRenderer struct {
+	baseWorktree   string
+	targetWorktree string
+
+	mu    sync.Mutex
+	seq   int
+	calls []fakeRenderCall
+}
+
+func appCRD(name, revision string) string {
+	return fmt.Sprintf(`apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: %s
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://example.com/org/repo.git
+    chart: dummy
+    targetRevision: %s
+  destination:
+    server: https://kubernetes.default.svc
+`, name, revision)
+}
+
+func revConfigMap(name, revision string) string {
+	return fmt.Sprintf(`apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: %s
+  namespace: default
+data:
+  revision: %s
+`, name, revision)
+}
+
+func (f *fakeRenderer) RenderApplication(
+	_ context.Context,
+	app *cluster.Application,
+	repoPath string,
+) (*render.RenderResult, error) {
+	revision := app.Spec.GetSources()[0].TargetRevision
+
+	f.mu.Lock()
+	f.seq++
+	call := fakeRenderCall{app: app.Name, revision: revision, start: f.seq}
+	f.mu.Unlock()
+
+	// Slow down the premature (cluster-spec) child render; see type comment.
+	if app.Name == "child" && revision == "cluster" {
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	var manifests string
+	switch app.Name {
+	case "parent":
+		crdRevision := "base-values"
+		if repoPath == f.targetWorktree {
+			crdRevision = "target-values"
+		}
+		manifests = appCRD("child", crdRevision)
+	case "child":
+		manifests = revConfigMap("child-cm", revision)
+		if revision == "target-values" {
+			manifests += "---\n" + appCRD("grandchild", "grandchild-values")
+		}
+	case "grandchild":
+		manifests = revConfigMap("grandchild-cm", revision)
+	}
+
+	f.mu.Lock()
+	f.seq++
+	call.end = f.seq
+	f.calls = append(f.calls, call)
+	f.mu.Unlock()
+
+	return &render.RenderResult{
+		Manifests:  []byte(manifests),
+		SourceType: types.SourceTypeHelm,
+	}, nil
+}
+
+// TestProcessApplicationsWaveBarrier pins the wave-barrier invariant of
+// processApplications that the concurrency model depends on: renders are
+// parallel only WITHIN a wave, and child discovery / requeueing runs strictly
+// between waves. Concretely it asserts, for a PR that changes a parent and
+// (through it) a child and a grandchild:
+//
+//  1. A child rendered prematurely with its cluster spec (same wave as the
+//     parent) is re-rendered with the git-derived specs extracted from the
+//     parent's base/target renders, and that corrected result is what remains.
+//  2. The corrected child render starts only after ALL wave-0 renders have
+//     finished (the barrier), never concurrently with the stale render.
+//  3. A grandchild discovered from the corrected child render runs in a
+//     strictly later wave, i.e. chains propagate level by level.
+//
+// If this test starts failing after a concurrency change (e.g. starting the
+// next wave before the current one drains, or running discovery inside render
+// goroutines), the requeue/dedup/cycle-guard semantics are broken.
+func TestProcessApplicationsWaveBarrier(t *testing.T) {
+	logger := log.New(nil)
+	logger.SetLevel(log.FatalLevel)
+
+	cfg := &config.Config{Concurrency: 4, MaxDepth: 5}
+	fake := &fakeRenderer{
+		baseWorktree:   "/fake/base",
+		targetWorktree: "/fake/target",
+	}
+
+	a := &App{
+		factory:        NewFactory(cfg, logger),
+		cfg:            cfg,
+		logger:         logger,
+		renderer:       fake,
+		differ:         diff.NewManifestDiffer(),
+		discoverer:     diff.NewAppDiscoverer(),
+		baseWorktree:   fake.baseWorktree,
+		targetWorktree: fake.targetWorktree,
+	}
+
+	// Both parent and child are directly affected, so both land in wave 0 and
+	// the child initially renders with its cluster spec.
+	clusterSpec := func() cluster.ApplicationSpec {
+		return cluster.ApplicationSpec{
+			Source: &cluster.ApplicationSource{
+				RepoURL:        "https://example.com/org/repo.git",
+				Chart:          "dummy",
+				TargetRevision: "cluster",
+			},
+		}
+	}
+	parent := cluster.Application{Spec: clusterSpec()}
+	parent.Name = "parent"
+	parent.Namespace = "argocd"
+	child := cluster.Application{Spec: clusterSpec()}
+	child.Name = "child"
+	child.Namespace = "argocd"
+
+	diffs, err := a.processApplications(context.Background(), []cluster.Application{parent, child})
+	if err != nil {
+		t.Fatalf("processApplications() error: %v", err)
+	}
+
+	byName := make(map[string]*types.AppDiff, len(diffs))
+	for _, d := range diffs {
+		if d.Error != nil {
+			t.Errorf("app %q finished with error: %v", d.Name, d.Error)
+		}
+		byName[d.Name] = d
+	}
+	for _, name := range []string{"parent", "child", "grandchild"} {
+		if byName[name] == nil {
+			t.Fatalf("missing result for app %q; got %d results", name, len(diffs))
+		}
+	}
+	if len(diffs) != 3 {
+		t.Fatalf("got %d results, want 3 (stale child result must be overwritten, not duplicated)", len(diffs))
+	}
+
+	// (1) The surviving child result must come from the git-derived specs
+	// (base-values -> target-values), not the premature cluster-spec render.
+	childDiff := byName["child"]
+	if !strings.Contains(childDiff.RenderedOld, "revision: base-values") {
+		t.Errorf("child RenderedOld not rendered with parent's base spec:\n%s", childDiff.RenderedOld)
+	}
+	if !strings.Contains(childDiff.RenderedNew, "revision: target-values") {
+		t.Errorf("child RenderedNew not rendered with parent's target spec:\n%s", childDiff.RenderedNew)
+	}
+	if strings.Contains(childDiff.RenderedOld+childDiff.RenderedNew, "revision: cluster") {
+		t.Error("stale cluster-spec render survived as the child's result")
+	}
+	if childDiff.ParentAppName != "parent" {
+		t.Errorf("child ParentAppName = %q, want %q", childDiff.ParentAppName, "parent")
+	}
+	if byName["grandchild"].ParentAppName != "child" {
+		t.Errorf("grandchild ParentAppName = %q, want %q", byName["grandchild"].ParentAppName, "child")
+	}
+
+	// Partition the recorded render calls into waves by their meaning:
+	// wave 0 = parent renders + premature child renders (cluster spec),
+	// wave 1 = corrected child renders (git-derived specs),
+	// wave 2 = grandchild renders.
+	fake.mu.Lock()
+	calls := fake.calls
+	fake.mu.Unlock()
+
+	maxEnd := func(match func(fakeRenderCall) bool) int {
+		v := -1
+		for _, c := range calls {
+			if match(c) && c.end > v {
+				v = c.end
+			}
+		}
+		return v
+	}
+	minStart := func(match func(fakeRenderCall) bool) int {
+		v := -1
+		for _, c := range calls {
+			if match(c) && (v == -1 || c.start < v) {
+				v = c.start
+			}
+		}
+		return v
+	}
+
+	wave0End := maxEnd(func(c fakeRenderCall) bool {
+		return c.app == "parent" || (c.app == "child" && c.revision == "cluster")
+	})
+	childGitStart := minStart(func(c fakeRenderCall) bool {
+		return c.app == "child" && c.revision != "cluster"
+	})
+	childGitEnd := maxEnd(func(c fakeRenderCall) bool {
+		return c.app == "child" && c.revision != "cluster"
+	})
+	grandchildStart := minStart(func(c fakeRenderCall) bool {
+		return c.app == "grandchild"
+	})
+
+	if childGitStart == -1 {
+		t.Fatal("child was never re-rendered with git-derived specs (requeue did not happen)")
+	}
+	if grandchildStart == -1 {
+		t.Fatal("grandchild was never rendered (chain did not propagate)")
+	}
+
+	// (2) The wave barrier: the corrected child render must start only after
+	// every wave-0 render (including the slow stale child render) has ended.
+	if childGitStart < wave0End {
+		t.Errorf("wave barrier violated: corrected child render started (seq %d) before wave 0 finished (seq %d)",
+			childGitStart, wave0End)
+	}
+
+	// (3) Chain propagation: the grandchild renders in a strictly later wave
+	// than the corrected child render that discovered it.
+	if grandchildStart < childGitEnd {
+		t.Errorf("wave barrier violated: grandchild render started (seq %d) before its parent's wave finished (seq %d)",
+			grandchildStart, childGitEnd)
+	}
+
+	// The child renders exactly twice per side: once prematurely, once corrected.
+	childCalls := 0
+	for _, c := range calls {
+		if c.app == "child" {
+			childCalls++
+		}
+	}
+	if childCalls != 4 {
+		t.Errorf("child rendered %d times, want 4 (base+target, premature and corrected)", childCalls)
 	}
 }

@@ -46,6 +46,13 @@ func ExitCodeFor(err error) int {
 	}
 }
 
+// applicationRenderer is the part of render.Factory that App uses to render an
+// application's manifests. It is a seam that lets tests substitute a fake
+// renderer for the queue/wave orchestration in processApplications.
+type applicationRenderer interface {
+	RenderApplication(ctx context.Context, app *cluster.Application, repoPath string) (*render.RenderResult, error)
+}
+
 // App is the main application orchestrator.
 type App struct {
 	factory    *Factory
@@ -54,7 +61,7 @@ type App struct {
 	kubeClient *cluster.Client
 	appService *cluster.ApplicationService
 	repo       *git.Repository
-	renderer   *render.Factory
+	renderer   applicationRenderer
 	differ     *diff.ManifestDiffer
 	discoverer *diff.AppDiscoverer
 	writer     output.Writer
