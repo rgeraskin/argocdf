@@ -7,10 +7,13 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/charmbracelet/log"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
+	"github.com/spf13/viper"
 
 	"github.com/rgeraskin/argocdf/internal/app"
 	"github.com/rgeraskin/argocdf/internal/config"
@@ -61,6 +64,35 @@ var (
 	cacheDir string
 )
 
+// envPrefix is prepended to every flag name to form its environment variable,
+// e.g. --repo-dir is configurable via ARGOCDF_REPO_DIR.
+const envPrefix = "ARGOCDF"
+
+// bindEnv wires every flag to an environment variable through viper's
+// AutomaticEnv: the flag name is upper-cased, dashes become underscores, and the
+// ARGOCDF_ prefix is added (repo-dir -> ARGOCDF_REPO_DIR). Values are applied
+// only to flags the user did not pass explicitly, so precedence stays
+// flag > environment > default. Each value is routed through pflag's Set so it
+// is parsed by the flag's own type (bool, int, string, ...).
+func bindEnv(cmd *cobra.Command) error {
+	v := viper.New()
+	v.SetEnvPrefix(envPrefix)
+	v.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
+	v.AutomaticEnv() // without BindPFlags, IsSet is true only when the env var is actually set
+
+	var bindErr error
+	cmd.Flags().VisitAll(func(f *pflag.Flag) {
+		if bindErr != nil || f.Changed || !v.IsSet(f.Name) {
+			return // explicit flag wins; skip flags with no env value
+		}
+		if err := cmd.Flags().Set(f.Name, fmt.Sprintf("%v", v.Get(f.Name))); err != nil {
+			env := envPrefix + "_" + strings.ToUpper(strings.ReplaceAll(f.Name, "-", "_"))
+			bindErr = fmt.Errorf("invalid value for %s: %w", env, err)
+		}
+	})
+	return bindErr
+}
+
 func main() {
 	rootCmd := &cobra.Command{
 		Use:   "argocdf",
@@ -73,6 +105,11 @@ It supports:
 - Helm charts (local and remote)
 - Kustomize directories
 - Apps-of-apps pattern with recursive discovery
+
+Every flag can also be set via an environment variable named ARGOCDF_<FLAG>,
+where <FLAG> is the flag name upper-cased with dashes replaced by underscores
+(e.g. --repo-dir -> ARGOCDF_REPO_DIR, --kustomize-enable-helm ->
+ARGOCDF_KUSTOMIZE_ENABLE_HELM). An explicit flag always overrides its env var.
 
 Examples:
   # Basic usage (auto-detects repository and branches)
@@ -265,6 +302,12 @@ func humanizeBytes(n int64) string {
 }
 
 func runMain(cmd *cobra.Command, args []string) error {
+	// Seed flags from ARGOCDF_* environment variables before anything reads them,
+	// so env values behave exactly like flags for the rest of the run.
+	if err := bindEnv(cmd); err != nil {
+		return err
+	}
+
 	// Setup context with cancellation
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

@@ -161,6 +161,42 @@ ARGOCDF_EXTERNAL_DIFF="delta --side-by-side" argocdf
 | `--no-cache`  | Disable the persistent render cache        | `false`                    |
 | `--cache-dir` | Base directory for render and chart caches | `<user cache dir>/argocdf` |
 
+## Environment Variables
+
+Every flag can also be set through an environment variable. The variable name is
+the flag name upper-cased, with dashes replaced by underscores, and prefixed with
+`ARGOCDF_`:
+
+| Flag                          | Environment variable                 |
+|-------------------------------|--------------------------------------|
+| `--repo-dir`                  | `ARGOCDF_REPO_DIR`                    |
+| `--repo-url`                  | `ARGOCDF_REPO_URL`                    |
+| `--namespace`                 | `ARGOCDF_NAMESPACE`                   |
+| `--context`                   | `ARGOCDF_CONTEXT`                     |
+| `--kustomize-enable-helm`     | `ARGOCDF_KUSTOMIZE_ENABLE_HELM`      |
+| `--kustomize-load-restrictor` | `ARGOCDF_KUSTOMIZE_LOAD_RESTRICTOR`  |
+| ...                           | `ARGOCDF_<FLAG>` for any other flag   |
+
+Precedence is **explicit flag > environment variable > default**, so a flag passed
+on the command line always wins over the matching environment variable. Empty
+variables are ignored.
+
+```bash
+# These two invocations are equivalent
+argocdf --repo-dir /path/to/repo --kustomize-enable-helm
+
+export ARGOCDF_REPO_DIR=/path/to/repo
+export ARGOCDF_KUSTOMIZE_ENABLE_HELM=true
+argocdf
+```
+
+Two additional variables are read directly (they have no flag equivalent):
+
+| Variable                | Description                                                                       |
+|-------------------------|-----------------------------------------------------------------------------------|
+| `ARGOCDF_EXTERNAL_DIFF` | External diff command for side-by-side terminal output (e.g. `delta --side-by-side`) |
+| `KUBECONFIG`            | Standard kubeconfig path, honored during cluster auto-detection                   |
+
 ## Commands
 
 | Command               | Description                                      |

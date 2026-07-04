@@ -146,6 +146,28 @@ This ensures charts with dependencies (like umbrella charts) render correctly wi
 ARGOCDF_EXTERNAL_DIFF="delta --side-by-side" ./argocdf
 ```
 
+## Configuration & Environment Variables
+
+Configuration flows through Cobra flags into `internal/config.Config`. Every flag
+is also settable via an environment variable named `ARGOCDF_<FLAG>` (flag name
+upper-cased, dashes → underscores), e.g. `--repo-dir` → `ARGOCDF_REPO_DIR`.
+
+This is wired by `bindEnv` in `cmd/argocdf/main.go`, which runs first in
+`runMain`. It uses **viper `AutomaticEnv()`** with prefix `ARGOCDF` and a
+`-`→`_` key replacer as a pure env lookup — `viper.BindPFlags` is not called
+because it isn't needed (env values are applied directly through `pflag.Set`, so
+they are parsed by each flag's own type and invalid values fail fast with a typed
+error). In this setup `v.IsSet(name)` is true only when the env var is actually
+set (non-empty).
+
+Precedence — **explicit flag > environment variable > default** — is enforced by
+the `f.Changed` guard in `bindEnv`: flags the user passed on the command line are
+skipped, so their env vars never override them. That guard is the load-bearing
+line; keep it if you refactor this.
+
+Two variables are read directly (no flag equivalent): `ARGOCDF_EXTERNAL_DIFF`
+(`internal/output/terminal.go`) and `KUBECONFIG` (`internal/config/detect.go`).
+
 ## Test Data
 
 `testdata/` contains real ArgoCD Application manifests for testing:
