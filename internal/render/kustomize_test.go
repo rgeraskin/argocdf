@@ -274,6 +274,47 @@ metadata:
 	}
 }
 
+// TestRenderExplicitDirectorySkipsKustomization verifies ArgoCD parity: an
+// explicit directory source renders as plain YAML even when the path contains
+// a kustomization file (explicit tool config beats filesystem discovery).
+// This path never shells out to kustomize, so no binary is required.
+func TestRenderExplicitDirectorySkipsKustomization(t *testing.T) {
+	renderer := &KustomizeRenderer{}
+	repoDir := t.TempDir()
+
+	kustomization := `resources:
+  - configmap.yaml`
+	cm := `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cm1`
+
+	if err := os.WriteFile(filepath.Join(repoDir, "kustomization.yaml"), []byte(kustomization), 0644); err != nil {
+		t.Fatalf("failed to write kustomization: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "configmap.yaml"), []byte(cm), 0644); err != nil {
+		t.Fatalf("failed to write configmap: %v", err)
+	}
+
+	source := &cluster.ApplicationSource{
+		Directory: &cluster.ApplicationSourceDirectory{},
+	}
+	result, err := renderer.Render(context.Background(), &cluster.Application{}, source, repoDir)
+	if err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+
+	content := string(result)
+	if !strings.Contains(content, "name: cm1") {
+		t.Error("Render() missing plain manifest content")
+	}
+	// The raw kustomization file is included as-is, proving no kustomize
+	// build ran (a build would consume it, not emit it).
+	if !strings.Contains(content, "resources:") {
+		t.Error("Render() did not treat directory as plain YAML (kustomization file not passed through)")
+	}
+}
+
 func TestRenderPlainYAML_RecursiveWithJSON(t *testing.T) {
 	renderer := NewKustomizeRenderer(RenderOptions{})
 	root := t.TempDir()

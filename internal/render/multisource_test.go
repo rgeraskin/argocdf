@@ -2,8 +2,11 @@
 package render
 
 import (
+	"context"
+	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/rgeraskin/argocdf/internal/cluster"
@@ -178,6 +181,115 @@ func TestNewMultiSourceRenderer(t *testing.T) {
 				t.Errorf("repoPath = %q, want %q", renderer.repoPath, tt.repoPath)
 			}
 		})
+	}
+}
+
+// skipIfNoHelm skips the test if helm is not installed.
+func skipIfNoHelm(t *testing.T) {
+	t.Helper()
+	if err := (&HelmRenderer{}).CanRender(); err != nil {
+		t.Skip("helm not installed, skipping integration test")
+	}
+}
+
+// writeTestChart creates a minimal Helm chart under dir whose ConfigMap
+// template renders .Values.message.
+func writeTestChart(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(dir, "templates"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{
+		"Chart.yaml":  "apiVersion: v2\nname: app\nversion: 0.1.0\n",
+		"values.yaml": "message: from-chart\n",
+		"templates/cm.yaml": "apiVersion: v1\n" +
+			"kind: ConfigMap\n" +
+			"metadata:\n" +
+			"  name: app-cm\n" +
+			"data:\n" +
+			"  message: {{ .Values.message }}\n",
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestRenderMultiSource_ChartPathAutoDetection is a regression test for
+// renderer selection parity with single-source apps (and with ArgoCD's
+// repo-server): in a multi-source app, a path source containing Chart.yaml
+// but no explicit chart/helm config must be auto-detected and rendered via
+// Helm — not fall back to plain-YAML concatenation of the chart files.
+func TestRenderMultiSource_ChartPathAutoDetection(t *testing.T) {
+	skipIfNoHelm(t)
+
+	repoDir := t.TempDir()
+	writeTestChart(t, filepath.Join(repoDir, "charts", "app"))
+
+	app := &cluster.Application{}
+	app.Name = "test-app"
+	app.Spec.Sources = []cluster.ApplicationSource{
+		{RepoURL: "https://github.com/org/repo", Ref: "vals"},
+		{RepoURL: "https://github.com/org/repo", Path: "charts/app"},
+	}
+
+	factory := NewFactory(RenderOptions{RepoURL: "https://github.com/org/repo"})
+	manifests, err := NewMultiSourceRenderer(factory, repoDir).RenderMultiSource(context.Background(), app)
+	if err != nil {
+		t.Fatalf("RenderMultiSource() error = %v", err)
+	}
+
+	// Only a real helm render emits the templated ConfigMap: the plain-YAML
+	// fallback (the bug) concatenates top-level chart files and never reaches
+	// templates/, so asserting on the rendered resource pins the regression.
+	out := string(manifests)
+	if !strings.Contains(out, "name: app-cm") {
+		t.Errorf("templated ConfigMap missing (plain-YAML fallback?); output:\n%s", out)
+	}
+	if !strings.Contains(out, "message: from-chart") {
+		t.Errorf("chart default value not rendered; output:\n%s", out)
+	}
+	if strings.Contains(out, "{{") {
+		t.Errorf("output contains unrendered template syntax; output:\n%s", out)
+	}
+}
+
+// TestRenderMultiSource_ValuesRef renders a multi-source app end-to-end where
+// the chart source pulls a value file from a $ref source in the local repo.
+func TestRenderMultiSource_ValuesRef(t *testing.T) {
+	skipIfNoHelm(t)
+
+	repoDir := t.TempDir()
+	writeTestChart(t, filepath.Join(repoDir, "charts", "app"))
+	if err := os.MkdirAll(filepath.Join(repoDir, "envs", "prod"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "envs", "prod", "values.yaml"), []byte("message: from-ref\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	app := &cluster.Application{}
+	app.Name = "test-app"
+	app.Spec.Sources = []cluster.ApplicationSource{
+		{RepoURL: "https://github.com/org/repo", Ref: "vals"},
+		{
+			RepoURL: "https://github.com/org/repo",
+			Path:    "charts/app",
+			Helm: &cluster.ApplicationSourceHelm{
+				ValueFiles: []string{"$vals/envs/prod/values.yaml"},
+			},
+		},
+	}
+
+	factory := NewFactory(RenderOptions{RepoURL: "https://github.com/org/repo"})
+	manifests, err := NewMultiSourceRenderer(factory, repoDir).RenderMultiSource(context.Background(), app)
+	if err != nil {
+		t.Fatalf("RenderMultiSource() error = %v", err)
+	}
+
+	if out := string(manifests); !strings.Contains(out, "message: from-ref") {
+		t.Errorf("$vals value file not applied; output:\n%s", out)
 	}
 }
 

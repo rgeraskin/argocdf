@@ -52,10 +52,14 @@ func (r *KustomizeRenderer) Render(ctx context.Context, app *cluster.Application
 
 	kustomizePath := filepath.Join(repoPath, source.Path)
 
-	// Verify kustomization.yaml exists
-	if !r.hasKustomization(kustomizePath) {
-		// Fall back to plain YAML files, honoring the directory source's
-		// recurse option (spec.source.directory.recurse) when set.
+	// An explicit directory source renders as plain YAML even when a
+	// kustomization file exists (ArgoCD gives explicit tool config precedence
+	// over discovery). Otherwise fall back to plain YAML only when no
+	// kustomization file is present. The recurse option
+	// (spec.source.directory.recurse) is honored when set. A source carrying
+	// both directory and kustomize config is invalid in ArgoCD; kustomize wins
+	// here so its overrides are not silently dropped.
+	if (source.Directory != nil && source.Kustomize == nil) || !r.hasKustomization(kustomizePath) {
 		recurse := source.Directory != nil && source.Directory.Recurse
 		return r.renderPlainYAML(kustomizePath, recurse)
 	}

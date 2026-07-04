@@ -10,6 +10,7 @@ import (
 
 	"github.com/rgeraskin/argocdf/internal/cluster"
 	"github.com/rgeraskin/argocdf/internal/git"
+	"github.com/rgeraskin/argocdf/internal/types"
 )
 
 // MultiSourceRenderer handles rendering of applications with multiple sources.
@@ -77,12 +78,14 @@ func (r *MultiSourceRenderer) RenderMultiSource(ctx context.Context, app *cluste
 			continue
 		}
 
-		// Select the appropriate renderer for this source
-		var renderer Renderer
-		if source.IsHelm() || source.Helm != nil {
+		// Select the renderer the same way ArgoCD's repo-server does for every
+		// source (single- or multi-source alike): explicit tool config wins,
+		// otherwise the source path is inspected (Chart.yaml -> Helm). That
+		// logic lives in GetRenderer; its decision is mapped onto the
+		// per-request renderers carrying this app's RefSources.
+		var renderer Renderer = kustomizeRenderer
+		if r.factory.GetRenderer(&sources[i], r.repoPath).SourceType() == types.SourceTypeHelm {
 			renderer = helmRenderer
-		} else {
-			renderer = kustomizeRenderer
 		}
 
 		manifests, err := renderer.Render(ctx, app, &sources[i], r.repoPath)

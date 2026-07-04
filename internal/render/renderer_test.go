@@ -84,6 +84,15 @@ func TestGetRenderer(t *testing.T) {
 			wantRenderer: "helm",
 		},
 		{
+			name: "explicit directory source skips Chart.yaml auto-detection",
+			source: &cluster.ApplicationSource{
+				Path:      "helm-chart",
+				Directory: &cluster.ApplicationSourceDirectory{},
+			},
+			repoPath:     tempDir,
+			wantRenderer: "kustomize",
+		},
+		{
 			name: "path without Chart.yaml defaults to kustomize",
 			source: &cluster.ApplicationSource{
 				Path: "plain-dir",

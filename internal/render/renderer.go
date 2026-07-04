@@ -94,6 +94,12 @@ func (f *Factory) GetRenderer(source *cluster.ApplicationSource, repoPath string
 	if source.Kustomize != nil {
 		return f.kustomizeRenderer
 	}
+	// Explicit directory source renders as plain YAML, skipping Chart.yaml
+	// auto-detection — ArgoCD's ExplicitType gives tool config precedence
+	// over filesystem discovery.
+	if source.Directory != nil {
+		return f.kustomizeRenderer
+	}
 	// Check if the path contains a Chart.yaml (ArgoCD auto-detection)
 	if source.Path != "" && repoPath != "" {
 		chartPath := filepath.Join(repoPath, source.Path, "Chart.yaml")
