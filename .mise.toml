@@ -4,6 +4,8 @@ golangci-lint = "2.2.2"
 kind = "0.31.0"
 kubectl = "1.31.1"
 yq = "4.44.3"
+helm = "3.19.4"
+kustomize = "5.8.1"
 
 [env]
 BINARY_NAME = "argocdf"

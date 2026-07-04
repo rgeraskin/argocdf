@@ -22,14 +22,18 @@ jobs:
       - name: Set up mise
         uses: jdx/mise-action@v2
         with:
-          # Only the toolchain unit tests need; skip kind/kubectl/yq (e2e-only).
-          install_args: go golangci-lint
+          # go + golangci-lint for the toolchain; helm + kustomize so the
+          # render integration tests actually run instead of t.Skip()-ing.
+          # kind/kubectl/yq stay out (e2e-only).
+          install_args: go golangci-lint helm kustomize
       - name: Vet
         run: go vet ./...
       - name: Build
         run: go build ./...
       - name: Test
-        run: go test ./...
+        # -v so t.Skip()'d integration tests are visible in the log; combined
+        # with mise installing helm+kustomize, none should skip anymore.
+        run: go test -v ./...
 
   lint:
     runs-on: ubuntu-latest
