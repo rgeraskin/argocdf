@@ -39,6 +39,7 @@ var (
 	stdoutFormat   string
 	fileOutputs    []string
 	quiet          bool
+	verbose        bool
 	noRecursive    bool
 	maxDepth       int
 	concurrency    int
@@ -147,6 +148,7 @@ Examples:
 	rootCmd.Flags().StringArrayVarP(&fileOutputs, "file", "f", nil,
 		"File output in format:path (can be repeated). Formats: md-fields, html-side-by-side, md-unified, unified")
 	rootCmd.Flags().BoolVarP(&quiet, "quiet", "q", false, "Suppress terminal output (same as --stdout none)")
+	rootCmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "Enable debug logging")
 	rootCmd.Flags().IntVarP(&unifiedContext, "context-lines", "U", config.DefaultUnifiedContext,
 		"Number of context lines in unified diff output (-1 for unlimited)")
 
@@ -276,9 +278,13 @@ func runMain(cmd *cobra.Command, args []string) error {
 	}()
 
 	// Setup logger
+	logLevel := log.InfoLevel
+	if verbose {
+		logLevel = log.DebugLevel
+	}
 	logger := log.NewWithOptions(os.Stderr, log.Options{
 		ReportTimestamp: true,
-		Level:           log.InfoLevel,
+		Level:           logLevel,
 	})
 
 	// Handle quiet flag (alias for --stdout none)
@@ -337,6 +343,8 @@ func runMain(cmd *cobra.Command, args []string) error {
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
+
+	logger.Info("Using repository URL", "repoURL", cfg.RepoURL)
 
 	logger.Debug("Configuration",
 		"repo", cfg.RepoPath,

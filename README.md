@@ -53,7 +53,9 @@ mise run build   # produces ./argocdf
 ## Usage
 
 ```bash
-# Basic usage (auto-detects everything)
+# Basic usage (auto-detects everything):
+# Uses current k8s context, argocd namespace, and current branch
+# Also, repoURL is auto-detected from the cloned repo
 argocdf
 
 # Specify branches explicitly
@@ -78,6 +80,9 @@ argocdf -f unified:changes.patch
 # Summary only in terminal
 argocdf --stdout summary
 
+# Debug logging (troubleshoot detection, filtering, rendering)
+argocdf -v
+
 # Use external diff tool for side-by-side view
 ARGOCDF_EXTERNAL_DIFF="delta --side-by-side" argocdf
 ```
@@ -86,41 +91,42 @@ ARGOCDF_EXTERNAL_DIFF="delta --side-by-side" argocdf
 
 ### Kubernetes Flags
 
-| Flag | Short | Description | Default |
-|------|-------|-------------|---------|
-| `--kubeconfig` | `-k` | Path to kubeconfig file | `~/.kube/config` |
-| `--context` | | Kubernetes context to use | (from kubeconfig) |
-| `--namespace` | `-n` | ArgoCD namespace to search | `argocd` |
-| `--all-namespaces` | `-A` | Search all namespaces | `false` |
+| Flag               | Short | Description                | Default           |
+|--------------------|-------|----------------------------|-------------------|
+| `--kubeconfig`     | `-k`  | Path to kubeconfig file    | `~/.kube/config`  |
+| `--context`        |       | Kubernetes context to use  | (from kubeconfig) |
+| `--namespace`      | `-n`  | ArgoCD namespace to search | `argocd`          |
+| `--all-namespaces` | `-A`  | Search all namespaces      | `false`           |
 
 ### Git Flags
 
-| Flag | Short | Description | Default |
-|------|-------|-------------|---------|
-| `--repo-dir` | `-r` | Path to git repository | Current directory |
-| `--repo-url` | | Repository URL for matching ArgoCD apps | Auto-detected |
-| `--base` | | Base branch for comparison | `main` or `master` |
-| `--target` | | Target branch for comparison | Current HEAD |
+| Flag         | Short | Description                             | Default            |
+|--------------|-------|-----------------------------------------|--------------------|
+| `--repo-dir` | `-r`  | Path to git repository                  | Current directory  |
+| `--repo-url` |       | Repository URL for matching ArgoCD apps | Auto-detected      |
+| `--base`     |       | Base branch for comparison              | `main` or `master` |
+| `--target`   |       | Target branch for comparison            | Current HEAD       |
 
 ### Rendering Flags
 
-| Flag | Description | Default |
-|------|-------------|---------|
-| `--kube-version` | Kubernetes version for rendering | Auto-detected |
-| `--kustomize-enable-helm` | Enable Helm chart inflation via kustomize | `false` |
-| `--kustomize-build-options` | Additional kustomize build options (space-separated) | (none) |
-| `--kustomize-load-restrictor` | Load restrictor mode (e.g., `LoadRestrictionsNone`) | (none) |
-| `--helm-skip-refresh` | Skip refreshing the repo cache during `helm dependency build` | `true` |
-| `--no-api-versions` | Do not pass cluster-discovered API versions to helm via `--api-versions` | `false` |
+| Flag                          | Description                                                              | Default       |
+|-------------------------------|--------------------------------------------------------------------------|---------------|
+| `--kube-version`              | Kubernetes version for rendering                                         | Auto-detected |
+| `--kustomize-enable-helm`     | Enable Helm chart inflation via kustomize                                | `false`       |
+| `--kustomize-build-options`   | Additional kustomize build options (space-separated)                     | (none)        |
+| `--kustomize-load-restrictor` | Load restrictor mode (e.g., `LoadRestrictionsNone`)                      | (none)        |
+| `--helm-skip-refresh`         | Skip refreshing the repo cache during `helm dependency build`            | `true`        |
+| `--no-api-versions`           | Do not pass cluster-discovered API versions to helm via `--api-versions` | `false`       |
 
 ### Output Flags
 
-| Flag | Short | Description | Default |
-|------|-------|-------------|---------|
-| `--stdout` | | Terminal output format: `fields`, `summary`, `unified`, `none` | `fields` |
-| `--file` | `-f` | File output in `format:path` (can be repeated) | (none) |
-| `--quiet` | `-q` | Suppress terminal output (same as `--stdout none`) | `false` |
-| `--context-lines` | `-U` | Number of context lines in unified diff output (-1 for unlimited) | `3` |
+| Flag              | Short | Description                                                                        | Default  |
+|-------------------|-------|------------------------------------------------------------------------------------|----------|
+| `--stdout`        |       | Terminal output format: `fields`, `summary`, `unified`, `none`                     | `fields` |
+| `--file`          | `-f`  | File output in `format:path` (can be repeated)                                     | (none)   |
+| `--quiet`         | `-q`  | Suppress terminal output (same as `--stdout none`)                                 | `false`  |
+| `--verbose`       | `-v`  | Enable debug logging (config resolution, cache hits, per-app processing) to stderr | `false`  |
+| `--context-lines` | `-U`  | Number of context lines in unified diff output (-1 for unlimited)                  | `3`      |
 
 **File output formats:**
 - `md-fields` - GitHub-flavored markdown with field-level diffs
@@ -130,38 +136,38 @@ ARGOCDF_EXTERNAL_DIFF="delta --side-by-side" argocdf
 
 ### Recursion Flags
 
-| Flag | Description | Default |
-|------|-------------|---------|
+| Flag             | Description                    | Default |
+|------------------|--------------------------------|---------|
 | `--no-recursive` | Disable apps-of-apps recursion | `false` |
-| `--max-depth` | Maximum recursion depth | `10` |
+| `--max-depth`    | Maximum recursion depth        | `10`    |
 
 ### Concurrency Flags
 
-| Flag | Description | Default |
-|------|-------------|---------|
+| Flag            | Description                                           | Default        |
+|-----------------|-------------------------------------------------------|----------------|
 | `--concurrency` | Applications to render in parallel (`1` = sequential) | Number of CPUs |
 
 ### CI Flags
 
-| Flag | Description | Default |
-|------|-------------|---------|
-| `--exit-code` | Exit `0` if no changes, `1` on error, `2` if changes are present (like `diff`) | `false` |
-| `--marker` | Marker id for the markdown PR-comment upsert marker | `<!-- argocdf-diff -->` |
+| Flag          | Description                                                                    | Default                 |
+|---------------|--------------------------------------------------------------------------------|-------------------------|
+| `--exit-code` | Exit `0` if no changes, `1` on error, `2` if changes are present (like `diff`) | `false`                 |
+| `--marker`    | Marker id for the markdown PR-comment upsert marker                            | `<!-- argocdf-diff -->` |
 
 ### Cache Flags
 
-| Flag | Description | Default |
-|------|-------------|---------|
-| `--no-cache` | Disable the persistent render cache | `false` |
+| Flag          | Description                                | Default                    |
+|---------------|--------------------------------------------|----------------------------|
+| `--no-cache`  | Disable the persistent render cache        | `false`                    |
 | `--cache-dir` | Base directory for render and chart caches | `<user cache dir>/argocdf` |
 
 ## Commands
 
-| Command | Description |
-|---------|-------------|
-| `argocdf version` | Print version, commit, and build date |
-| `argocdf cache info` | Show cache location, entry count, and total size |
-| `argocdf cache clean` | Remove the entire cache directory |
+| Command               | Description                                      |
+|-----------------------|--------------------------------------------------|
+| `argocdf version`     | Print version, commit, and build date            |
+| `argocdf cache info`  | Show cache location, entry count, and total size |
+| `argocdf cache clean` | Remove the entire cache directory                |
 
 ## Output Examples
 

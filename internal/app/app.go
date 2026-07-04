@@ -98,7 +98,15 @@ func (a *App) Run(ctx context.Context) error {
 	}
 
 	// Fetch ArgoCD applications
-	a.logger.Info("Fetching ArgoCD applications...")
+	contextName := a.cfg.Context
+	if contextName == "" {
+		contextName = "(current)"
+	}
+	namespace := a.cfg.Namespace
+	if a.cfg.AllNamespaces {
+		namespace = "(all)"
+	}
+	a.logger.Info("Fetching ArgoCD applications...", "context", contextName, "namespace", namespace)
 	apps, err := a.fetchApplications(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to fetch applications: %w", err)
