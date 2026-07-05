@@ -2,6 +2,8 @@
 
 `argocdf` shows manifest diffs for ArgoCD applications affected by your PR changes. It supports the apps-of-apps pattern with recursive discovery.
 
+> **Note:** argocdf aims to reproduce how ArgoCD renders and diffs your applications, and reuses parts of ArgoCD's codebase to do so (which is why the binary isn't tiny). Still, it's not a perfect replica — some behaviors and features differ. See [DIFFERENCES.md](DIFFERENCES.md) for a detailed comparison with ArgoCD's implementation.
+
 ## Features
 
 - **Auto-detection**: Automatically detects repository path, branches, and cluster version
@@ -15,14 +17,57 @@
 - **Persistent cache**: Content-addressed render/chart cache speeds up repeat runs
 - **CI-friendly**: `diff`-style exit codes and stable PR-comment markers for automated pipelines
 
-## Requirements
+## How It Works
+
+1. **Connects to cluster**: Uses kubeconfig to connect to the Kubernetes cluster
+2. **Fetches applications**: Lists ArgoCD Applications from the specified namespace(s)
+3. **Analyzes changes**: Compares git branches (from their merge base) to find changed files
+4. **Filters affected apps**: Identifies applications whose source paths have changes
+5. **Renders manifests**: For each affected app, renders both sides from ephemeral
+   worktrees (the merge base and the target branch tip) — the user's working tree
+   is never touched
+6. **Computes diffs**: Compares rendered manifests to identify changes
+7. **Recursive discovery**: If diffs contain new or modified Application CRDs,
+   adds them to the queue (see below)
+8. **Outputs results**: Displays colored terminal output and/or generates HTML report
+
+### Apps-of-Apps Rendering Order
+
+A PR can change parents and children of an apps-of-apps hierarchy at the same time, and a parent's change may itself rewrite a child's spec (e.g. its Helm values). The children a parent manages — and the specs it gives them — are only knowable by *rendering the parent*, so there is no dependency graph to sort up front. Instead, argocdf processes the queue in **waves** and corrects mis-ordered renders by requeueing:
+
+1. **Wave 0** renders every directly affected app concurrently, using its live cluster spec.
+2. After the wave completes, each app's rendered output is scanned (on both sides) for Application CRDs. When a parent's diff shows a child was **added**, the child is enqueued for the next wave. When a child was **modified**, the child is enqueued — or, if it already rendered this wave with its cluster spec, **requeued**: its stale result is discarded and it re-renders in the next wave.
+3. A discovered child renders its base side with the spec extracted from the parent's *merge-base* render and its target side with the spec from the parent's *target-branch* render — so children always reflect the values the PR actually gives them, not what the cluster currently has.
+4. Waves repeat until the queue is empty. Multi-level chains (parent → child → grandchild) propagate naturally, one level per wave.
+
+Two guards bound the recursion: `--max-depth`, and a spec-identity check that refuses to requeue an app with the same specs it was already processed with — this is what terminates self-managing root apps and mutually referencing apps.
+
+**Concurrency model**: `--concurrency` parallelizes rendering only *within* a wave. The wave boundary is a hard barrier — discovery, queueing, and requeueing run single-threaded between waves — so parallel rendering cannot reorder parent/child processing or race the recursion guards. Concurrent renders that share a chart directory serialize `helm dependency build` behind a per-chart lock. This invariant is pinned by `TestProcessApplicationsWaveBarrier` in `internal/app/app_test.go`.
+
+## Multi-Source Applications
+
+argocdf supports ArgoCD's multi-source feature where applications can have multiple sources, including `ref:` sources for external values:
+
+```yaml
+spec:
+  sources:
+    - chart: my-chart
+      repoURL: https://charts.example.com
+      helm:
+        valueFiles:
+          - $values/envs/prod/values.yaml  # References the 'values' source below
+    - repoURL: https://github.com/org/config
+      ref: values  # This source provides values files
+```
+
+## Installation
+
+Requirements:
 
 - `helm` binary in PATH (for Helm chart rendering)
 - `kustomize` binary in PATH (for Kustomize rendering)
 - Access to a Kubernetes cluster with ArgoCD Applications
 - Go 1.24+ (only if installing via `go install` or building from source)
-
-## Installation
 
 ### Homebrew
 
@@ -38,9 +83,7 @@ go install github.com/rgeraskin/argocdf/cmd/argocdf@latest
 
 ### Binary download
 
-Grab a prebuilt archive for your OS/arch from the
-[releases page](https://github.com/rgeraskin/argocdf/releases), then extract
-`argocdf` into a directory on your `PATH`.
+Grab a prebuilt archive for your OS/arch from the [releases page](https://github.com/rgeraskin/argocdf/releases), then extract `argocdf` into a directory on your `PATH`.
 
 ### From source
 
@@ -51,6 +94,8 @@ mise run build   # produces ./argocdf
 ```
 
 ## Usage
+
+argocdf runs just as well in CI as in your local terminal. For GitHub Actions, see [examples/github-actions](examples/github-actions/README.md) for a ready-to-adapt workflow.
 
 ```bash
 # Basic usage (auto-detects everything):
@@ -167,15 +212,15 @@ Every flag can also be set through an environment variable. The variable name is
 the flag name upper-cased, with dashes replaced by underscores, and prefixed with
 `ARGOCDF_`:
 
-| Flag                          | Environment variable                 |
-|-------------------------------|--------------------------------------|
-| `--repo-dir`                  | `ARGOCDF_REPO_DIR`                    |
-| `--repo-url`                  | `ARGOCDF_REPO_URL`                    |
-| `--namespace`                 | `ARGOCDF_NAMESPACE`                   |
-| `--context`                   | `ARGOCDF_CONTEXT`                     |
-| `--kustomize-enable-helm`     | `ARGOCDF_KUSTOMIZE_ENABLE_HELM`      |
-| `--kustomize-load-restrictor` | `ARGOCDF_KUSTOMIZE_LOAD_RESTRICTOR`  |
-| ...                           | `ARGOCDF_<FLAG>` for any other flag   |
+| Flag                          | Environment variable                |
+|-------------------------------|-------------------------------------|
+| `--repo-dir`                  | `ARGOCDF_REPO_DIR`                  |
+| `--repo-url`                  | `ARGOCDF_REPO_URL`                  |
+| `--namespace`                 | `ARGOCDF_NAMESPACE`                 |
+| `--context`                   | `ARGOCDF_CONTEXT`                   |
+| `--kustomize-enable-helm`     | `ARGOCDF_KUSTOMIZE_ENABLE_HELM`     |
+| `--kustomize-load-restrictor` | `ARGOCDF_KUSTOMIZE_LOAD_RESTRICTOR` |
+| ...                           | `ARGOCDF_<FLAG>` for any other flag |
 
 Precedence is **explicit flag > environment variable > default**, so a flag passed
 on the command line always wins over the matching environment variable. Empty
@@ -192,10 +237,10 @@ argocdf
 
 Two additional variables are read directly (they have no flag equivalent):
 
-| Variable                | Description                                                                       |
-|-------------------------|-----------------------------------------------------------------------------------|
+| Variable                | Description                                                                          |
+|-------------------------|--------------------------------------------------------------------------------------|
 | `ARGOCDF_EXTERNAL_DIFF` | External diff command for side-by-side terminal output (e.g. `delta --side-by-side`) |
-| `KUBECONFIG`            | Standard kubeconfig path, honored during cluster auto-detection                   |
+| `KUBECONFIG`            | Standard kubeconfig path, honored during cluster auto-detection                      |
 
 ## Commands
 
@@ -212,7 +257,7 @@ Two additional variables are read directly (they have no flag equivalent):
 Generate markdown output for GitHub PR comments:
 
 ```bash
-argocdf -q -f md-fields:diff.md
+argocdf -q -f md-fields:diff.md # md-unified looks good too
 cat diff.md  # Copy and paste into GitHub PR comment
 ```
 
@@ -245,72 +290,6 @@ Generate an interactive HTML report with side-by-side diffs:
 argocdf -f html-side-by-side:report.html
 ```
 
-## How It Works
-
-1. **Connects to cluster**: Uses kubeconfig to connect to the Kubernetes cluster
-2. **Fetches applications**: Lists ArgoCD Applications from the specified namespace(s)
-3. **Analyzes changes**: Compares git branches (from their merge base) to find changed files
-4. **Filters affected apps**: Identifies applications whose source paths have changes
-5. **Renders manifests**: For each affected app, renders both sides from ephemeral
-   worktrees (the merge base and the target branch tip) — the user's working tree
-   is never touched
-6. **Computes diffs**: Compares rendered manifests to identify changes
-7. **Recursive discovery**: If diffs contain new or modified Application CRDs,
-   adds them to the queue (see below)
-8. **Outputs results**: Displays colored terminal output and/or generates HTML report
-
-### Apps-of-Apps Rendering Order
-
-A PR can change parents and children of an apps-of-apps hierarchy at the same
-time, and a parent's change may itself rewrite a child's spec (e.g. its Helm
-values). The children a parent manages — and the specs it gives them — are only
-knowable by *rendering the parent*, so there is no dependency graph to sort
-up front. Instead, argocdf processes the queue in **waves** and corrects
-mis-ordered renders by requeueing:
-
-1. **Wave 0** renders every directly affected app concurrently, using its live
-   cluster spec.
-2. After the wave completes, each app's rendered output is scanned (on both
-   sides) for Application CRDs. When a parent's diff shows a child was **added**,
-   the child is enqueued for the next wave. When a child was **modified**, the
-   child is enqueued — or, if it already rendered this wave with its cluster
-   spec, **requeued**: its stale result is discarded and it re-renders in the
-   next wave.
-3. A discovered child renders its base side with the spec extracted from the
-   parent's *merge-base* render and its target side with the spec from the
-   parent's *target-branch* render — so children always reflect the values the
-   PR actually gives them, not what the cluster currently has.
-4. Waves repeat until the queue is empty. Multi-level chains
-   (parent → child → grandchild) propagate naturally, one level per wave.
-
-Two guards bound the recursion: `--max-depth`, and a spec-identity check that
-refuses to requeue an app with the same specs it was already processed with —
-this is what terminates self-managing root apps and mutually-referencing apps.
-
-**Concurrency model**: `--concurrency` parallelizes rendering only *within* a
-wave. The wave boundary is a hard barrier — discovery, queueing, and requeueing
-run single-threaded between waves — so parallel rendering cannot reorder
-parent/child processing or race the recursion guards. Concurrent renders that
-share a chart directory serialize `helm dependency build` behind a per-chart
-lock. This invariant is pinned by `TestProcessApplicationsWaveBarrier` in
-`internal/app/app_test.go`.
-
-## Multi-Source Applications
-
-argocdf supports ArgoCD's multi-source feature where applications can have multiple sources, including `ref:` sources for external values:
-
-```yaml
-spec:
-  sources:
-    - chart: my-chart
-      repoURL: https://charts.example.com
-      helm:
-        valueFiles:
-          - $values/envs/prod/values.yaml  # References the 'values' source below
-    - repoURL: https://github.com/org/config
-      ref: values  # This source provides values files
-```
-
 ## Development
 
 This project uses [mise](https://mise.jdx.dev/) to pin toolchain versions
@@ -339,7 +318,7 @@ mise run check
 ### End-to-end tests
 
 ```bash
-mise run e2e:bootstrap   # create a kind cluster with ArgoCD CRDs
+mise run e2e:bootstrap   # create a kind cluster with ArgoCD CRDs (WIP)
 mise run e2e:clean       # tear it down
 ```
 
