@@ -415,7 +415,7 @@ func (m *MarkdownWriter) writeSummaryAtlantis(summary Summary) error {
 
 // WriteFooter writes the footer.
 func (m *MarkdownWriter) WriteFooter() error {
-	m.write(fmt.Sprintf("\n---\n_Generated at %s by argocdf_\n", time.Now().Format(time.RFC3339)))
+	m.write(fmt.Sprintf("\n---\n_Generated at %s by [argocdf](https://github.com/rgeraskin/argocdf)_\n", time.Now().Format(time.RFC3339)))
 	return nil
 }
 

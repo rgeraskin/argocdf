@@ -487,7 +487,7 @@ func (h *HTMLWriter) writeSummaryItem(label, value, colorClass string) {
 
 // WriteFooter writes the footer.
 func (h *HTMLWriter) WriteFooter() error {
-	h.write(fmt.Sprintf(`<p class="timestamp">Generated at %s by argocdf</p>`, time.Now().Format(time.RFC3339)))
+	h.write(fmt.Sprintf(`<p class="timestamp">Generated at %s by <a href="https://github.com/rgeraskin/argocdf">argocdf</a></p>`, time.Now().Format(time.RFC3339)))
 	h.write(`</div></body></html>`)
 	return nil
 }

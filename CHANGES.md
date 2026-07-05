@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.2.2
+
+- Make the `argocdf` name in the report footer a link to the project repo (HTML and Markdown outputs)
+
 ## 0.2.1
 
 - Fix: when no applications are affected, still write a complete report to file outputs (markdown/HTML/unified) instead of leaving a 0-byte file — preserves the markdown upsert marker so CI can overwrite a stale PR comment. Terminal output stays quiet (the run already logs the empty result).
