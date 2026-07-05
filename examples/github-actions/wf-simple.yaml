@@ -1,0 +1,97 @@
+name: argocdf diff
+
+# Simple variant: runs on every PR push and posts the ArgoCD diff of all
+# affected apps as a PR comment. wf-extra.yaml is the comment-triggered,
+# hardened version with more features. Placeholders to adapt:
+#   - <self-hosted-runner>  a runner that can reach your Kubernetes API server
+#   - <your-cluster>        your cluster in the "Get kubeconfig" step
+#   - secrets: AWS_*, GH_TOKEN (GH_TOKEN only for private OCI chart deps)
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  packages: read # for the private-OCI helm login (optional)
+  pull-requests: write # post the diff comment
+
+concurrency:
+  group: argocdf-diff-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  diff:
+    name: Render ArgoCD app diffs for the PR
+    runs-on: <self-hosted-runner> # must be able to reach your Kubernetes API server
+    environment: admin # holds the cluster-access secrets (AWS_* below)
+    timeout-minutes: 30
+    env:
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+    steps:
+      - name: Checkout PR
+        uses: actions/checkout@v4
+        with:
+          # Full history so origin/main and the merge-base are available for
+          # argocdf's `git merge-base origin/main HEAD` diff.
+          fetch-depth: 0
+
+      - name: Setup mise + install tools
+        uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4.0.1
+        with:
+          install_args: >-
+            helm
+            kustomize
+            awscli
+            github:rgeraskin/argocdf
+
+      - name: Restore argocdf cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cache/argocdf
+            ~/.cache/helm
+          key: argocdf-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: argocdf-${{ runner.os }}-
+
+      # Cluster access: one concrete way (AWS EKS); swap for your provider.
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Get kubeconfig for cluster
+        run: aws eks update-kubeconfig --name <your-cluster>
+
+      # Only needed if your Helm charts pull deps from a private OCI registry.
+      - name: Login to GHCR for helm
+        run: helm registry login ghcr.io --username ${{ github.actor }} --password-stdin <<< "${{ secrets.GH_TOKEN }}"
+
+      - name: argocdf diff
+        run: |
+          argocdf --quiet \
+            --base origin/main --target HEAD \
+            --file md-unified:pr-comment.md \
+            --concurrency 4
+
+      - name: Post diff as PR comment
+        uses: peter-evans/create-or-update-comment@e8674b075228eee787fea43ef493e45ece1004c9 # v5.0.0
+        with:
+          issue-number: ${{ env.PR_NUMBER }}
+          body-path: pr-comment.md
+
+      - name: Report failure as PR comment
+        if: failure()
+        uses: peter-evans/create-or-update-comment@e8674b075228eee787fea43ef493e45ece1004c9 # v5.0.0
+        with:
+          issue-number: ${{ env.PR_NUMBER }}
+          body: |
+            <!-- argocdf-diff -->
+            ## argocdf diff
+
+            ❌ Diff failed — see the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for logs.

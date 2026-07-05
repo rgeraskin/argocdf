@@ -1,0 +1,327 @@
+name: argocdf plan
+
+# Atlantis-style ArgoCD diff for PRs: comment `argocdf` (or `argocdf plan`) on a
+# PR and this workflow renders manifests from the base branch and the PR head
+# with argocdf (https://github.com/rgeraskin/argocdf), then posts the semantic
+# diff of all affected ArgoCD Applications as a new PR comment per run.
+#
+# This is a fuller, placeholders you must adapt for your setup
+#   - <your-org>            GitHub org (and private GHCR namespace, if any)
+#   - <self-hosted-runner>  a runner that can reach your Kubernetes API server
+#   - the "Get kubeconfig" step (shown for AWS EKS; swap for your provider)
+#   - secrets: AWS_*, GH_TOKEN (only if you pull private OCI Helm chart deps)
+
+on: # yamllint disable-line rule:truthy
+  # issue_comment and workflow_dispatch only fire for workflow files already on
+  # the default branch, so a change to this file can't be exercised from its own
+  # PR. To debug such a change, uncomment the pull_request trigger below and push
+  # to the PR: it runs the job on every push to the PR head (the job already
+  # resolves the PR number trigger-agnostically). Re-comment it before merging.
+  #
+  # pull_request: # yamllint disable-line rule:empty-values
+
+  issue_comment:
+    types: [created]
+
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: PR number to plan
+        required: true
+
+# A permissions block sets every unlisted scope to `none`, so these are the
+# complete set the default GITHUB_TOKEN is granted. (The GHCR step uses the
+# GH_TOKEN PAT instead, which carries its own scopes.)
+permissions:
+  contents: read # read repo metadata; least-privilege floor for the workflow token
+  packages: read # helm chart dependencies live in a private OCI registry (optional)
+  pull-requests: write # peter-evans find/create-or-update-comment post the diff comment on the PR
+  issues: write # github-script adds the 'argocdf' label and the 👀 reaction (issues REST API)
+
+concurrency:
+  # One in-flight run per PR. The PR number is read from whichever trigger fired
+  # (issue.number for a comment, pull_request.number for the test trigger,
+  # github.event.inputs.pr_number for a manual dispatch), so every run for a PR
+  # lands in the same group; cancel-in-progress then supersedes an older run when
+  # a second `argocdf plan` (or dispatch) arrives. Each run posts a FRESH comment
+  # (no upsert) after collapsing this PR's earlier argocdf comments as OUTDATED,
+  # so serialising runs keeps that collapse-then-post sequence from interleaving
+  # — e.g. two runs posting competing diffs, or one collapsing the other's
+  # brand-new comment.
+  group: argocdf-plan-${{ github.event.issue.number || github.event.pull_request.number || github.event.inputs.pr_number }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  plan:
+    name: Render ArgoCD app diffs for the PR
+    # For comment triggers: only a PR comment whose exact body is 'argocdf' or
+    # 'argocdf plan', from an org member/owner/collaborator. Other triggers pass
+    # through.
+    if: >-
+      github.event_name != 'issue_comment' ||
+      (github.event.issue.pull_request &&
+       contains(fromJSON('["argocdf", "argocdf plan"]'), github.event.comment.body) &&
+       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
+    runs-on: <self-hosted-runner> # must be able to reach your Kubernetes API server
+    environment: admin # holds the cluster-access secrets (AWS_* below)
+    timeout-minutes: 30
+    env:
+      PR_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number || github.event.inputs.pr_number }}
+    steps:
+      # Refuse to run for fork PRs. This job holds the environment's cloud creds
+      # and the GH_TOKEN PAT, and later steps execute PR-authored content (helm
+      # dependency build, argocdf render, mise-installed tooling) — running a
+      # fork's code here would expose those secrets (the "pwn request" class).
+      # The author-association gate above only checks who *commented*, not whose
+      # *code* is checked out, so it can't cover this. Runs before checkout so
+      # untrusted code never executes if it trips.
+      # It also resolves the head to an immutable commit SHA that the checkout
+      # below pins to (instead of the mutable refs/pull/<n>/head), which closes
+      # the TOCTOU window: the ref can't be repointed between this check and the
+      # checkout.
+      - name: Refuse fork PRs and pin head SHA
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const fs = require('fs');
+            const pr = Number(process.env.PR_NUMBER);
+            // workflow_dispatch inputs are free-text strings; fail fast with a
+            // clear message instead of a cryptic pulls.get error on NaN.
+            if (!Number.isInteger(pr) || pr <= 0) {
+              core.setFailed(
+                `Invalid PR number: ${JSON.stringify(process.env.PR_NUMBER)}`,
+              );
+              return;
+            }
+            const { data } = await github.rest.pulls.get({
+              ...context.repo,
+              pull_number: pr,
+            });
+            const head = data.head.repo?.full_name; // null if the fork was deleted
+            const base = data.base.repo.full_name;
+            if (head !== base) {
+              core.setFailed(
+                `Refusing to run: PR #${pr} head repo (${head}) is a fork of ` +
+                  `${base}. This workflow executes PR code with privileged ` +
+                  `secrets and only runs for same-repo branches.`,
+              );
+              return;
+            }
+            // Hand the exact commit to the checkout step as an env var. Pinning
+            // to this SHA (vs the mutable ref) avoids the check-then-checkout
+            // TOCTOU on the PR head.
+            fs.appendFileSync(process.env.GITHUB_ENV, `PR_HEAD_SHA=${data.head.sha}\n`);
+
+      - name: Ack comment and label PR
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const pr = Number(process.env.PR_NUMBER);
+            if (context.eventName === 'issue_comment') {
+              // instant "run started" feedback on the triggering comment.
+              // Best-effort: a transient reaction error must not fail the plan.
+              try {
+                await github.rest.reactions.createForIssueComment({
+                  ...context.repo,
+                  comment_id: context.payload.comment.id,
+                  content: 'eyes',
+                });
+              } catch (e) {
+                core.warning(`reaction skipped: ${e.message}`);
+              }
+            }
+            // to audit 'argocdf' behavior we label the PR with 'argocdf'.
+            // The label itself is created once at rollout. Labelling is
+            // ancillary to the plan, so a missing label (or transient error)
+            // must not fail the run — swallow and warn.
+            try {
+              await github.rest.issues.addLabels({
+                ...context.repo,
+                issue_number: pr,
+                labels: ['argocdf'],
+              });
+            } catch (e) {
+              core.warning(`label skipped: ${e.message}`);
+            }
+
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          # Immutable commit resolved by the guard step above, not the mutable
+          # refs/pull/<n>/head — this is the TOCTOU-safe pin.
+          ref: ${{ env.PR_HEAD_SHA }}
+          # Use the default GITHUB_TOKEN (contents: read) for the checkout, not a
+          # PAT: fetching the repo at a commit only needs repo read, so any PAT
+          # stays reserved for the GHCR login (packages access the default token
+          # lacks) — less PAT exposure in a job that runs PR-authored code.
+          # Don't write the token into .git/config either: no later step does an
+          # authenticated git op (argocdf only runs local `git merge-base`), so
+          # leaving a token in the worktree is needless exposure.
+          persist-credentials: false
+          # argocdf resolves the base as `git merge-base origin/main HEAD` and
+          # diffs that merge-base ("base" side) against HEAD ("target" side).
+          # fetch-depth: 0 fetches all branches+tags and full history, which is
+          # what makes both (a) the origin/main ref exist locally and (b) the
+          # merge-base commit reachable. A shallow checkout has neither.
+          fetch-depth: 0
+
+      - name: Setup mise + install tools
+        uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4.0.1
+        with:
+          install_args: >-
+            helm
+            kustomize
+            awscli
+            github:rgeraskin/argocdf
+
+      - name: Restore argocdf cache
+        # Rolling cache of argocdf's render + downloaded-chart cache and helm's
+        # repo/dependency cache.
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cache/argocdf
+            ~/.cache/helm
+          key: argocdf-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: argocdf-${{ runner.os }}-
+
+      # --- Cluster access -----------------------------------------------------
+      # argocdf lists ArgoCD Application resources from the cluster, so the
+      # runner needs a working kubeconfig. The two steps below are one concrete
+      # way (AWS EKS); replace them with whatever produces a kubeconfig for your
+      # provider (gcloud container clusters get-credentials, az aks
+      # get-credentials, a base64 KUBECONFIG secret, etc.).
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Get kubeconfig for cluster
+        # Region is inherited from AWS_DEFAULT_REGION, which the credentials step
+        # exports from secrets.AWS_DEFAULT_REGION — one source of truth, no drift.
+        run: aws eks update-kubeconfig --name <your-cluster>
+
+      # Only needed if your Helm charts pull dependencies from a PRIVATE OCI
+      # registry: `helm dependency build` needs registry auth. A PAT with
+      # read:packages is used here because the default workflow token may lack
+      # cross-repo package access. Delete this step for public chart deps.
+      - name: Login to GHCR for helm
+        run: helm registry login ghcr.io --username ${{ github.actor }} --password-stdin <<< "${{ secrets.GH_TOKEN }}"
+
+      - name: argocdf plan
+        # repo-url / kustomize options can come from ARGOCDF_* env vars (see the
+        # examples/github-actions/README.md note on keeping local runs identical
+        # to CI). --concurrency 4 caps parallel helm renders: on a constrained
+        # runner the default (numCPU) sees the node's cores and oversubscribes.
+        run: |
+          argocdf --quiet \
+            --base origin/main --target HEAD \
+            --file md-unified:pr-comment.md \
+            --concurrency 4
+
+      - name: Upload full report artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: argocdf-report
+          path: pr-comment.md
+          if-no-files-found: ignore
+
+      - name: Fit comment to GitHub size limit
+        # Comment bodies cap at 65536 chars; head-truncate and point at the
+        # untruncated artifact uploaded above.
+        run: |
+          max=60000
+          if [ "$(wc -c < pr-comment.md)" -gt "$max" ]; then
+            # Truncate to the byte cap, then drop any trailing partial UTF-8
+            # sequence the cut may have split (the report holds multibyte chars
+            # like ⚠️). iconv -c emits only valid UTF-8; fall back to the raw
+            # byte-cut if iconv is unavailable on the runner. iconv exits 1 on
+            # the incomplete-tail warning even though it still writes the good
+            # output, so `|| true` keeps it from tripping `set -eo pipefail`.
+            if command -v iconv >/dev/null 2>&1; then
+              head -c "$max" pr-comment.md | iconv -f UTF-8 -t UTF-8 -c > pr-comment.trunc 2>/dev/null || true
+            else
+              head -c "$max" pr-comment.md > pr-comment.trunc
+            fi
+            {
+              # The byte-cut may land inside a ``` fence and/or an open
+              # <details> block (argocdf wraps every app in <details>). Close the
+              # fence first (it nests inside details), then close any still-open
+              # <details>, so the footer below renders at top level instead of
+              # being hidden inside a collapsed section. Closing a fence
+              # unconditionally would instead OPEN one when the cut fell in plain
+              # text, so gate on an odd fence-line count.
+              fences=$(grep -c '^```' pr-comment.trunc || true)
+              if [ $((fences % 2)) -ne 0 ]; then
+                printf '\n```\n'
+              fi
+              opens=$(grep -c '<details' pr-comment.trunc || true)
+              closes=$(grep -c '</details>' pr-comment.trunc || true)
+              while [ "$opens" -gt "$closes" ]; do
+                printf '\n</details>\n'
+                closes=$((closes + 1))
+              done
+              printf '\n> ⚠️ Diff truncated — full report in the `argocdf-report` artifact of %s\n' \
+                "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            } >> pr-comment.trunc
+            mv pr-comment.trunc pr-comment.md
+          fi
+
+      # Collapse this PR's earlier argocdf comments as OUTDATED before posting
+      # the new one, so the latest plan is the only expanded one while the
+      # history stays on the PR (collapsed). Runs on success and failure, and
+      # before both post steps, so it never minimizes the run's own new comment.
+      # Matches by the marker argocdf embeds as the first line, restricted to
+      # this workflow's bot author.
+      - name: Collapse previous argocdf comments
+        if: always()
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const pr = Number(process.env.PR_NUMBER);
+            const marker = '<!-- argocdf-diff -->';
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              ...context.repo, issue_number: pr, per_page: 100,
+            });
+            for (const c of comments) {
+              if (c.user?.login !== 'github-actions[bot]' || !c.body?.includes(marker)) continue;
+              try {
+                await github.graphql(
+                  `mutation($id: ID!) {
+                     minimizeComment(input: { subjectId: $id, classifier: OUTDATED }) {
+                       minimizedComment { isMinimized }
+                     }
+                   }`,
+                  { id: c.node_id },
+                );
+              } catch (e) {
+                // already minimized, or transient — not worth failing the run
+                core.info(`skip minimizing comment ${c.id}: ${e.message}`);
+              }
+            }
+
+      # A fresh comment per run (no comment-id) so results read top-to-bottom
+      # under the triggering `argocdf plan` and the PR keeps a plan history.
+      - name: Post diff as PR comment
+        uses: peter-evans/create-or-update-comment@e8674b075228eee787fea43ef493e45ece1004c9 # v5.0.0
+        with:
+          issue-number: ${{ env.PR_NUMBER }}
+          body-path: pr-comment.md
+
+      - name: Report failure as PR comment
+        if: failure()
+        uses: peter-evans/create-or-update-comment@e8674b075228eee787fea43ef493e45ece1004c9 # v5.0.0
+        with:
+          issue-number: ${{ env.PR_NUMBER }}
+          body: |
+            <!-- argocdf-diff -->
+            ## argocdf plan
+
+            ❌ Plan failed — see the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for logs.
