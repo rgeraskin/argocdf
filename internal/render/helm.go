@@ -4,10 +4,14 @@ package render
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
@@ -525,13 +529,35 @@ func (r *HelmRenderer) ensureDependencies(ctx context.Context, chartPath string)
 		return nil
 	}
 
+	// Parse the dependencies to learn which third-party HTTP(S) repositories
+	// they pull from — used by --helm-add-repos below and by the actionable
+	// hint on a missing-repo failure. A parse failure just degrades to no repo
+	// info; `helm dependency build` below surfaces the real problem.
+	var chart chartDefinition
+	_ = yaml.Unmarshal(chartYaml, &chart)
+	repoURLs := dependencyRepoURLs(chart.Dependencies)
+
+	// `helm dependency build` never adds or refreshes classic HTTP(S) repos —
+	// it requires their index to already sit in the user-level helm cache.
+	// When opted in (CI-friendly), register them up front. Off by default
+	// because it mutates the user's helm repository config.
+	if r.opts.HelmAddRepos {
+		for _, repoURL := range repoURLs {
+			if err := r.registerDependencyRepo(ctx, repoURL); err != nil {
+				return err
+			}
+		}
+	}
+
 	// Check if charts/ directory exists and has content
 	// Note: We always run helm dependency build when dependencies are defined
 	// because just checking if charts/ has *any* content is not sufficient -
 	// some dependencies might be missing while others are present.
 	// Helm is smart enough to skip already-fetched dependencies.
 
-	// Run helm dependency build with context
+	// Run helm dependency build with context. The read lock lets builds run
+	// concurrently with each other while excluding in-flight repo
+	// registrations that rewrite repositories.yaml (see helmRepoConfigMu).
 	args := []string{"dependency", "build", chartPath}
 	if r.opts.HelmSkipRefresh {
 		args = append(args, "--skip-refresh")
@@ -540,12 +566,198 @@ func (r *HelmRenderer) ensureDependencies(ctx context.Context, chartPath string)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
-	if err := cmd.Run(); err != nil {
+	helmRepoConfigMu.RLock()
+	err = cmd.Run()
+	helmRepoConfigMu.RUnlock()
+	if err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		return fmt.Errorf("helm dependency build failed: %v\nstderr: %s", err, stderr.String())
+		return dependencyBuildError(err, stderr.String(), repoURLs)
 	}
 
 	return nil
+}
+
+// chartDependency is the subset of a Chart.yaml dependency entry needed to
+// resolve its repository.
+type chartDependency struct {
+	Name       string `json:"name"`
+	Repository string `json:"repository"`
+}
+
+// chartDefinition is the subset of Chart.yaml parsed for dependency handling.
+type chartDefinition struct {
+	Dependencies []chartDependency `json:"dependencies"`
+}
+
+// dependencyRepoURLs returns the deduplicated, sorted classic HTTP(S) chart
+// repository URLs referenced by the chart's dependencies. Everything else is
+// excluded: oci:// registries (helm pulls them directly, no index needed),
+// file:// paths (local), and @alias/alias: references (they resolve through an
+// existing repositories.yaml entry, so there is no URL to add).
+func dependencyRepoURLs(deps []chartDependency) []string {
+	seen := make(map[string]bool)
+	var urls []string
+	for _, d := range deps {
+		u := strings.TrimSpace(d.Repository)
+		if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
+			continue
+		}
+		// Normalize away trailing slashes so slash variants of one repo share a
+		// dedupe key, once-state, and hash name (helm's own URL matching is
+		// trailing-slash tolerant, see findRepoByURL).
+		u = strings.TrimRight(u, "/")
+		if !seen[u] {
+			seen[u] = true
+			urls = append(urls, u)
+		}
+	}
+	sort.Strings(urls)
+	return urls
+}
+
+// depRepoStates deduplicates `helm repo add` + `helm repo update` per
+// repository URL across the whole run: charts typically share third-party
+// repos, and registering one is process-global state, so once is enough. It
+// maps a repo URL to its *depRepoState.
+var depRepoStates sync.Map
+
+// helmRepoConfigMu guards helm's process-external repository state
+// (repositories.yaml and the repo index cache) within this process. Helm
+// itself flocks repositories.yaml for writers, but readers (`helm repo list`,
+// `helm dependency build`) take no lock and the file is rewritten with a
+// truncate-then-write, so a reader racing a writer can observe a partial file.
+// Registrations take the write lock for their whole list+add+update sequence;
+// dependency builds take the read lock so they still run concurrently with
+// each other.
+var helmRepoConfigMu sync.RWMutex
+
+// depRepoState runs a repo registration exactly once and remembers its result.
+// Failures are cached for the rest of the run on purpose: many apps typically
+// share one dependency repo, and retrying a dead repo once per app would turn
+// one failure into a slow, hammering run. The trade-off is that a transient
+// error (DNS blip) is sticky until the next run — acceptable because a plan
+// run is short-lived and cheap to re-trigger, and the error names the repo.
+type depRepoState struct {
+	once sync.Once
+	err  error
+}
+
+// depRepoName derives a deterministic local name for a dependency repository
+// URL. Hash-based names cannot clobber a repo the user registered under a
+// human name, and two argocdf runs always agree on the name so --force-update
+// re-adds are no-ops.
+func depRepoName(repoURL string) string {
+	sum := sha256.Sum256([]byte(repoURL))
+	return "argocdf-dep-" + hex.EncodeToString(sum[:6])
+}
+
+// registerDependencyRepo makes a dependency repository resolvable by
+// `helm dependency build`, once per process. When the URL is already
+// registered under any name (helm matches dependencies by URL, not name), only
+// that entry's index is refreshed — nothing new is written to
+// repositories.yaml, so a developer machine with e.g. `cnpg` already added
+// stays unpolluted. Only unknown URLs get a new (hash-named) entry.
+//
+// Unlike handleRemoteChart this intentionally uses the default helm
+// environment: `helm dependency build` resolves repos from the user-level
+// config/cache, so the index must land there — which is exactly why this is
+// opt-in via --helm-add-repos.
+func (r *HelmRenderer) registerDependencyRepo(ctx context.Context, repoURL string) error {
+	s, _ := depRepoStates.LoadOrStore(repoURL, &depRepoState{})
+	st := s.(*depRepoState)
+	st.once.Do(func() {
+		// Exclusive: the list+add+update sequence must not interleave with
+		// other registrations (check-then-add consistency) or with dependency
+		// builds reading repositories.yaml (see helmRepoConfigMu).
+		helmRepoConfigMu.Lock()
+		defer helmRepoConfigMu.Unlock()
+
+		name := existingRepoName(ctx, repoURL)
+		cmds := [][]string{{"repo", "update", name}}
+		if name == "" {
+			name = depRepoName(repoURL)
+			cmds = [][]string{
+				{"repo", "add", name, repoURL, "--force-update"},
+				{"repo", "update", name},
+			}
+		}
+		for _, args := range cmds {
+			cmd := exec.CommandContext(ctx, "helm", args...)
+			if output, err := cmd.CombinedOutput(); err != nil {
+				if ctx.Err() != nil {
+					st.err = ctx.Err()
+					return
+				}
+				st.err = fmt.Errorf("helm %s %s failed for dependency repo %s: %v\noutput: %s",
+					args[0], args[1], repoURL, err, output)
+				return
+			}
+		}
+	})
+	return st.err
+}
+
+// repoListEntry is one entry of `helm repo list -o json`.
+type repoListEntry struct {
+	Name string `json:"name"`
+	URL  string `json:"url"`
+}
+
+// existingRepoName returns the name of an already-registered helm repository
+// whose URL matches repoURL, or "" when none matches or the list cannot be
+// read (helm exits non-zero when no repositories are configured at all —
+// the fresh-runner case — which just means fall through to adding).
+func existingRepoName(ctx context.Context, repoURL string) string {
+	out, err := exec.CommandContext(ctx, "helm", "repo", "list", "-o", "json").Output()
+	if err != nil {
+		return ""
+	}
+	var repos []repoListEntry
+	if err := json.Unmarshal(out, &repos); err != nil {
+		return ""
+	}
+	return findRepoByURL(repos, repoURL)
+}
+
+// findRepoByURL returns the name of the first entry matching url, ignoring
+// trailing slashes — mirroring helm's urlutil.Equal semantics used by
+// `helm dependency build` to match a dependency's repository to an entry.
+func findRepoByURL(repos []repoListEntry, url string) string {
+	want := strings.TrimRight(url, "/")
+	for _, r := range repos {
+		if strings.TrimRight(r.URL, "/") == want {
+			return r.Name
+		}
+	}
+	return ""
+}
+
+// missingRepoErr reports whether helm stderr indicates a dependency repository
+// missing from the local helm state. Helm emits "no repository definition for
+// <url>" when repositories.yaml has no entry for the URL, and "no cached
+// repository for <name> found" when an entry exists but its index was never
+// downloaded (e.g. a fresh CI runner).
+func missingRepoErr(stderr string) bool {
+	return strings.Contains(stderr, "no repository definition for") ||
+		strings.Contains(stderr, "no cached repository for")
+}
+
+// dependencyBuildError wraps a `helm dependency build` failure, appending an
+// actionable hint when stderr shows the well-known unregistered-repository
+// failure: which repos to `helm repo add`, and that --helm-add-repos automates
+// it for CI.
+func dependencyBuildError(err error, stderr string, repoURLs []string) error {
+	buildErr := fmt.Errorf("helm dependency build failed: %v\nstderr: %s", err, stderr)
+	if !missingRepoErr(stderr) {
+		return buildErr
+	}
+	hint := "the chart's dependency repositories are not registered in the local helm cache"
+	if len(repoURLs) > 0 {
+		hint += fmt.Sprintf("; run `helm repo add <name> <url> && helm repo update` for: %s",
+			strings.Join(repoURLs, " "))
+	}
+	hint += " — or pass --helm-add-repos (ARGOCDF_HELM_ADD_REPOS=true) to let argocdf register them (intended for CI)"
+	return fmt.Errorf("%w\nhint: %s", buildErr, hint)
 }

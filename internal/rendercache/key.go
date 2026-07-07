@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"io"
 	"path"
+	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/rgeraskin/argocdf/internal/cluster"
+	"sigs.k8s.io/yaml"
 )
 
 // SchemaVersion is embedded in every cache key. Bump it to invalidate all
@@ -28,6 +30,13 @@ type KeyOptions struct {
 	KustomizeBuildOptions   string
 	KustomizeLoadRestrictor string
 	HelmSkipRefresh         bool
+	// HelmAddRepos participates in the key for the same reason HelmSkipRefresh
+	// does: the explicit `helm repo update` it triggers can change which
+	// dependency versions a version-range resolves to, so flag-on and flag-off
+	// renders must not share cache entries. The flag value alone cannot capture
+	// the mutable repo index content, so the range-without-lock case bypasses
+	// the cache entirely — see chartDepsHermetic.
+	HelmAddRepos bool
 }
 
 // KeyInput bundles everything required to compute a cache key for a single
@@ -54,6 +63,12 @@ type KeyInput struct {
 	// implement this with git.NormalizeRepoURL. When nil, every ref is treated
 	// as external (conservative bypass).
 	SameRepo func(repoURL string) bool
+	// ReadFile returns the content of a repo-relative file at the given commit.
+	// It is used to inspect a local chart's Chart.yaml dependencies for cache
+	// soundness (see the hermeticity note in ComputeKey). It must return
+	// ok=false when the file cannot be read. When nil, charts that would need
+	// inspection are conservatively bypassed.
+	ReadFile func(commit, path string) (content string, ok bool)
 }
 
 // ComputeKey computes the sha256 hex cache key for a render. It returns
@@ -70,6 +85,10 @@ type KeyInput struct {
 //     paths resolve against the ref source's path). A value file that is absent
 //     at the commit contributes an "absent" sentinel rather than a bypass,
 //     because absence is itself part of the render identity.
+//   - Helm dependency resolution must be hermetic at the commit to be
+//     cacheable: a chart whose dependency uses a version RANGE with no
+//     committed Chart.lock resolves against the mutable repo index, so it
+//     bypasses the cache (see chartDepsHermetic).
 //   - Kustomize / directory / unknown sources can reference arbitrary repo
 //     paths (bases, components, patches) that cannot be cheaply enumerated. To
 //     stay sound we hash the commit's ROOT tree instead of the source-path
@@ -105,6 +124,7 @@ func ComputeKey(in KeyInput) (string, bool) {
 		in.Options.KustomizeBuildOptions,
 		in.Options.KustomizeLoadRestrictor,
 		strconv.FormatBool(in.Options.HelmSkipRefresh),
+		strconv.FormatBool(in.Options.HelmAddRepos),
 	)
 
 	sources := in.Spec.GetSources()
@@ -141,6 +161,18 @@ func ComputeKey(in KeyInput) (string, bool) {
 				return "", false
 			}
 			writeField("helm", src.Path, treeHash)
+
+			// Dependency hermeticity: a committed Chart.lock pins dependency
+			// resolution and is already part of the tree hash above. Without a
+			// lock, a dependency whose version is a RANGE resolves against the
+			// mutable repo index, so the same commit can legitimately render
+			// differently after an index refresh (e.g. --helm-add-repos runs
+			// `helm repo update`) — such renders must bypass the cache.
+			// Exactly-pinned versions resolve deterministically and stay
+			// cacheable.
+			if !chartDepsHermetic(src.Path, in.Commit, in.ResolveTree, in.ReadFile) {
+				return "", false
+			}
 
 			if src.Helm != nil {
 				extra := make([]string, 0, len(src.Helm.ValueFiles)+len(src.Helm.FileParameters))
@@ -243,4 +275,57 @@ func pathEscapesRepo(p string) bool {
 		return true
 	}
 	return p == ".." || strings.HasPrefix(p, "../")
+}
+
+// chartDepsHermetic reports whether a local chart's dependency resolution is
+// deterministic at the commit, i.e. safe to cache. It is hermetic when a
+// Chart.lock is committed (resolution is pinned, and the lock participates in
+// the tree hash), when there is no Chart.yaml or no dependencies, or when
+// every dependency version is an exact semver. It is NOT hermetic — bypass —
+// when any dependency uses a version range without a lock, when Chart.yaml
+// exists but cannot be read or parsed, or when readFile is nil and inspection
+// is needed.
+func chartDepsHermetic(
+	srcPath, commit string,
+	resolve func(commit, path string) (string, bool),
+	readFile func(commit, path string) (string, bool),
+) bool {
+	if _, ok := resolve(commit, path.Join(srcPath, "Chart.lock")); ok {
+		return true // lock pins resolution and is hashed with the chart tree
+	}
+	chartYamlPath := path.Join(srcPath, "Chart.yaml")
+	if _, ok := resolve(commit, chartYamlPath); !ok {
+		return true // no Chart.yaml -> no helm dependencies to resolve
+	}
+	if readFile == nil {
+		return false
+	}
+	content, ok := readFile(commit, chartYamlPath)
+	if !ok {
+		return false
+	}
+	var chart struct {
+		Dependencies []struct {
+			Version string `json:"version"`
+		} `json:"dependencies"`
+	}
+	if err := yaml.Unmarshal([]byte(content), &chart); err != nil {
+		return false
+	}
+	for _, d := range chart.Dependencies {
+		if !exactSemver(d.Version) {
+			return false
+		}
+	}
+	return true
+}
+
+// exactSemverRe matches a single exact semver version (optional v prefix,
+// optional prerelease/build metadata). Anything else — operators (^ ~ > <),
+// wildcards (x, *), hyphen ranges, ORs, empty — is a range.
+var exactSemverRe = regexp.MustCompile(`^v?\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$`)
+
+// exactSemver reports whether the version string pins one exact version.
+func exactSemver(version string) bool {
+	return exactSemverRe.MatchString(strings.TrimSpace(version))
 }

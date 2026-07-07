@@ -135,6 +135,19 @@ func (r *Repository) TreeHash(commit, path string) (string, error) {
 	return r.run("rev-parse", commit+":"+cleanPath)
 }
 
+// FileContent returns the content of a file at the specified commit, read
+// directly from the object database via `git show <commit>:<path>` — no
+// checkout required. Trailing whitespace is trimmed (see run), which is
+// harmless for the YAML/config probing this supports. An error is returned
+// when the path does not exist at the commit.
+func (r *Repository) FileContent(commit, path string) (string, error) {
+	cleanPath := strings.Trim(strings.TrimSpace(path), "/")
+	if cleanPath == "" {
+		return "", fmt.Errorf("file path is empty")
+	}
+	return r.run("show", commit+":"+cleanPath)
+}
+
 // GetWorktreeForBranch returns the worktree path for a branch if it's checked out in a worktree.
 // Returns empty string if the branch is not in any worktree.
 func (r *Repository) GetWorktreeForBranch(branchName string) (string, error) {

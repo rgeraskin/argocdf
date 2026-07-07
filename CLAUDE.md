@@ -101,6 +101,8 @@ When rendering local Helm charts, argocdf automatically runs `helm dependency bu
 
 This ensures charts with dependencies (like umbrella charts) render correctly without manual setup.
 
+Caveat: `helm dependency build` never adds or refreshes classic HTTP(S) chart repositories — their index must already be in the local helm cache, which on a fresh CI runner it never is (fails with "no cached repository"/"no repository definition"). The opt-in `--helm-add-repos` flag makes argocdf register those repos first, deduplicated per URL per run: a URL already registered under any name is only refreshed (helm matches dependency repos by URL, so no new entry is written), and only unknown URLs are added, under hash-derived names that can never clobber a user's entry. It still mutates local helm state either way — index caches are refreshed and unknown URLs get new repositories.yaml entries — which is why it is off by default; the missing-repo error message points at it.
+
 ## Running the Tool
 
 ```bash

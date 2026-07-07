@@ -838,6 +838,7 @@ func (a *App) renderCacheKey(app *cluster.Application, commit string) (string, b
 			KustomizeBuildOptions:   a.cfg.KustomizeBuildOptions,
 			KustomizeLoadRestrictor: a.cfg.KustomizeLoadRestrictor,
 			HelmSkipRefresh:         a.cfg.HelmSkipRefresh,
+			HelmAddRepos:            a.cfg.HelmAddRepos,
 		},
 		Commit: commit,
 		ResolveTree: func(commit, path string) (string, bool) {
@@ -851,6 +852,13 @@ func (a *App) renderCacheKey(app *cluster.Application, commit string) (string, b
 		// the repository being diffed; external-repo refs force a cache bypass.
 		SameRepo: func(repoURL string) bool {
 			return git.NormalizeRepoURL(repoURL) == localRepoURL
+		},
+		ReadFile: func(commit, path string) (string, bool) {
+			content, rerr := a.repo.FileContent(commit, path)
+			if rerr != nil {
+				return "", false
+			}
+			return content, true
 		},
 	})
 }

@@ -57,6 +57,7 @@ var (
 
 	// Helm options
 	helmSkipRefresh bool
+	helmAddRepos    bool
 	noAPIVersions   bool
 
 	// Render cache options
@@ -181,6 +182,8 @@ Examples:
 	// Helm options
 	rootCmd.Flags().BoolVar(&helmSkipRefresh, "helm-skip-refresh", true,
 		"Skip refreshing repository cache during helm dependency build")
+	rootCmd.Flags().BoolVar(&helmAddRepos, "helm-add-repos", false,
+		"Make chart dependency repos resolvable before dependency build: refresh a matching existing entry, or helm repo add + update unknown URLs; mutates the local helm config/cache, intended for CI")
 	rootCmd.Flags().BoolVar(&noAPIVersions, "no-api-versions", false,
 		"Do not pass cluster-discovered API versions to helm via --api-versions")
 
@@ -372,6 +375,7 @@ func runMain(cmd *cobra.Command, args []string) error {
 		KustomizeBuildOptions:   kustomizeBuildOptions,
 		KustomizeLoadRestrictor: kustomizeLoadRestrictor,
 		HelmSkipRefresh:         helmSkipRefresh,
+		HelmAddRepos:            helmAddRepos,
 		NoAPIVersions:           noAPIVersions,
 		NoCache:                 noCache,
 		CacheDir:                cacheDir,

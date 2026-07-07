@@ -76,11 +76,15 @@ jobs:
         # `split` keeps pr-comment.md under GitHub's 65,536-char comment cap; an
         # oversized report is split into self-contained parts (pr-comment.md,
         # pr-comment.2.md, ...).
+        # --helm-add-repos: a fresh runner has no helm repo cache, and
+        # `helm dependency build` never adds/refreshes classic HTTP(S) chart
+        # repos itself, so argocdf registers them first (see the README note).
         run: |
           argocdf --quiet \
             --base origin/main --target HEAD \
             --file md-unified,split:pr-comment.md \
-            --concurrency 4
+            --concurrency 4 \
+            --helm-add-repos
 
       # An oversized plan arrives as several part files; post each as its own
       # comment so the whole plan is on the PR. A report that fits is a single

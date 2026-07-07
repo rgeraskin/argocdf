@@ -51,6 +51,11 @@ type RenderOptions struct {
 
 	// Helm options
 	HelmSkipRefresh bool
+	// HelmAddRepos registers chart dependency HTTP(S) repositories in the
+	// user-level helm config (`helm repo add` + `helm repo update`) before
+	// `helm dependency build`. Off by default because it mutates the user's
+	// helm repository config; intended for ephemeral CI runners.
+	HelmAddRepos bool
 
 	// ChartCacheDir is the directory under which pulled remote charts (pinned
 	// to an immutable version) are cached and reused across runs. Empty

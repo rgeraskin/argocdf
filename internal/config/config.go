@@ -93,6 +93,10 @@ type Config struct {
 
 	// Helm options
 	HelmSkipRefresh bool
+	// HelmAddRepos registers chart dependency repositories (helm repo add +
+	// update) before dependency build. Mutates the local helm config; intended
+	// for CI.
+	HelmAddRepos bool
 
 	// NoAPIVersions disables passing cluster-discovered API versions to helm
 	// via --api-versions (faster; useful for compatibility).

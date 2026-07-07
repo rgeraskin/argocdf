@@ -3,7 +3,12 @@ package render
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -636,5 +641,486 @@ func TestHelmSkipRefresh_CommandArgs(t *testing.T) {
 					r.opts.HelmSkipRefresh, tt.helmSkipRefresh)
 			}
 		})
+	}
+}
+
+// TestDependencyRepoURLs verifies that only classic HTTP(S) repositories are
+// collected from chart dependencies: oci://, file://, and @alias references
+// are excluded, duplicates collapse (including trailing-slash variants of one
+// URL), and the result is sorted and slash-normalized.
+func TestDependencyRepoURLs(t *testing.T) {
+	deps := []chartDependency{
+		{Name: "cluster", Repository: "https://cloudnative-pg.github.io/charts"},
+		{Name: "again", Repository: "https://cloudnative-pg.github.io/charts"},    // duplicate
+		{Name: "slashed", Repository: "https://cloudnative-pg.github.io/charts/"}, // slash variant of the same repo
+		{Name: "app", Repository: "oci://ghcr.io/example"},                        // OCI: no index needed
+		{Name: "local", Repository: "file://../sibling-chart"},                    // local path
+		{Name: "aliased", Repository: "@stable"},                                  // alias: needs an existing entry
+		{Name: "insecure", Repository: "http://charts.internal.example"},
+		{Name: "spaced", Repository: "  https://charts.example.io  "}, // trimmed
+		{Name: "vendored", Repository: ""},                            // chart vendored in charts/
+	}
+
+	got := dependencyRepoURLs(deps)
+	want := []string{
+		"http://charts.internal.example",
+		"https://charts.example.io",
+		"https://cloudnative-pg.github.io/charts",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("dependencyRepoURLs() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("dependencyRepoURLs()[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// TestDepRepoName verifies the derived repo name is deterministic per URL and
+// distinct across URLs, so re-adds are no-ops and user repos can't be clobbered.
+func TestDepRepoName(t *testing.T) {
+	a1 := depRepoName("https://cloudnative-pg.github.io/charts")
+	a2 := depRepoName("https://cloudnative-pg.github.io/charts")
+	b := depRepoName("https://charts.example.io")
+
+	if a1 != a2 {
+		t.Errorf("depRepoName not deterministic: %q != %q", a1, a2)
+	}
+	if a1 == b {
+		t.Errorf("depRepoName collision for distinct URLs: %q", a1)
+	}
+	if !strings.HasPrefix(a1, "argocdf-dep-") {
+		t.Errorf("depRepoName = %q, want argocdf-dep- prefix", a1)
+	}
+}
+
+// TestMissingRepoErr covers both helm failure messages for an unregistered
+// dependency repository.
+func TestMissingRepoErr(t *testing.T) {
+	tests := []struct {
+		name   string
+		stderr string
+		want   bool
+	}{
+		{
+			name: "index never downloaded",
+			stderr: "Error: no cached repository for helm-manager-b8d1a67b found. " +
+				"(try 'helm repo update')",
+			want: true,
+		},
+		{
+			name:   "repo not in repositories.yaml",
+			stderr: "Error: no repository definition for https://cloudnative-pg.github.io/charts.",
+			want:   true,
+		},
+		{
+			name:   "unrelated failure",
+			stderr: "Error: can't get a valid version for repositories postgresql",
+			want:   false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := missingRepoErr(tt.stderr); got != tt.want {
+				t.Errorf("missingRepoErr(%q) = %v, want %v", tt.stderr, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestDependencyBuildError verifies the actionable hint: present (with repo
+// URLs and the --helm-add-repos pointer) on a missing-repo failure, absent on
+// unrelated failures.
+func TestDependencyBuildError(t *testing.T) {
+	baseErr := fmt.Errorf("exit status 1")
+	repos := []string{"https://cloudnative-pg.github.io/charts"}
+
+	t.Run("missing repo gets hint", func(t *testing.T) {
+		err := dependencyBuildError(baseErr,
+			"Error: no cached repository for helm-manager-b8d1 found. (try 'helm repo update')",
+			repos)
+		msg := err.Error()
+		for _, want := range []string{
+			"helm dependency build failed",
+			"hint:",
+			"https://cloudnative-pg.github.io/charts",
+			"--helm-add-repos",
+			"ARGOCDF_HELM_ADD_REPOS",
+		} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("error message missing %q:\n%s", want, msg)
+			}
+		}
+	})
+
+	t.Run("missing repo without parsed URLs still hints", func(t *testing.T) {
+		err := dependencyBuildError(baseErr,
+			"Error: no repository definition for https://charts.example.io.", nil)
+		msg := err.Error()
+		if !strings.Contains(msg, "hint:") || !strings.Contains(msg, "--helm-add-repos") {
+			t.Errorf("expected generic hint, got:\n%s", msg)
+		}
+	})
+
+	t.Run("unrelated failure gets no hint", func(t *testing.T) {
+		err := dependencyBuildError(baseErr, "Error: something else entirely", repos)
+		if strings.Contains(err.Error(), "hint:") {
+			t.Errorf("unexpected hint on unrelated failure:\n%s", err.Error())
+		}
+	})
+}
+
+// TestEnsureDependencies_AddRepos drives the full missing-repo scenario against
+// a real helm binary with an isolated helm home (no network: the dependency
+// repo is a local httptest server). It pins both sides of --helm-add-repos:
+// without it a fresh environment fails with the actionable hint; with it
+// argocdf registers the repo and the build succeeds.
+func TestEnsureDependencies_AddRepos(t *testing.T) {
+	if err := exec.Command("helm", "version", "--short").Run(); err != nil {
+		t.Skip("helm binary not available")
+	}
+
+	// Build a dependency chart and a repo index for it, then serve both.
+	repoDir := t.TempDir()
+	depChartDir := filepath.Join(repoDir, "dep-src")
+	if err := os.MkdirAll(depChartDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	depChartYaml := `apiVersion: v2
+name: depchart
+version: 0.1.0
+`
+	if err := os.WriteFile(filepath.Join(depChartDir, "Chart.yaml"), []byte(depChartYaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("helm", "package", depChartDir, "--destination", repoDir).CombinedOutput(); err != nil {
+		t.Fatalf("helm package: %v\n%s", err, out)
+	}
+
+	srv := httptest.NewServer(http.FileServer(http.Dir(repoDir)))
+	defer srv.Close()
+
+	if out, err := exec.Command("helm", "repo", "index", repoDir, "--url", srv.URL).CombinedOutput(); err != nil {
+		t.Fatalf("helm repo index: %v\n%s", err, out)
+	}
+
+	// Parent chart depending on the served repo.
+	parentDir := t.TempDir()
+	parentChartYaml := fmt.Sprintf(`apiVersion: v2
+name: parent
+version: 0.1.0
+dependencies:
+  - name: depchart
+    version: 0.1.0
+    repository: %s
+`, srv.URL)
+	if err := os.WriteFile(filepath.Join(parentDir, "Chart.yaml"), []byte(parentChartYaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Isolate helm state so the test neither sees nor touches the user's repos.
+	// Child helm processes inherit these via os.Environ().
+	helmHome := t.TempDir()
+	t.Setenv("HELM_CONFIG_HOME", filepath.Join(helmHome, "config"))
+	t.Setenv("HELM_CACHE_HOME", filepath.Join(helmHome, "cache"))
+	t.Setenv("HELM_DATA_HOME", filepath.Join(helmHome, "data"))
+
+	// Without --helm-add-repos: fresh environment, repo unknown -> actionable hint.
+	r := NewHelmRenderer(RenderOptions{HelmSkipRefresh: true})
+	err := r.ensureDependencies(context.TODO(), parentDir)
+	if err == nil {
+		t.Fatal("expected missing-repo error without HelmAddRepos, got nil")
+	}
+	for _, want := range []string{"hint:", "--helm-add-repos", srv.URL} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error missing %q:\n%s", want, err.Error())
+		}
+	}
+
+	// With --helm-add-repos: argocdf registers the repo, build succeeds.
+	r = NewHelmRenderer(RenderOptions{HelmSkipRefresh: true, HelmAddRepos: true})
+	if err := r.ensureDependencies(context.TODO(), parentDir); err != nil {
+		t.Fatalf("ensureDependencies with HelmAddRepos: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(parentDir, "charts", "depchart-0.1.0.tgz")); err != nil {
+		t.Errorf("dependency not vendored into charts/: %v", err)
+	}
+}
+
+// TestFindRepoByURL verifies URL matching against registered repos: exact
+// match, trailing-slash insensitivity (both directions), and no match.
+func TestFindRepoByURL(t *testing.T) {
+	repos := []repoListEntry{
+		{Name: "cnpg", URL: "https://cloudnative-pg.github.io/charts"},
+		{Name: "vm", URL: "https://victoriametrics.github.io/helm-charts/"},
+	}
+	tests := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{name: "exact", url: "https://cloudnative-pg.github.io/charts", want: "cnpg"},
+		{name: "query has trailing slash", url: "https://cloudnative-pg.github.io/charts/", want: "cnpg"},
+		{name: "entry has trailing slash", url: "https://victoriametrics.github.io/helm-charts", want: "vm"},
+		{name: "no match", url: "https://charts.example.io", want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := findRepoByURL(repos, tt.url); got != tt.want {
+				t.Errorf("findRepoByURL(%q) = %q, want %q", tt.url, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestEnsureDependencies_ReusesExistingRepo verifies that --helm-add-repos
+// does not pollute repositories.yaml when the dependency's repo URL is already
+// registered under a human name: the existing entry is refreshed and reused
+// (even across a trailing-slash difference), and no argocdf-dep-* entry is
+// added.
+func TestEnsureDependencies_ReusesExistingRepo(t *testing.T) {
+	if err := exec.Command("helm", "version", "--short").Run(); err != nil {
+		t.Skip("helm binary not available")
+	}
+
+	// Local chart repo (no network), same setup as TestEnsureDependencies_AddRepos.
+	repoDir := t.TempDir()
+	depChartDir := filepath.Join(repoDir, "dep-src")
+	if err := os.MkdirAll(depChartDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	depChartYaml := `apiVersion: v2
+name: depchart
+version: 0.1.0
+`
+	if err := os.WriteFile(filepath.Join(depChartDir, "Chart.yaml"), []byte(depChartYaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("helm", "package", depChartDir, "--destination", repoDir).CombinedOutput(); err != nil {
+		t.Fatalf("helm package: %v\n%s", err, out)
+	}
+	srv := httptest.NewServer(http.FileServer(http.Dir(repoDir)))
+	defer srv.Close()
+	if out, err := exec.Command("helm", "repo", "index", repoDir, "--url", srv.URL).CombinedOutput(); err != nil {
+		t.Fatalf("helm repo index: %v\n%s", err, out)
+	}
+
+	// The chart references the repo WITH a trailing slash while the user's
+	// entry (added below) has none — reuse must match across that difference.
+	parentDir := t.TempDir()
+	parentChartYaml := fmt.Sprintf(`apiVersion: v2
+name: parent
+version: 0.1.0
+dependencies:
+  - name: depchart
+    version: 0.1.0
+    repository: %s/
+`, srv.URL)
+	if err := os.WriteFile(filepath.Join(parentDir, "Chart.yaml"), []byte(parentChartYaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Isolated helm home with the repo pre-registered under a human name,
+	// simulating a developer machine.
+	helmHome := t.TempDir()
+	t.Setenv("HELM_CONFIG_HOME", filepath.Join(helmHome, "config"))
+	t.Setenv("HELM_CACHE_HOME", filepath.Join(helmHome, "cache"))
+	t.Setenv("HELM_DATA_HOME", filepath.Join(helmHome, "data"))
+	if out, err := exec.Command("helm", "repo", "add", "myrepo", srv.URL).CombinedOutput(); err != nil {
+		t.Fatalf("helm repo add myrepo: %v\n%s", err, out)
+	}
+
+	r := NewHelmRenderer(RenderOptions{HelmSkipRefresh: true, HelmAddRepos: true})
+	if err := r.ensureDependencies(context.TODO(), parentDir); err != nil {
+		t.Fatalf("ensureDependencies: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(parentDir, "charts", "depchart-0.1.0.tgz")); err != nil {
+		t.Errorf("dependency not vendored into charts/: %v", err)
+	}
+
+	// repositories.yaml must still hold exactly the user's entry: reuse means
+	// no argocdf-dep-* pollution.
+	out, err := exec.Command("helm", "repo", "list", "-o", "json").Output()
+	if err != nil {
+		t.Fatalf("helm repo list: %v", err)
+	}
+	var repos []repoListEntry
+	if err := json.Unmarshal(out, &repos); err != nil {
+		t.Fatalf("parse repo list: %v", err)
+	}
+	if len(repos) != 1 || repos[0].Name != "myrepo" {
+		t.Errorf("repositories polluted: %+v, want only 'myrepo'", repos)
+	}
+}
+
+// TestRegisterDependencyRepo_FailurePropagatesAndCaches drives the flag-on
+// path against an unreachable repo: ensureDependencies must surface the
+// registration failure (not a confusing downstream build error), and a retry
+// for the same URL within the process must return the cached error without
+// re-attempting (once-per-URL semantics).
+func TestRegisterDependencyRepo_FailurePropagatesAndCaches(t *testing.T) {
+	if err := exec.Command("helm", "version", "--short").Run(); err != nil {
+		t.Skip("helm binary not available")
+	}
+
+	// A server that is immediately closed: connection refused, fails fast.
+	srv := httptest.NewServer(http.NotFoundHandler())
+	deadURL := srv.URL
+	srv.Close()
+
+	chartDir := t.TempDir()
+	chartYaml := fmt.Sprintf(`apiVersion: v2
+name: parent
+version: 0.1.0
+dependencies:
+  - name: depchart
+    version: 0.1.0
+    repository: %s
+`, deadURL)
+	if err := os.WriteFile(filepath.Join(chartDir, "Chart.yaml"), []byte(chartYaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	helmHome := t.TempDir()
+	t.Setenv("HELM_CONFIG_HOME", filepath.Join(helmHome, "config"))
+	t.Setenv("HELM_CACHE_HOME", filepath.Join(helmHome, "cache"))
+	t.Setenv("HELM_DATA_HOME", filepath.Join(helmHome, "data"))
+
+	r := NewHelmRenderer(RenderOptions{HelmSkipRefresh: true, HelmAddRepos: true})
+	err1 := r.ensureDependencies(context.TODO(), chartDir)
+	if err1 == nil {
+		t.Fatal("expected registration error for unreachable repo, got nil")
+	}
+	if !strings.Contains(err1.Error(), "failed for dependency repo "+deadURL) {
+		t.Errorf("error does not identify the failing repo:\n%s", err1.Error())
+	}
+
+	// Same URL again (second chart in the same run): the exact cached error
+	// value must come back — pointer identity proves no re-attempt happened
+	// (ensureDependencies returns the registration error unwrapped).
+	err2 := r.registerDependencyRepo(context.TODO(), deadURL)
+	if err2 != err1 { //nolint:errorlint // identity, not equivalence, is the point
+		t.Errorf("expected the cached error value, got a different one:\nfirst:  %v\nsecond: %v", err1, err2)
+	}
+}
+
+// TestEnsureDependencies_MalformedChartYaml verifies the deliberate
+// degradation: an unparsable Chart.yaml that still contains a dependencies
+// section yields helm's own build error (no panic, no bogus repo hint).
+func TestEnsureDependencies_MalformedChartYaml(t *testing.T) {
+	if err := exec.Command("helm", "version", "--short").Run(); err != nil {
+		t.Skip("helm binary not available")
+	}
+
+	chartDir := t.TempDir()
+	// Tab indentation is invalid YAML; the "dependencies:" line still trips
+	// the quick string check, so dependency build runs and helm reports the
+	// parse failure itself.
+	chartYaml := "apiVersion: v2\nname: broken\nversion: 0.1.0\ndependencies:\n\t- name: x\n"
+	if err := os.WriteFile(filepath.Join(chartDir, "Chart.yaml"), []byte(chartYaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	helmHome := t.TempDir()
+	t.Setenv("HELM_CONFIG_HOME", filepath.Join(helmHome, "config"))
+	t.Setenv("HELM_CACHE_HOME", filepath.Join(helmHome, "cache"))
+	t.Setenv("HELM_DATA_HOME", filepath.Join(helmHome, "data"))
+
+	r := NewHelmRenderer(RenderOptions{HelmSkipRefresh: true, HelmAddRepos: true})
+	err := r.ensureDependencies(context.TODO(), chartDir)
+	if err == nil {
+		t.Fatal("expected error for malformed Chart.yaml, got nil")
+	}
+	if !strings.Contains(err.Error(), "helm dependency build failed") {
+		t.Errorf("expected helm's build error, got:\n%s", err.Error())
+	}
+	if strings.Contains(err.Error(), "hint:") {
+		t.Errorf("no repo hint should appear for a parse failure:\n%s", err.Error())
+	}
+}
+
+// TestEnsureDependencies_ConcurrentDistinctRepos exercises the parallel-render
+// scenario the reviews flagged: several charts, each depending on a DIFFERENT
+// repository, building dependencies concurrently under one isolated helm home.
+// All registrations and builds must succeed and repositories.yaml must end up
+// with every repo (helm flocks writers, argocdf's helmRepoConfigMu excludes
+// readers from the truncate-write window). Run with -race.
+func TestEnsureDependencies_ConcurrentDistinctRepos(t *testing.T) {
+	if err := exec.Command("helm", "version", "--short").Run(); err != nil {
+		t.Skip("helm binary not available")
+	}
+
+	const nRepos = 4
+
+	helmHome := t.TempDir()
+	t.Setenv("HELM_CONFIG_HOME", filepath.Join(helmHome, "config"))
+	t.Setenv("HELM_CACHE_HOME", filepath.Join(helmHome, "cache"))
+	t.Setenv("HELM_DATA_HOME", filepath.Join(helmHome, "data"))
+
+	// One dependency chart + repo index per server, one parent chart per repo.
+	parents := make([]string, nRepos)
+	for i := 0; i < nRepos; i++ {
+		repoDir := t.TempDir()
+		depChartDir := filepath.Join(repoDir, "dep-src")
+		if err := os.MkdirAll(depChartDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		depChartYaml := fmt.Sprintf("apiVersion: v2\nname: depchart%d\nversion: 0.1.0\n", i)
+		if err := os.WriteFile(filepath.Join(depChartDir, "Chart.yaml"), []byte(depChartYaml), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if out, err := exec.Command("helm", "package", depChartDir, "--destination", repoDir).CombinedOutput(); err != nil {
+			t.Fatalf("helm package: %v\n%s", err, out)
+		}
+		srv := httptest.NewServer(http.FileServer(http.Dir(repoDir)))
+		t.Cleanup(srv.Close)
+		if out, err := exec.Command("helm", "repo", "index", repoDir, "--url", srv.URL).CombinedOutput(); err != nil {
+			t.Fatalf("helm repo index: %v\n%s", err, out)
+		}
+
+		parentDir := t.TempDir()
+		parentChartYaml := fmt.Sprintf(`apiVersion: v2
+name: parent%d
+version: 0.1.0
+dependencies:
+  - name: depchart%d
+    version: 0.1.0
+    repository: %s
+`, i, i, srv.URL)
+		if err := os.WriteFile(filepath.Join(parentDir, "Chart.yaml"), []byte(parentChartYaml), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		parents[i] = parentDir
+	}
+
+	r := NewHelmRenderer(RenderOptions{HelmSkipRefresh: true, HelmAddRepos: true})
+	errs := make([]error, nRepos)
+	var wg sync.WaitGroup
+	for i := 0; i < nRepos; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = r.ensureDependencies(context.TODO(), parents[i])
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("chart %d: ensureDependencies: %v", i, err)
+		}
+	}
+
+	out, err := exec.Command("helm", "repo", "list", "-o", "json").Output()
+	if err != nil {
+		t.Fatalf("helm repo list: %v", err)
+	}
+	var repos []repoListEntry
+	if err := json.Unmarshal(out, &repos); err != nil {
+		t.Fatalf("parse repo list: %v", err)
+	}
+	if len(repos) != nRepos {
+		t.Errorf("repositories.yaml has %d entries, want %d: %+v", len(repos), nRepos, repos)
 	}
 }

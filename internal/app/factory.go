@@ -60,6 +60,7 @@ func (f *Factory) CreateRenderFactory(kubeVersion string, apiVersions []string) 
 		KustomizeBuildOptions:   f.config.KustomizeBuildOptions,
 		KustomizeLoadRestrictor: f.config.KustomizeLoadRestrictor,
 		HelmSkipRefresh:         f.config.HelmSkipRefresh,
+		HelmAddRepos:            f.config.HelmAddRepos,
 		ChartCacheDir:           f.chartCacheDir(),
 	}
 	return render.NewFactory(opts)

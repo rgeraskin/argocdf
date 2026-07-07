@@ -165,6 +165,7 @@ ARGOCDF_EXTERNAL_DIFF="delta --side-by-side" argocdf
 | `--kustomize-build-options`   | Additional kustomize build options (space-separated)                     | (none)        |
 | `--kustomize-load-restrictor` | Load restrictor mode (e.g., `LoadRestrictionsNone`)                      | (none)        |
 | `--helm-skip-refresh`         | Skip refreshing the repo cache during `helm dependency build`            | `true`        |
+| `--helm-add-repos`            | Make chart dependency repos resolvable before dependency build: refresh a matching existing entry, or `helm repo add` + `update` unknown URLs. Mutates the local helm config/cache; intended for CI | `false`       |
 | `--no-api-versions`           | Do not pass cluster-discovered API versions to helm via `--api-versions` | `false`       |
 
 ### Output Flags
