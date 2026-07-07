@@ -811,3 +811,134 @@ func TestProcessApplicationsWaveBarrier(t *testing.T) {
 		t.Errorf("child rendered %d times, want 4 (base+target, premature and corrected)", childCalls)
 	}
 }
+
+// newChildFakeRenderer simulates a parent app that adds a brand-new child
+// Application on the target branch. Rendering the new child against the base
+// worktree fails hard — mimicking helm erroring on a values file that exists
+// only on the target branch (the child's chart directory pre-exists on base,
+// so the sourcePathsExist guard would not catch it).
+type newChildFakeRenderer struct {
+	baseWorktree   string
+	targetWorktree string
+
+	mu          sync.Mutex
+	baseRenders []string // app names rendered against the base worktree
+}
+
+func (f *newChildFakeRenderer) RenderApplication(
+	_ context.Context,
+	app *cluster.Application,
+	repoPath string,
+) (*render.RenderResult, error) {
+	if repoPath == f.baseWorktree {
+		f.mu.Lock()
+		f.baseRenders = append(f.baseRenders, app.Name)
+		f.mu.Unlock()
+	}
+
+	var manifests string
+	switch app.Name {
+	case "parent":
+		// The PR adds the child through the parent: no child CRD on base.
+		if repoPath == f.targetWorktree {
+			manifests = appCRD("new-child", "v1")
+		}
+	case "new-child":
+		if repoPath == f.baseWorktree {
+			return nil, fmt.Errorf(
+				"helm template failed: open %s/values-pt1.yaml: no such file or directory", repoPath)
+		}
+		manifests = revConfigMap("new-child-cm", "v1")
+	}
+
+	return &render.RenderResult{
+		Manifests:  []byte(manifests),
+		SourceType: types.SourceTypeHelm,
+	}, nil
+}
+
+// TestProcessApplicationsNewChildSkipsBaseRender pins the IsNew contract: a
+// child app discovered only on the target branch must never be rendered
+// against the base worktree. Rendering it there with the target spec (the only
+// spec that exists) can fail hard when the spec references files absent on
+// base — e.g. a newly added values file in a pre-existing chart directory —
+// and is semantically wrong anyway: a new app has no base state, so its diff
+// is everything-added.
+func TestProcessApplicationsNewChildSkipsBaseRender(t *testing.T) {
+	logger := log.New(nil)
+	logger.SetLevel(log.FatalLevel)
+
+	cfg := &config.Config{Concurrency: 4, MaxDepth: 5}
+	fake := &newChildFakeRenderer{
+		baseWorktree:   "/fake/base",
+		targetWorktree: "/fake/target",
+	}
+
+	a := &App{
+		factory:        NewFactory(cfg, logger),
+		cfg:            cfg,
+		logger:         logger,
+		renderer:       fake,
+		differ:         diff.NewManifestDiffer(),
+		discoverer:     diff.NewAppDiscoverer(),
+		baseWorktree:   fake.baseWorktree,
+		targetWorktree: fake.targetWorktree,
+	}
+
+	parent := cluster.Application{Spec: cluster.ApplicationSpec{
+		Source: &cluster.ApplicationSource{
+			RepoURL:        "https://example.com/org/repo.git",
+			Chart:          "dummy",
+			TargetRevision: "cluster",
+		},
+	}}
+	parent.Name = "parent"
+	parent.Namespace = "argocd"
+
+	diffs, err := a.processApplications(context.Background(), []cluster.Application{parent})
+	if err != nil {
+		t.Fatalf("processApplications() error: %v", err)
+	}
+
+	byName := make(map[string]*types.AppDiff, len(diffs))
+	for _, d := range diffs {
+		byName[d.Name] = d
+	}
+	childDiff := byName["new-child"]
+	if childDiff == nil {
+		t.Fatalf("new-child was not discovered; got %d results", len(diffs))
+	}
+
+	// The base render must be skipped, not attempted-and-failed.
+	if childDiff.Error != nil {
+		t.Fatalf("new-child finished with error (base render was attempted?): %v", childDiff.Error)
+	}
+	fake.mu.Lock()
+	baseRenders := fake.baseRenders
+	fake.mu.Unlock()
+	for _, name := range baseRenders {
+		if name == "new-child" {
+			t.Error("new-child was rendered against the base worktree; want base render skipped")
+		}
+	}
+
+	// An empty base side makes the whole app diff as added.
+	if childDiff.RenderedOld != "" {
+		t.Errorf("new-child RenderedOld = %q, want empty", childDiff.RenderedOld)
+	}
+	if !strings.Contains(childDiff.RenderedNew, "new-child-cm") {
+		t.Errorf("new-child RenderedNew missing expected manifest:\n%s", childDiff.RenderedNew)
+	}
+	setDiff, ok := childDiff.DiffResult.(*diff.ManifestSetDiff)
+	if !ok {
+		t.Fatalf("new-child DiffResult is %T, want *diff.ManifestSetDiff", childDiff.DiffResult)
+	}
+	if len(setDiff.Added) != 1 || len(setDiff.Removed) != 0 || len(setDiff.Modified) != 0 {
+		t.Errorf("new-child diff = +%d -%d ~%d, want +1 -0 ~0",
+			len(setDiff.Added), len(setDiff.Removed), len(setDiff.Modified))
+	}
+	if childDiff.SourceType != types.SourceTypeHelm {
+		t.Errorf("new-child SourceType = %q, want %q (from the target render)",
+			childDiff.SourceType, types.SourceTypeHelm)
+	}
+}

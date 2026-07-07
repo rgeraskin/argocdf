@@ -190,6 +190,10 @@ type QueuedApp struct {
 	ParentNamespace string
 	Spec            *cluster.ApplicationSpec // Spec to use for target branch (also for base if OldSpec is nil)
 	OldSpec         *cluster.ApplicationSpec // Optional: spec to use for base branch (for modified child apps)
+	// IsNew marks an app discovered only on the target branch (via
+	// FindNewApplications). Such apps have no base-branch counterpart, so the
+	// base render is skipped entirely and the app diffs as fully added.
+	IsNew bool
 }
 
 // specSignature returns a stable identity for an app's (Spec, OldSpec) pair.
@@ -277,6 +281,7 @@ func (q *AppDiffQueue) UpdatePending(app QueuedApp) bool {
 			q.pending[i].OldSpec = app.OldSpec
 			q.pending[i].ParentApp = app.ParentApp
 			q.pending[i].ParentNamespace = app.ParentNamespace
+			q.pending[i].IsNew = app.IsNew
 			return true
 		}
 	}

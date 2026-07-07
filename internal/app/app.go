@@ -574,6 +574,7 @@ func (a *App) processApplications(ctx context.Context, apps []cluster.Applicatio
 						ParentApp:       queuedApp.Name,
 						ParentNamespace: queuedApp.Namespace,
 						Spec:            &newApp.Spec,
+						IsNew:           true,
 					})
 					if added {
 						a.logger.Debug("Discovered new child application", "parent", queuedApp.Name, "child", newApp.Name)
@@ -715,11 +716,25 @@ func (a *App) processOneApp(ctx context.Context, queuedApp *diff.QueuedApp) (*ty
 
 	// Render from the base worktree (merge base) using old spec, so the base
 	// side matches the merge-base semantics used for change detection.
-	renderedOld, sourceTypeOld, err := a.renderBranch(ctx, appOld, a.baseWorktree, a.baseCommit, a.baseRef, "new app")
-	if err != nil {
-		return nil, fmt.Errorf("failed to render base branch: %w", err)
+	//
+	// Newly-added child apps (discovered only on the target branch) have no
+	// base-branch counterpart, so the base render is skipped and the empty
+	// base side makes the whole app diff as added. Rendering them against the
+	// base worktree with the target spec can fail hard when the spec
+	// references files that don't exist there yet (e.g. a new values file in
+	// a pre-existing chart directory), which sourcePathsExist cannot catch.
+	var renderedOld []byte
+	if queuedApp.IsNew {
+		a.logger.Debug("Skipping base render for newly-added application",
+			"app", queuedApp.Name, "branch", a.baseRef)
+	} else {
+		rendered, sourceTypeOld, err := a.renderBranch(ctx, appOld, a.baseWorktree, a.baseCommit, a.baseRef, "new app")
+		if err != nil {
+			return nil, fmt.Errorf("failed to render base branch: %w", err)
+		}
+		renderedOld = rendered
+		appDiff.SourceType = sourceTypeOld
 	}
-	appDiff.SourceType = sourceTypeOld
 
 	// Render from the target worktree (committed target tip) using new spec.
 	renderedNew, sourceTypeNew, err := a.renderBranch(ctx, appNew, a.targetWorktree, a.targetCommit, a.cfg.TargetBranch, "deleted app")

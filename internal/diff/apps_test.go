@@ -974,6 +974,54 @@ func TestAppDiffQueue(t *testing.T) {
 		}
 	})
 
+	t.Run("IsNew survives the queue round-trip", func(t *testing.T) {
+		queue := NewAppDiffQueue(10)
+
+		queue.Add(QueuedApp{Name: "new-app", Namespace: "ns1", Depth: 1, IsNew: true})
+
+		app := queue.Next()
+		if app == nil {
+			t.Fatal("Next() returned nil")
+		}
+		if !app.IsNew {
+			t.Error("IsNew = false after Next(), want true")
+		}
+	})
+
+	t.Run("UpdatePending overwrites IsNew", func(t *testing.T) {
+		queue := NewAppDiffQueue(10)
+
+		// Pending as newly-added (only a target-branch spec).
+		queue.Add(QueuedApp{
+			Name:      "app1",
+			Namespace: "ns1",
+			Depth:     1,
+			Spec:      &cluster.ApplicationSpec{Project: "git-spec"},
+			IsNew:     true,
+		})
+
+		// A later discovery reclassifies it as modified: it does exist on the
+		// base branch, so the base render must not be skipped anymore.
+		updated := queue.UpdatePending(QueuedApp{
+			Name:      "app1",
+			Namespace: "ns1",
+			Spec:      &cluster.ApplicationSpec{Project: "git-spec"},
+			OldSpec:   &cluster.ApplicationSpec{Project: "git-old-spec"},
+			IsNew:     false,
+		})
+		if !updated {
+			t.Fatal("UpdatePending should return true for pending app")
+		}
+
+		app := queue.Next()
+		if app.IsNew {
+			t.Error("IsNew = true after UpdatePending with IsNew=false, want false")
+		}
+		if app.OldSpec == nil || app.OldSpec.Project != "git-old-spec" {
+			t.Error("OldSpec not updated alongside IsNew")
+		}
+	})
+
 	t.Run("UpdatePending returns false for processed app", func(t *testing.T) {
 		queue := NewAppDiffQueue(10)
 		queue.Add(QueuedApp{Name: "app1", Namespace: "ns1", Depth: 0})
