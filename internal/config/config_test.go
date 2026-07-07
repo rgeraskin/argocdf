@@ -45,6 +45,56 @@ func TestParseFileOutput(t *testing.T) {
 			want: FileOutput{Format: "md-fields", Path: "C:/Users/test/output.md"},
 		},
 		{
+			name: "split option with default value",
+			spec: "md-unified,split:pr-comment.md",
+			want: FileOutput{Format: "md-unified", Path: "pr-comment.md", SplitMax: DefaultSplitMax},
+		},
+		{
+			name: "split option with explicit value",
+			spec: "md-fields,split=30000:pr-comment.md",
+			want: FileOutput{Format: "md-fields", Path: "pr-comment.md", SplitMax: 30000},
+		},
+		{
+			name: "split option with path containing commas",
+			spec: "md-fields,split:out,put.md",
+			want: FileOutput{Format: "md-fields", Path: "out,put.md", SplitMax: DefaultSplitMax},
+		},
+		{
+			name: "path with comma but no options",
+			spec: "md-fields:out,put.md",
+			want: FileOutput{Format: "md-fields", Path: "out,put.md"},
+		},
+		{
+			name:    "split option on unified format",
+			spec:    "unified,split:changes.patch",
+			wantErr: true,
+			errMsg:  "only valid for md-fields and md-unified",
+		},
+		{
+			name:    "split option on html format",
+			spec:    "html-side-by-side,split:report.html",
+			wantErr: true,
+			errMsg:  "only valid for md-fields and md-unified",
+		},
+		{
+			name:    "split option with non-integer value",
+			spec:    "md-fields,split=big:out.md",
+			wantErr: true,
+			errMsg:  "invalid split value",
+		},
+		{
+			name:    "split option with too-small value",
+			spec:    "md-fields,split=100:out.md",
+			wantErr: true,
+			errMsg:  "too small",
+		},
+		{
+			name:    "unknown option",
+			spec:    "md-fields,chunk=100:out.md",
+			wantErr: true,
+			errMsg:  "unknown file output option",
+		},
+		{
 			name:    "missing colon separator",
 			spec:    "md-output.md",
 			wantErr: true,

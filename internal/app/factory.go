@@ -152,6 +152,7 @@ func (f *Factory) CreateOutputWriter() (output.Writer, error) {
 				return nil, err
 			}
 			mdWriter.SetMarker(f.config.Marker)
+			mdWriter.SetSplitMax(fo.SplitMax)
 			writers = append(writers, mdWriter)
 
 		case "md-unified":
@@ -160,6 +161,7 @@ func (f *Factory) CreateOutputWriter() (output.Writer, error) {
 				return nil, err
 			}
 			mdWriter.SetMarker(f.config.Marker)
+			mdWriter.SetSplitMax(fo.SplitMax)
 			writers = append(writers, mdWriter)
 
 		case "html-side-by-side":

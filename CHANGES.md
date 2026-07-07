@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.3.0
+
+- Add `split[=N]` file-output option for `md-fields`/`md-unified` (e.g. `-f md-unified,split:pr-comment.md`): a report larger than N bytes (default 60000, safely under GitHub's 65,536-char comment cap) is written as multiple self-contained part files (`pr-comment.md`, `pr-comment.2.md`, ...) instead of one oversized file. Each part carries the upsert marker and a `part i/N` heading with balanced `<details>` blocks and code fences, so CI can post every part as its own PR comment. An app's report stays within a single part; only an app that alone exceeds the limit is split at resource boundaries, and only a single resource diff larger than a whole part is truncated (with a note). Stale part files from a previous, larger run are removed automatically.
+- Update the GitHub Actions examples: both workflows render with `split` and post each part as its own comment; `wf-extra.yaml` drops its oversized-comment truncation step
+
 ## 0.2.3
 
 - Fix: skip base-branch render for child apps discovered only on the target branch (apps-of-apps). Previously they were rendered against the base worktree with the target spec, which failed hard when the spec referenced files absent on base (e.g. a newly added values file in a pre-existing chart directory). New child apps also now correctly report all their resources as added instead of "No changes".

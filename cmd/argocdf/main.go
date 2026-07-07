@@ -137,6 +137,11 @@ Examples:
   # Use unified diff format inside markdown
   argocdf --file md-unified:diff.md
 
+  # Split oversized markdown into PR-comment-sized parts
+  # (pr-comment.md, pr-comment.2.md, ... — each fits GitHub's comment cap)
+  argocdf -f md-unified,split:pr-comment.md
+  argocdf -f md-fields,split=30000:pr-comment.md
+
   # Summary only in terminal
   argocdf --stdout summary
 
@@ -183,7 +188,8 @@ Examples:
 	rootCmd.Flags().StringVar(&stdoutFormat, "stdout", config.DefaultStdoutFormat,
 		"Terminal output format: fields, summary, unified, none (set ARGOCDF_EXTERNAL_DIFF for side-by-side)")
 	rootCmd.Flags().StringArrayVarP(&fileOutputs, "file", "f", nil,
-		"File output in format:path (can be repeated). Formats: md-fields, html-side-by-side, md-unified, unified")
+		"File output in format[,option]:path (can be repeated). Formats: md-fields, html-side-by-side, md-unified, unified. "+
+			"Markdown formats accept split[=N] to split the report into PR-comment-sized parts (default 60000 bytes)")
 	rootCmd.Flags().BoolVarP(&quiet, "quiet", "q", false, "Suppress terminal output (same as --stdout none)")
 	rootCmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "Enable debug logging")
 	rootCmd.Flags().IntVarP(&unifiedContext, "context-lines", "U", config.DefaultUnifiedContext,

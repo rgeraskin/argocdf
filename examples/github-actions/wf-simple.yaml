@@ -73,17 +73,40 @@ jobs:
         run: helm registry login ghcr.io --username ${{ github.actor }} --password-stdin <<< "${{ secrets.GH_TOKEN }}"
 
       - name: argocdf diff
+        # `split` keeps pr-comment.md under GitHub's 65,536-char comment cap; an
+        # oversized report is split into self-contained parts (pr-comment.md,
+        # pr-comment.2.md, ...).
         run: |
           argocdf --quiet \
             --base origin/main --target HEAD \
-            --file md-unified:pr-comment.md \
+            --file md-unified,split:pr-comment.md \
             --concurrency 4
 
-      - name: Post diff as PR comment
-        uses: peter-evans/create-or-update-comment@e8674b075228eee787fea43ef493e45ece1004c9 # v5.0.0
+      # An oversized plan arrives as several part files; post each as its own
+      # comment so the whole plan is on the PR. A report that fits is a single
+      # pr-comment.md and this posts exactly one comment.
+      # NOTE: every push adds fresh comment(s) and nothing collapses the old
+      # ones, so busy PRs with large plans accumulate noise. If that bites,
+      # copy the "Collapse previous argocdf comments" step from wf-extra.yaml.
+      - name: Post diff as PR comment(s)
+        uses: actions/github-script@v9
         with:
-          issue-number: ${{ env.PR_NUMBER }}
-          body-path: pr-comment.md
+          script: |
+            const fs = require('fs');
+            const pr = Number(process.env.PR_NUMBER);
+            // Part 1 is pr-comment.md; argocdf numbers further parts
+            // contiguously (pr-comment.2.md, pr-comment.3.md, ...).
+            const files = ['pr-comment.md'];
+            for (let i = 2; fs.existsSync(`pr-comment.${i}.md`); i++) {
+              files.push(`pr-comment.${i}.md`);
+            }
+            for (const f of files) {
+              await github.rest.issues.createComment({
+                ...context.repo,
+                issue_number: pr,
+                body: fs.readFileSync(f, 'utf8'),
+              });
+            }
 
       - name: Report failure as PR comment
         if: failure()

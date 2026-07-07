@@ -5,13 +5,15 @@ Two ready-to-adapt workflows live in this directory. Both install tooling with [
 | Workflow                           | Trigger                            | Reach for it when                                                                                                     |
 |------------------------------------|------------------------------------|-----------------------------------------------------------------------------------------------------------------------|
 | [`wf-simple.yaml`](wf-simple.yaml) | `pull_request` (every push)        | You want the diff posted automatically on each push, with the smallest workflow that still works.                     |
-| [`wf-extra.yaml`](wf-extra.yaml)   | comment `argocdf` / `argocdf plan` | You want on-demand runs, an audit label, a full-report artifact, oversized-comment truncation, and fork-PR hardening. |
+| [`wf-extra.yaml`](wf-extra.yaml)   | comment `argocdf` / `argocdf plan` | You want on-demand runs, an audit label, a full-report artifact, oversized plans posted across several comments, and fork-PR hardening. |
 
 ## Simple: run on every PR
 
-[`wf-simple.yaml`](wf-simple.yaml) triggers on `pull_request`, so every push to a PR renders the diff and posts it back as a comment. It is `wf-extra.yaml` with the extra machinery stripped out — no fork-PR guard, no comment ack/label, no report artifact, and no oversized-comment truncation — leaving just the render and post.
+[`wf-simple.yaml`](wf-simple.yaml) triggers on `pull_request`, so every push to a PR renders the diff and posts it back as a comment. It is `wf-extra.yaml` with the extra machinery stripped out — no fork-PR guard, no comment ack/label, no report artifact — leaving just the render and post.
 
-Because it drops the size-limit step, a diff larger than GitHub's 65536-char comment cap will fail the post (and surface via the failure comment). If your PRs can produce diffs that big, use `wf-extra.yaml` instead.
+Both workflows render with the `split` file-output option and post each resulting part file as its own PR comment, so every comment stays under GitHub's 65,536-char cap and the whole plan is always on the PR. A report that fits produces a single `pr-comment.md` and a single comment.
+
+Since the simple workflow runs on every push and never collapses older comments, busy PRs with multi-part plans accumulate noise. If that becomes a problem, copy the "Collapse previous argocdf comments" step from `wf-extra.yaml` (or switch to the comment-triggered workflow entirely).
 
 ## Comment-triggered `argocdf plan`
 
@@ -19,7 +21,7 @@ Because it drops the size-limit step, a diff larger than GitHub's 65536-char com
 
 - **On-demand runs** — a `plan` costs a cluster round-trip and Helm/Kustomize renders, so triggering it by comment (not on every push) keeps noise and cost down. Also runnable via `workflow_dispatch`.
 - **An audit trail** — every PR it runs on gets an `argocdf` label, giving you a searchable index of where the tool has been exercised, plus a 👀 reaction as instant "run started" feedback.
-- **Robust comments** — the full report is uploaded as an artifact, and the comment is truncated to GitHub's size cap (closing any open ``` fence or `<details>` block) with a pointer to the artifact.
+- **Robust comments** — the full report is uploaded as an artifact, and an oversized plan is posted in full across several comments: argocdf's `split` option emits self-contained part files (whole app sections, balanced `<details>`/fences, `part i/N` headings), and the post step publishes each as its own comment. The collapse step minimizes every part of an outdated plan, since each carries the argocdf marker.
 - **Fork-PR hardening** — see below.
 
 ### The fork-PR guard is load-bearing — keep it
@@ -48,7 +50,7 @@ Every argocdf flag is also settable as `ARGOCDF_<FLAG>` (uppercased, dashes → 
 ```toml
 # .mise.toml
 [tools]
-"github:rgeraskin/argocdf" = "0.2.2"   # pin the version CI installs
+"github:rgeraskin/argocdf" = "0.3.0"   # pin the version CI installs
 
 [env]
 ARGOCDF_REPO_URL = "https://github.com/<your-org>/<your-repo>/"

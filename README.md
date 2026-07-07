@@ -118,6 +118,10 @@ argocdf -q -f md-fields:pr-comment.md
 # Multiple file outputs
 argocdf -f md-fields:pr.md -f html-side-by-side:report.html
 
+# Split oversized markdown into PR-comment-sized parts
+# (pr-comment.md, pr-comment.2.md, ...)
+argocdf -q -f md-unified,split:pr-comment.md
+
 # Unified diff for patch workflows
 argocdf --stdout unified
 argocdf -f unified:changes.patch
@@ -168,7 +172,7 @@ ARGOCDF_EXTERNAL_DIFF="delta --side-by-side" argocdf
 | Flag              | Short | Description                                                                        | Default  |
 |-------------------|-------|------------------------------------------------------------------------------------|----------|
 | `--stdout`        |       | Terminal output format: `fields`, `summary`, `unified`, `none`                     | `fields` |
-| `--file`          | `-f`  | File output in `format:path` (can be repeated)                                     | (none)   |
+| `--file`          | `-f`  | File output in `format[,option]:path` (can be repeated)                            | (none)   |
 | `--quiet`         | `-q`  | Suppress terminal output (same as `--stdout none`)                                 | `false`  |
 | `--verbose`       | `-v`  | Enable debug logging (config resolution, cache hits, per-app processing) to stderr | `false`  |
 | `--context-lines` | `-U`  | Number of context lines in unified diff output (-1 for unlimited)                  | `3`      |
@@ -178,6 +182,16 @@ ARGOCDF_EXTERNAL_DIFF="delta --side-by-side" argocdf
 - `md-unified` - Markdown with unified diff format
 - `html-side-by-side` - Interactive HTML with side-by-side diff
 - `unified` - Patch-compatible unified diff
+
+**File output options** (appended to the format, comma-separated):
+- `split[=N]` - split markdown output into parts of at most `N` bytes (default `60000`, safely under GitHub's 65,536-char comment cap). Only valid for `md-fields` and `md-unified`.
+
+```bash
+argocdf -f md-unified,split:pr-comment.md
+argocdf -f md-fields,split=30000:pr-comment.md
+```
+
+When the report fits in one part, the output is a single file, identical to running without `split`. Otherwise parts are written to `pr-comment.md`, `pr-comment.2.md`, `pr-comment.3.md`, … — each a self-contained document (upsert marker, `part i/N` heading, balanced `<details>` blocks and code fences) that CI can post as its own PR comment. An application's report is kept in a single part; only an app that alone exceeds the limit is split across parts at resource boundaries, and only a single resource diff larger than a whole part gets truncated (with a note). The summary and footer land on the last part. Leftover part files from a previous, larger run are removed automatically.
 
 ### Recursion Flags
 

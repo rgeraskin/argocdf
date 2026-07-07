@@ -8,24 +8,27 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Common Commands
 
+Tasks are defined in `.mise.toml` (there is no Makefile).
+
 ```bash
 # Build
-make build          # Build binary to ./argocdf
-make install        # Install to GOPATH/bin
+mise run build          # Build binary to ./argocdf
+mise run install        # Install to GOPATH/bin
 
 # Test
-make test           # Run tests with verbose output
-make test-coverage  # Generate coverage report
+mise run test           # Run tests with verbose output
+mise run test-coverage  # Generate coverage report
 
 # Development
-make dev            # Run with verbose logging
-make lint           # Run golangci-lint
-make fmt            # Format code (go fmt + goimports)
-make vet            # Run go vet
+mise run dev            # Run in development mode
+mise run lint           # Run golangci-lint
+mise run fmt            # Format code (go fmt + goimports)
+mise run vet            # Run go vet
+mise run check          # vet + lint + test
 
 # Dependencies
-make deps           # Download dependencies
-make tidy           # Tidy go.mod
+mise run deps           # Download dependencies
+mise run tidy           # Tidy go.mod
 ```
 
 ## Architecture
@@ -122,15 +125,27 @@ This ensures charts with dependencies (like umbrella charts) render correctly wi
 - `unified` - Traditional unified diff format
 - `none` - Suppress terminal output
 
-**File output** (`-f/--file format:path`):
+**File output** (`-f/--file format[,option]:path`):
 - `md-fields` - GitHub-flavored markdown with field-level diffs
 - `md-unified` - Markdown with unified diff format
 - `html-side-by-side` - Interactive HTML with side-by-side diff
 - `unified` - Patch-compatible unified diff
 
+Markdown formats accept the `split[=N]` option (options ride on the format
+segment, so paths with commas/colons stay intact): a report larger than N bytes
+(default 60000, under GitHub's 65,536-char comment cap) is written as multiple
+self-contained part files — `pr-comment.md`, `pr-comment.2.md`, ... — each with
+the upsert marker, a `part i/N` heading, and balanced `<details>`/fences. Apps
+stay whole within a part; an app that alone exceeds the limit is split at
+resource boundaries; a single oversized resource diff is truncated with a note.
+Packing lives in `internal/output/markdown.go` (`assembleParts`/`packBodies`).
+
 ```bash
 # Quiet mode with markdown file output
 ./argocdf -q -f md-fields:pr-comment.md
+
+# Split oversized markdown into PR-comment-sized parts
+./argocdf -q -f md-unified,split:pr-comment.md
 
 # Multiple file outputs
 ./argocdf -f md-fields:pr.md -f html-side-by-side:report.html

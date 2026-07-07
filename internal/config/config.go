@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 )
 
@@ -22,6 +23,15 @@ const (
 	// DefaultKubeVersionFallback is the Kubernetes version used for Helm rendering
 	// when the cluster version cannot be detected.
 	DefaultKubeVersionFallback = "1.29.0"
+
+	// DefaultSplitMax is the part size (in bytes) used by the `split` file-output
+	// option when no explicit value is given. It leaves headroom under GitHub's
+	// 65,536-char comment cap for CI-appended footers.
+	DefaultSplitMax = 60000
+
+	// MinSplitMax is the smallest accepted `split` value; below this the per-part
+	// marker/heading overhead would dominate the budget.
+	MinSplitMax = 1024
 )
 
 // DefaultConcurrency returns the default number of applications to render in
@@ -39,8 +49,9 @@ func DefaultConcurrency() int {
 
 // FileOutput represents a single file output specification.
 type FileOutput struct {
-	Format string // "md-fields", "html-side-by-side", "md-unified", "unified"
-	Path   string // File path
+	Format   string // "md-fields", "html-side-by-side", "md-unified", "unified"
+	Path     string // File path
+	SplitMax int    // Max part size in bytes for markdown outputs (0 = no splitting)
 }
 
 // Config holds all configuration for the argocdf tool.
@@ -98,14 +109,20 @@ type Config struct {
 	Marker   string // Optional marker id for the PR-comment upsert marker (empty = default marker)
 }
 
-// ParseFileOutput parses a "format:path" string into a FileOutput.
+// ParseFileOutput parses a "format[,option...]:path" string into a FileOutput.
+// Options ride on the format segment (before the first colon), so paths
+// containing commas or colons stay intact. Supported options:
+//
+//	split[=N]  split markdown output into parts of at most N bytes
+//	           (default 60000); only valid for md-fields and md-unified
 func ParseFileOutput(spec string) (FileOutput, error) {
 	parts := strings.SplitN(spec, ":", 2)
 	if len(parts) != 2 {
-		return FileOutput{}, fmt.Errorf("invalid file output format: %q (expected format:path)", spec)
+		return FileOutput{}, fmt.Errorf("invalid file output format: %q (expected format[,option]:path)", spec)
 	}
 
-	format := parts[0]
+	segments := strings.Split(parts[0], ",")
+	format := segments[0]
 	path := parts[1]
 
 	// Validate format
@@ -120,7 +137,33 @@ func ParseFileOutput(spec string) (FileOutput, error) {
 		return FileOutput{}, fmt.Errorf("file path cannot be empty")
 	}
 
-	return FileOutput{Format: format, Path: path}, nil
+	fo := FileOutput{Format: format, Path: path}
+
+	// Parse options following the format
+	for _, opt := range segments[1:] {
+		key, value, hasValue := strings.Cut(opt, "=")
+		switch key {
+		case "split":
+			if format != "md-fields" && format != "md-unified" {
+				return FileOutput{}, fmt.Errorf("option %q is only valid for md-fields and md-unified outputs, not %q", key, format)
+			}
+			fo.SplitMax = DefaultSplitMax
+			if hasValue {
+				n, err := strconv.Atoi(value)
+				if err != nil {
+					return FileOutput{}, fmt.Errorf("invalid split value %q: expected an integer number of bytes", value)
+				}
+				if n < MinSplitMax {
+					return FileOutput{}, fmt.Errorf("split value %d is too small (minimum %d bytes)", n, MinSplitMax)
+				}
+				fo.SplitMax = n
+			}
+		default:
+			return FileOutput{}, fmt.Errorf("unknown file output option: %q (valid: split[=N])", opt)
+		}
+	}
+
+	return fo, nil
 }
 
 // New creates a new Config with default values.
