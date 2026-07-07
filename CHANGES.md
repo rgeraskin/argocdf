@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.2.3
+
+- Fix: skip base-branch render for child apps discovered only on the target branch (apps-of-apps). Previously they were rendered against the base worktree with the target spec, which failed hard when the spec referenced files absent on base (e.g. a newly added values file in a pre-existing chart directory). New child apps also now correctly report all their resources as added instead of "No changes".
+
 ## 0.2.2
 
 - Make the `argocdf` name in the report footer a link to the project repo (HTML and Markdown outputs)
