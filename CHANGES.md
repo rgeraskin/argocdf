@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.4.1
+
+- Fix: respect `spec.source.helm.skipSchemaValidation` by passing `--skip-schema-validation` to `helm template` (requires helm >= 3.16). Previously apps that opt out of `values.schema.json` validation rendered fine in ArgoCD but failed in argocdf with "values don't meet the specifications of the schema(s)"
+
 ## 0.4.0
 
 - Add `--lint` (repeatable; env `ARGOCDF_LINT` for a single command) and `--lint-timeout` (default `5s`): pipe each affected app's rendered manifests through user-supplied shell commands and report their stdout as warnings. Each side (base and target) is linted separately — the command runs with that side's worktree as its working directory, so repo-relative policy paths resolve to the branch's own files — and every non-empty stdout line becomes a `[base]`/`[target]`-labeled warning in all output formats, alongside the existing parse warnings — a `[base]`-only finding was fixed by the change under review, `[target]`-only was introduced, both sides = pre-existing. Any policy tool plugs in through a jq-style adapter (kyverno, conftest, kubeconform, ...); argocdf never parses tool-specific output. A command failure (spawn error, timeout, or exit ≠ 0) is reported as a non-fatal warning line — stdout lines received before the failure are kept
