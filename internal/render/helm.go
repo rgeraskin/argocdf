@@ -408,6 +408,13 @@ func (r *HelmRenderer) addHelmOptions(args []string, helm *cluster.ApplicationSo
 		args = append(args, "--set-file", fmt.Sprintf("%s=%s", fileParam.Name, resolvedPath))
 	}
 
+	// Skip values.schema.json validation when the app opts out (Helm's
+	// --skip-schema-validation, helm >= 3.16). ArgoCD renders such apps
+	// fine, so without this flag argocdf fails where ArgoCD succeeds.
+	if helm.SkipSchemaValidation {
+		args = append(args, "--skip-schema-validation")
+	}
+
 	// Note: helm.Version is the Helm binary version to use for templating
 	// (e.g. "3"), not a chart version, so it is intentionally not passed
 	// as --version. The tool always uses the helm binary on PATH.

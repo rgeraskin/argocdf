@@ -442,6 +442,50 @@ func TestBuildArgs_NoAPIVersionsWhenEmpty(t *testing.T) {
 	}
 }
 
+func TestBuildArgs_SkipSchemaValidation(t *testing.T) {
+	app := &cluster.Application{ObjectMeta: metav1.ObjectMeta{Name: "my-app"}}
+
+	tests := []struct {
+		name string
+		helm *cluster.ApplicationSourceHelm
+		want int
+	}{
+		{
+			name: "set",
+			helm: &cluster.ApplicationSourceHelm{SkipSchemaValidation: true},
+			want: 1,
+		},
+		{
+			name: "unset",
+			helm: &cluster.ApplicationSourceHelm{},
+			want: 0,
+		},
+		{
+			name: "no helm block",
+			helm: nil,
+			want: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			source := &cluster.ApplicationSource{
+				RepoURL: "https://github.com/example/repo.git",
+				Path:    "charts/myapp",
+				Helm:    tt.helm,
+			}
+			r := NewHelmRenderer(RenderOptions{})
+			args, _, _, _, err := r.buildArgs(context.TODO(), app, source, t.TempDir())
+			if err != nil {
+				t.Fatalf("buildArgs() unexpected error = %v", err)
+			}
+			if got := countArg(args, "--skip-schema-validation"); got != tt.want {
+				t.Errorf("buildArgs() --skip-schema-validation count = %d, want %d\nargs: %v", got, tt.want, args)
+			}
+		})
+	}
+}
+
 func countArg(args []string, arg string) int {
 	count := 0
 	for _, a := range args {
