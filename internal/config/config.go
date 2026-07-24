@@ -162,6 +162,11 @@ type Config struct {
 	// rendered manifests on stdin and emits one warning per stdout line.
 	Lint        []string
 	LintTimeout time.Duration // Per-invocation timeout (0 = DefaultLintTimeout)
+
+	// Version is the argocdf version stamped into report footers (provenance).
+	// Set programmatically by the CLI entry point, not a flag; empty omits the
+	// version from footers.
+	Version string
 }
 
 // ParseFileOutput parses a "format[,option...]:path" string into a FileOutput.

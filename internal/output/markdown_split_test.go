@@ -53,8 +53,8 @@ func renderSplitReport(t *testing.T, path string, format MarkdownFormat, splitMa
 	if err := w.WriteSummary(ComputeSummary(apps)); err != nil {
 		t.Fatalf("WriteSummary() error = %v", err)
 	}
-	if err := w.WriteFooter(); err != nil {
-		t.Fatalf("WriteFooter() error = %v", err)
+	if err := w.WriteFooter(Provenance{}); err != nil {
+		t.Fatalf("WriteFooter(Provenance) error = %v", err)
 	}
 	if err := w.Flush(); err != nil {
 		t.Fatalf("Flush() error = %v", err)
@@ -544,7 +544,7 @@ func TestMarkdownWriter_Split_MixedAppsAndCustomMarker(t *testing.T) {
 	if err := w.WriteSummary(ComputeSummary(apps)); err != nil {
 		t.Fatal(err)
 	}
-	if err := w.WriteFooter(); err != nil {
+	if err := w.WriteFooter(Provenance{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := w.Flush(); err != nil {

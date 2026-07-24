@@ -271,8 +271,8 @@ func TestHTMLWriterWriteFooter(t *testing.T) {
 	}
 
 	_ = w.WriteHeader("Test")
-	if err := w.WriteFooter(); err != nil {
-		t.Fatalf("WriteFooter() error = %v", err)
+	if err := w.WriteFooter(Provenance{}); err != nil {
+		t.Fatalf("WriteFooter(Provenance) error = %v", err)
 	}
 	_ = w.Flush()
 

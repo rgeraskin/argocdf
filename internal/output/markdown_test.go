@@ -366,17 +366,73 @@ func TestMarkdownWriter_WriteFooter(t *testing.T) {
 	filePath := filepath.Join(tempDir, "test.md")
 	w, _ := NewMarkdownWriter(filePath, MarkdownFormatGitHub, 3)
 
-	if err := w.WriteFooter(); err != nil {
-		t.Errorf("WriteFooter() error = %v", err)
+	if err := w.WriteFooter(Provenance{}); err != nil {
+		t.Errorf("WriteFooter(Provenance) error = %v", err)
 	}
 	_ = w.Flush()
 
 	content, _ := os.ReadFile(filePath)
 	if !strings.Contains(string(content), "Generated at") {
-		t.Errorf("WriteFooter() missing timestamp, got: %s", content)
+		t.Errorf("WriteFooter(Provenance{}) missing timestamp, got: %s", content)
 	}
 	if !strings.Contains(string(content), "argocdf") {
-		t.Errorf("WriteFooter() missing argocdf attribution, got: %s", content)
+		t.Errorf("WriteFooter(Provenance{}) missing argocdf attribution, got: %s", content)
+	}
+}
+
+func TestMarkdownWriter_WriteFooterProvenance(t *testing.T) {
+	filePath := filepath.Join(t.TempDir(), "test.md")
+	w, _ := NewMarkdownWriter(filePath, MarkdownFormatGitHub, 3)
+
+	prov := Provenance{
+		Version:   "0.5.0",
+		BaseSHA:   "0123456789abcdef0123456789abcdef01234567",
+		TargetSHA: "fedcba9876543210fedcba9876543210fedcba98",
+	}
+	if err := w.WriteFooter(prov); err != nil {
+		t.Fatalf("WriteFooter() error = %v", err)
+	}
+	_ = w.Flush()
+
+	content, _ := os.ReadFile(filePath)
+	// Version gets a v prefix; SHAs are shortened to 7 chars.
+	want := "v0.5.0 (0123456 → fedcba9)"
+	if !strings.Contains(string(content), want) {
+		t.Errorf("footer missing provenance %q, got: %s", want, content)
+	}
+}
+
+func TestProvenanceSuffix(t *testing.T) {
+	tests := []struct {
+		name string
+		p    Provenance
+		want string
+	}{
+		{"empty", Provenance{}, ""},
+		{"version only", Provenance{Version: "0.5.0"}, " v0.5.0"},
+		{"dev version stays bare", Provenance{Version: "dev"}, " dev"},
+		{
+			"version and shas",
+			Provenance{Version: "0.5.0", BaseSHA: "0123456789abcdef", TargetSHA: "fedcba9876543210"},
+			" v0.5.0 (0123456 → fedcba9)",
+		},
+		{
+			"shas without version",
+			Provenance{BaseSHA: "0123456", TargetSHA: "fedcba9"},
+			" (0123456 → fedcba9)",
+		},
+		{
+			"one sha missing omits refs",
+			Provenance{Version: "0.5.0", BaseSHA: "0123456"},
+			" v0.5.0",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.p.suffix(); got != tt.want {
+				t.Errorf("suffix() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -484,8 +540,8 @@ func TestMarkdownWriter_NoAppsAffected(t *testing.T) {
 	if err := w.WriteSummary(summary); err != nil {
 		t.Fatalf("WriteSummary() error = %v", err)
 	}
-	if err := w.WriteFooter(); err != nil {
-		t.Fatalf("WriteFooter() error = %v", err)
+	if err := w.WriteFooter(Provenance{}); err != nil {
+		t.Fatalf("WriteFooter(Provenance) error = %v", err)
 	}
 	if err := w.Flush(); err != nil {
 		t.Fatalf("Flush() error = %v", err)

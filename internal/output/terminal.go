@@ -487,8 +487,9 @@ func (t *TerminalWriter) writeSummaryUnified(summary Summary) error {
 	return nil
 }
 
-// WriteFooter writes the footer.
-func (t *TerminalWriter) WriteFooter() error {
+// WriteFooter writes the footer. The terminal deliberately has no footer
+// (provenance is for persisted reports; the console session is ephemeral).
+func (t *TerminalWriter) WriteFooter(_ Provenance) error {
 	return nil
 }
 

@@ -494,10 +494,13 @@ func (m *MarkdownWriter) writeSummaryAtlantis(summary Summary) error {
 	return nil
 }
 
-// WriteFooter writes the footer.
-func (m *MarkdownWriter) WriteFooter() error {
+// WriteFooter writes the footer, stamping the run's provenance (argocdf
+// version and rendered base → target commits). PR comments outlive CI artifact
+// retention, so the footer is the durable record of what produced the report.
+func (m *MarkdownWriter) WriteFooter(p Provenance) error {
 	m.buf = &m.footer
-	m.write(fmt.Sprintf("\n---\n_Generated at %s by [argocdf](https://github.com/rgeraskin/argocdf)_\n", time.Now().Format(time.RFC3339)))
+	m.write(fmt.Sprintf("\n---\n_Generated at %s by [argocdf](https://github.com/rgeraskin/argocdf)%s_\n",
+		time.Now().Format(time.RFC3339), p.suffix()))
 	return nil
 }
 

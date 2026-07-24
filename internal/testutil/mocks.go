@@ -53,7 +53,7 @@ func (m *MockWriter) WriteSummary(summary output.Summary) error {
 }
 
 // WriteFooter records the call.
-func (m *MockWriter) WriteFooter() error {
+func (m *MockWriter) WriteFooter(output.Provenance) error {
 	m.FooterCalled = true
 	return m.WriteFooterErr
 }

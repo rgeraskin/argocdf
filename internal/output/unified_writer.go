@@ -137,9 +137,11 @@ func (u *UnifiedWriter) WriteSummary(summary Summary) error {
 	return nil
 }
 
-// WriteFooter writes the footer comment.
-func (u *UnifiedWriter) WriteFooter() error {
-	_, err := io.WriteString(u.file, fmt.Sprintf("# Generated at %s by argocdf\n", time.Now().Format(time.RFC3339)))
+// WriteFooter writes the footer comment, stamping the run's provenance
+// (argocdf version and rendered base → target commits).
+func (u *UnifiedWriter) WriteFooter(p Provenance) error {
+	_, err := io.WriteString(u.file, fmt.Sprintf("# Generated at %s by argocdf%s\n",
+		time.Now().Format(time.RFC3339), p.suffix()))
 	return err
 }
 

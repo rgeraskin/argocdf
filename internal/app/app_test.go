@@ -1282,3 +1282,96 @@ func TestFetchApplications_NamespaceRouting(t *testing.T) {
 		}
 	})
 }
+
+// staticRenderer renders a fixed one-ConfigMap manifest per app — no children,
+// no errors — for tests that only care about orchestration output shape.
+type staticRenderer struct{}
+
+func (staticRenderer) RenderApplication(
+	_ context.Context,
+	app *cluster.Application,
+	repoPath string,
+	_ string,
+) (*render.RenderResult, error) {
+	manifests := "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm-" + app.Name +
+		"\n  namespace: default\ndata:\n  side: " + repoPath + "\n"
+	return &render.RenderResult{
+		Manifests:  []byte(manifests),
+		SourceType: types.SourceTypeHelm,
+	}, nil
+}
+
+// TestProcessApplicationsDeterministicOrder pins the report-ordering contract:
+// processApplications returns results sorted by (Namespace, Name) regardless of
+// map iteration or parallel render completion order, so reports are
+// byte-comparable across runs (the sweep/e2e expected-file workflows rely on it).
+func TestProcessApplicationsDeterministicOrder(t *testing.T) {
+	logger := log.New(nil)
+	logger.SetLevel(log.FatalLevel)
+
+	cfg := &config.Config{Concurrency: 4, MaxDepth: 5}
+
+	newApp := func(name, namespace string) cluster.Application {
+		app := cluster.Application{
+			Spec: cluster.ApplicationSpec{
+				Source: &cluster.ApplicationSource{
+					RepoURL:        "https://example.com/org/repo.git",
+					Chart:          "dummy", // chart source: no local path checks
+					TargetRevision: "1.0.0",
+				},
+			},
+		}
+		app.Name = name
+		app.Namespace = namespace
+		return app
+	}
+
+	// Deliberately unsorted mix across two namespaces.
+	apps := []cluster.Application{
+		newApp("zeta", "argocd"),
+		newApp("alpha", "team-b"),
+		newApp("mike", "argocd"),
+		newApp("kilo", "team-b"),
+		newApp("bravo", "argocd"),
+		newApp("yankee", "team-b"),
+		newApp("echo", "argocd"),
+		newApp("tango", "argocd"),
+	}
+	want := []string{
+		"argocd/bravo", "argocd/echo", "argocd/mike", "argocd/tango", "argocd/zeta",
+		"team-b/alpha", "team-b/kilo", "team-b/yankee",
+	}
+
+	order := func() []string {
+		a := &App{
+			factory:        NewFactory(cfg, logger),
+			cfg:            cfg,
+			logger:         logger,
+			renderer:       staticRenderer{},
+			differ:         diff.NewManifestDiffer(),
+			discoverer:     diff.NewAppDiscoverer(),
+			baseWorktree:   "/fake/base",
+			targetWorktree: "/fake/target",
+		}
+		diffs, err := a.processApplications(context.Background(), apps)
+		if err != nil {
+			t.Fatalf("processApplications() error: %v", err)
+		}
+		got := make([]string, 0, len(diffs))
+		for _, d := range diffs {
+			got = append(got, d.Namespace+"/"+d.Name)
+		}
+		return got
+	}
+
+	first := order()
+	if strings.Join(first, ",") != strings.Join(want, ",") {
+		t.Fatalf("result order = %v, want sorted %v", first, want)
+	}
+	// A second run must produce the identical order (not just a sorted-looking
+	// fluke of map iteration).
+	second := order()
+	if strings.Join(second, ",") != strings.Join(first, ",") {
+		t.Errorf("order differs between runs:\n first: %v\nsecond: %v", first, second)
+	}
+}

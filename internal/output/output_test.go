@@ -81,8 +81,8 @@ func TestNullWriter(t *testing.T) {
 		t.Errorf("WriteSummary() error = %v, want nil", err)
 	}
 
-	if err := w.WriteFooter(); err != nil {
-		t.Errorf("WriteFooter() error = %v, want nil", err)
+	if err := w.WriteFooter(Provenance{}); err != nil {
+		t.Errorf("WriteFooter(Provenance) error = %v, want nil", err)
 	}
 
 	if err := w.Flush(); err != nil {
@@ -139,7 +139,7 @@ func (m *mockWriter) WriteSummary(summary Summary) error {
 	return nil
 }
 
-func (m *mockWriter) WriteFooter() error {
+func (m *mockWriter) WriteFooter(Provenance) error {
 	m.footerCalled = true
 	if m.shouldError {
 		return errors.New("mock error")
@@ -198,11 +198,11 @@ func TestMultiWriter_FansOutToAllWriters(t *testing.T) {
 	}
 
 	// Test WriteFooter
-	if err := multi.WriteFooter(); err != nil {
-		t.Errorf("WriteFooter() error = %v", err)
+	if err := multi.WriteFooter(Provenance{}); err != nil {
+		t.Errorf("WriteFooter(Provenance) error = %v", err)
 	}
 	if !w1.footerCalled || !w2.footerCalled {
-		t.Error("WriteFooter() not called on all writers")
+		t.Error("WriteFooter(Provenance{}) not called on all writers")
 	}
 
 	// Test Flush
@@ -258,8 +258,8 @@ func TestMultiWriter_EmptyWriters(t *testing.T) {
 	if err := multi.WriteSummary(Summary{}); err != nil {
 		t.Errorf("WriteSummary() with no writers error = %v", err)
 	}
-	if err := multi.WriteFooter(); err != nil {
-		t.Errorf("WriteFooter() with no writers error = %v", err)
+	if err := multi.WriteFooter(Provenance{}); err != nil {
+		t.Errorf("WriteFooter(Provenance{}) with no writers error = %v", err)
 	}
 	if err := multi.Flush(); err != nil {
 		t.Errorf("Flush() with no writers error = %v", err)

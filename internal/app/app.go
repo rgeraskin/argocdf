@@ -991,7 +991,11 @@ func (a *App) writeOutput(w output.Writer, tree *diff.AppTree, summary output.Su
 		return err
 	}
 
-	if err := w.WriteFooter(); err != nil {
+	if err := w.WriteFooter(output.Provenance{
+		Version:   a.cfg.Version,
+		BaseSHA:   a.baseCommit,
+		TargetSHA: a.targetCommit,
+	}); err != nil {
 		return err
 	}
 

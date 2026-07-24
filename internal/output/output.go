@@ -2,9 +2,51 @@
 package output
 
 import (
+	"fmt"
+	"strings"
+
 	"github.com/rgeraskin/argocdf/internal/diff"
 	"github.com/rgeraskin/argocdf/internal/types"
 )
+
+// Provenance identifies the run that produced a report. It is stamped into
+// report footers so a report (a PR comment, an archived file) self-describes
+// which argocdf version rendered which commits — comments outlive CI artifact
+// retention, so this is the durable record. All fields are optional; empty
+// fields are omitted from the footer.
+type Provenance struct {
+	// Version is the argocdf version (e.g. "0.5.0", "dev").
+	Version string
+	// BaseSHA and TargetSHA are the resolved commits of the two sides
+	// (full or short; rendered shortened).
+	BaseSHA   string
+	TargetSHA string
+}
+
+// suffix renders the footer suffix, e.g. " v0.5.0 (abc1234 → def5678)".
+// The "v" prefix is added only for numeric versions ("dev" stays bare).
+func (p Provenance) suffix() string {
+	var b strings.Builder
+	if p.Version != "" {
+		v := p.Version
+		if v[0] >= '0' && v[0] <= '9' {
+			v = "v" + v
+		}
+		b.WriteString(" " + v)
+	}
+	if p.BaseSHA != "" && p.TargetSHA != "" {
+		b.WriteString(fmt.Sprintf(" (%s → %s)", shortSHA(p.BaseSHA), shortSHA(p.TargetSHA)))
+	}
+	return b.String()
+}
+
+// shortSHA shortens a commit hash to 7 characters for footer display.
+func shortSHA(sha string) string {
+	if len(sha) > 7 {
+		return sha[:7]
+	}
+	return sha
+}
 
 // Writer defines the interface for writing diff output.
 type Writer interface {
@@ -20,8 +62,8 @@ type Writer interface {
 	// WriteSummary writes a summary of all changes.
 	WriteSummary(summary Summary) error
 
-	// WriteFooter writes the output footer.
-	WriteFooter() error
+	// WriteFooter writes the output footer, stamping the run's provenance.
+	WriteFooter(p Provenance) error
 
 	// Flush ensures all output is written.
 	Flush() error
@@ -100,7 +142,7 @@ func (n *NullWriter) WriteTree(tree *diff.AppTree) error { return nil }
 func (n *NullWriter) WriteSummary(summary Summary) error { return nil }
 
 // WriteFooter is a no-op.
-func (n *NullWriter) WriteFooter() error { return nil }
+func (n *NullWriter) WriteFooter(_ Provenance) error { return nil }
 
 // Flush is a no-op.
 func (n *NullWriter) Flush() error { return nil }
@@ -156,9 +198,9 @@ func (m *MultiWriter) WriteSummary(summary Summary) error {
 }
 
 // WriteFooter writes the footer to all writers.
-func (m *MultiWriter) WriteFooter() error {
+func (m *MultiWriter) WriteFooter(p Provenance) error {
 	for _, w := range m.writers {
-		if err := w.WriteFooter(); err != nil {
+		if err := w.WriteFooter(p); err != nil {
 			return err
 		}
 	}

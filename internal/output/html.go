@@ -485,9 +485,10 @@ func (h *HTMLWriter) writeSummaryItem(label, value, colorClass string) {
 	</div>`, color, value, label))
 }
 
-// WriteFooter writes the footer.
-func (h *HTMLWriter) WriteFooter() error {
-	h.write(fmt.Sprintf(`<p class="timestamp">Generated at %s by <a href="https://github.com/rgeraskin/argocdf">argocdf</a></p>`, time.Now().Format(time.RFC3339)))
+// WriteFooter writes the footer, stamping the run's provenance.
+func (h *HTMLWriter) WriteFooter(p Provenance) error {
+	h.write(fmt.Sprintf(`<p class="timestamp">Generated at %s by <a href="https://github.com/rgeraskin/argocdf">argocdf</a>%s</p>`,
+		time.Now().Format(time.RFC3339), html.EscapeString(p.suffix())))
 	h.write(`</div></body></html>`)
 	return nil
 }

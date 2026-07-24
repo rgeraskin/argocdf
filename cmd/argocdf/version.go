@@ -6,6 +6,19 @@ import (
 	"runtime/debug"
 )
 
+// bareVersion returns just the version identifier (e.g. "0.5.0", "dev"),
+// resolved the same way versionString resolves it. Used for the report-footer
+// provenance stamp, which wants the version without commit/build decorations.
+func bareVersion() string {
+	v := Version
+	if info, ok := debug.ReadBuildInfo(); ok {
+		if v == "dev" && info.Main.Version != "" && info.Main.Version != "(devel)" {
+			v = info.Main.Version
+		}
+	}
+	return v
+}
+
 // versionString returns a human-readable version line, preferring values
 // injected at release time via ldflags and falling back to the Go build info
 // embedded by `go build`/`go install`.

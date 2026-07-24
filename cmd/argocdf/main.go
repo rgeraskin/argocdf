@@ -423,6 +423,7 @@ func runMain(cmd *cobra.Command, args []string) error {
 		Marker:                  marker,
 		Lint:                    lintCommands,
 		LintTimeout:             lintTimeout,
+		Version:                 bareVersion(),
 	}
 
 	// Auto-detect missing values
