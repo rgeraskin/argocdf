@@ -22,10 +22,11 @@ type renderEngine interface {
 }
 
 // buildEngines constructs both engines with identical options.
-func buildEngines(opts RenderOptions) map[string]renderEngine {
+func buildEngines(t *testing.T, opts RenderOptions) map[string]renderEngine {
+	t.Helper()
 	return map[string]renderEngine{
 		"native": NewFactory(opts),
-		"argocd": NewArgoCDRenderer(opts),
+		"argocd": mustNewArgoCDRenderer(t, opts),
 	}
 }
 
@@ -622,7 +623,7 @@ func TestEngineBehaviorParity(t *testing.T) {
 				requireKustomize(t)
 			}
 
-			for engineName := range buildEngines(sc.opts) {
+			for engineName := range buildEngines(t, sc.opts) {
 				t.Run(engineName, func(t *testing.T) {
 					exp := sc.perEngine[engineName]
 					if exp.skip != "" {
@@ -642,7 +643,7 @@ func TestEngineBehaviorParity(t *testing.T) {
 						}
 					}
 
-					engine := buildEngines(sc.opts)[engineName]
+					engine := buildEngines(t, sc.opts)[engineName]
 					result, err := engine.RenderApplication(context.Background(), sc.app(), repoDir, testRevision)
 
 					if sc.wantErr || exp.wantErr {

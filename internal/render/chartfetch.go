@@ -81,7 +81,23 @@ func (r *HelmRenderer) fetchRemoteChart(ctx context.Context, app *cluster.Applic
 	}
 	// The resolved repo's EnableOCI is authoritative; the scheme-less URL
 	// heuristic stays as the fallback for unconfigured repos.
-	client := newChartClient(repo, repo.EnableOCI || isOCIChartRepo(source.RepoURL))
+	enableOCI := repo.EnableOCI || isOCIChartRepo(source.RepoURL)
+	// Under the argocd engine, OCI credentials ride the engine's registry
+	// auth file instead of ArgoCD's `helm registry login` (which on macOS
+	// writes to the shared system keychain — see registryAuthFile). Recording
+	// them lazily here covers repos known only through ResolveRepo. The
+	// stripped copy makes ExtractChart skip its login/logout entirely; the
+	// helm pull then authenticates from the file. Failures are LOUD, per the
+	// no-anonymous-fallback contract above.
+	if auth := r.opts.registryAuth; auth != nil && enableOCI && repo.Username != "" && repo.Password != "" {
+		if err := auth.Ensure(repo.Repo, repo.Username, repo.Password); err != nil {
+			return "", false, nil, fmt.Errorf("failed to record registry credentials for %s: %w", source.RepoURL, err)
+		}
+		repo = repo.DeepCopy()
+		repo.Username = ""
+		repo.Password = ""
+	}
+	client := newChartClient(repo, enableOCI)
 
 	version := source.TargetRevision
 	if version == "HEAD" {

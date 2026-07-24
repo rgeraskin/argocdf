@@ -92,6 +92,10 @@ func LoadLocalRepoCredentials() (*cluster.RepoCredentials, error) {
 	return &cluster.RepoCredentials{
 		HelmRepos: repos,
 		Resolve:   resolve,
+		// The argocd engine scrubs the inherited helm environment (its
+		// isolation contract), so the piercing path also travels explicitly:
+		// the engine re-installs it as HELM_REGISTRY_CONFIG after the scrub.
+		HelmRegistryConfig: registryConfigPath,
 	}, nil
 }
 

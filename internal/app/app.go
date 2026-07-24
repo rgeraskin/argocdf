@@ -121,6 +121,11 @@ func (a *App) Run(ctx context.Context) error {
 	if err := a.initialize(ctx); err != nil {
 		return fmt.Errorf("initialization failed: %w", err)
 	}
+	// The argocd engine keeps a per-run registry auth file with short-lived
+	// tokens; remove it on the way out (normal exit and unwinding alike).
+	if c, ok := a.renderer.(interface{ Cleanup() }); ok {
+		defer c.Cleanup()
+	}
 
 	// Fetch ArgoCD applications
 	contextName := a.cfg.Context
@@ -291,7 +296,10 @@ func (a *App) initialize(ctx context.Context) error {
 	}
 
 	// Create renderer
-	a.renderer = a.factory.CreateRenderFactory(kubeVersion, apiVersions, creds)
+	a.renderer, err = a.factory.CreateRenderFactory(kubeVersion, apiVersions, creds)
+	if err != nil {
+		return fmt.Errorf("failed to create renderer: %w", err)
+	}
 
 	// Create differ and discoverer
 	a.differ = a.factory.CreateManifestDiffer()

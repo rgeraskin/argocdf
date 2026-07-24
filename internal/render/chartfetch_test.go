@@ -141,6 +141,80 @@ func TestFetchRemoteChart_SchemeLessURLHeuristic(t *testing.T) {
 	}
 }
 
+// TestFetchRemoteChart_RegistryAuthFileStripsLogin is the regression test
+// for the chart-fetch `helm registry login` keychain collisions (macOS
+// errSecDuplicateItem -25299): under the argocd engine (registryAuth set),
+// resolved OCI credentials are recorded in the engine's auth file and the
+// chart client receives a credential-stripped repository, so ArgoCD's
+// login/logout (whose helm exec would hit the shared system keychain via
+// ORAS native-store detection, and whose argv would carry the token) never
+// runs. Concurrent fetches share the file through argocdf-side writes only.
+func TestFetchRemoteChart_RegistryAuthFileStripsLogin(t *testing.T) {
+	fake := &fakeChartClient{extractedDir: chartFixture(t, "mychart")}
+	var gotRepo *argoappv1.Repository
+	stubNewChartClient(t, fake, &gotRepo, nil)
+
+	auth, err := newRegistryAuthFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer auth.Remove()
+
+	r := NewHelmRenderer(RenderOptions{
+		registryAuth: auth,
+		ResolveRepo: func(_ context.Context, repoURL, _ string) (*argoappv1.Repository, error) {
+			return &argoappv1.Repository{
+				Repo: repoURL, EnableOCI: true,
+				Username: "fetch-bot", Password: "fetch-tok",
+				Proxy: "http://proxy.local", Insecure: true,
+			}, nil
+		},
+	})
+	_, _, cleanup, err := r.fetchRemoteChart(context.Background(), chartTestApp(), chartSource("1.2.3"))
+	if err != nil {
+		t.Fatalf("fetchRemoteChart() error: %v", err)
+	}
+	defer cleanup()
+
+	if gotRepo == nil {
+		t.Fatal("chart client never constructed")
+	}
+	if gotRepo.Username != "" || gotRepo.Password != "" {
+		t.Error("chart client received credentials — ExtractChart would exec `helm registry login`")
+	}
+	if gotRepo.Proxy != "http://proxy.local" || !gotRepo.Insecure || !gotRepo.EnableOCI {
+		t.Errorf("stripping lost non-credential repo fields: %+v", gotRepo)
+	}
+	if got := readAuths(t, auth.path)["ghcr.io"].Auth; got == "" {
+		t.Error("resolved credentials were not recorded in the registry auth file")
+	}
+}
+
+// TestFetchRemoteChart_NativeKeepsClientLogin pins the native engine's
+// behavior: without an engine-owned auth file, resolved credentials still
+// reach ArgoCD's chart client (its own login flow against the ambient helm
+// environment).
+func TestFetchRemoteChart_NativeKeepsClientLogin(t *testing.T) {
+	fake := &fakeChartClient{extractedDir: chartFixture(t, "mychart")}
+	var gotRepo *argoappv1.Repository
+	stubNewChartClient(t, fake, &gotRepo, nil)
+
+	r := NewHelmRenderer(RenderOptions{
+		ResolveRepo: func(_ context.Context, repoURL, _ string) (*argoappv1.Repository, error) {
+			return &argoappv1.Repository{Repo: repoURL, EnableOCI: true, Username: "u", Password: "p"}, nil
+		},
+	})
+	_, _, cleanup, err := r.fetchRemoteChart(context.Background(), chartTestApp(), chartSource("1.2.3"))
+	if err != nil {
+		t.Fatalf("fetchRemoteChart() error: %v", err)
+	}
+	defer cleanup()
+
+	if gotRepo == nil || gotRepo.Username != "u" || gotRepo.Password != "p" {
+		t.Errorf("native-engine chart client repo = %+v, want credentials passed through", gotRepo)
+	}
+}
+
 func TestFetchRemoteChart_CachePublishAndHit(t *testing.T) {
 	cacheBase := t.TempDir()
 	fake := &fakeChartClient{extractedDir: chartFixture(t, "mychart")}

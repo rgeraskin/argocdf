@@ -83,6 +83,24 @@ type RenderOptions struct {
 	// (never nil on success — unknown URLs yield a credential-less default).
 	// nil means no credential source is configured.
 	ResolveRepo func(ctx context.Context, repoURL, project string) (*argoappv1.Repository, error)
+
+	// HelmRegistryConfig is an explicit helm registry config path to expose
+	// to ArgoCD's helm executions (--repo-creds=local sets it to the user's
+	// own registry config so OCI pulls authenticate with the user's logins,
+	// read-only). Empty means the argocd engine owns registry auth itself
+	// via a per-run auth file. The native engine ignores it: its helm
+	// executions read the process environment, which the local mode already
+	// points at the same file.
+	HelmRegistryConfig string
+
+	// registryAuth is the argocd engine's per-run registry auth file, set at
+	// engine construction. When non-nil, chart fetching records resolved OCI
+	// credentials here and hands ArgoCD's chart client credential-less
+	// repositories, so its `helm registry login` (macOS: shared-keychain via
+	// ORAS native-store detection) never runs. nil under the native engine,
+	// whose chart fetches keep ArgoCD's own login flow against the ambient
+	// helm environment.
+	registryAuth *registryAuthFile
 }
 
 // RenderResult contains the result of rendering an application.

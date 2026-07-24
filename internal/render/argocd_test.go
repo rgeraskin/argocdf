@@ -2,6 +2,7 @@ package render
 
 import (
 	"context"
+	"encoding/base64"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +17,18 @@ import (
 	"github.com/rgeraskin/argocdf/internal/cluster"
 	"github.com/rgeraskin/argocdf/internal/types"
 )
+
+// mustNewArgoCDRenderer builds the argocd engine and registers its cleanup
+// (the per-run registry auth file). Construction failures are test-fatal.
+func mustNewArgoCDRenderer(t *testing.T, opts RenderOptions) *ArgoCDRenderer {
+	t.Helper()
+	r, err := NewArgoCDRenderer(opts)
+	if err != nil {
+		t.Fatalf("NewArgoCDRenderer() error = %v", err)
+	}
+	t.Cleanup(r.Cleanup)
+	return r
+}
 
 // requireHelm skips the test when the helm binary is unavailable.
 func requireHelm(t *testing.T) {
@@ -129,7 +142,7 @@ func TestArgoCDRenderer_LocalHelmChart_IncludesCRDs(t *testing.T) {
 	repoDir := t.TempDir()
 	writeArgoTestChart(t, repoDir, "charts/testchart", nil)
 
-	r := NewArgoCDRenderer(RenderOptions{})
+	r := mustNewArgoCDRenderer(t, RenderOptions{})
 	app := testApp("my-app", "charts/testchart", nil)
 
 	result, err := r.RenderApplication(context.Background(), app, repoDir, "abcdef1234567890")
@@ -181,7 +194,7 @@ func TestArgoCDRenderer_SkipSchemaValidation(t *testing.T) {
 				"values.schema.json": schema,
 			})
 
-			r := NewArgoCDRenderer(RenderOptions{})
+			r := mustNewArgoCDRenderer(t, RenderOptions{})
 			app := testApp("schema-app", "chart", tt.helm)
 
 			_, err := r.RenderApplication(context.Background(), app, repoDir, "abcdef1234567890")
@@ -223,7 +236,7 @@ func TestArgoCDRenderer_Kustomize(t *testing.T) {
 		},
 	}
 
-	r := NewArgoCDRenderer(RenderOptions{})
+	r := mustNewArgoCDRenderer(t, RenderOptions{})
 	result, err := r.RenderApplication(context.Background(), app, repoDir, "abcdef1234567890")
 	if err != nil {
 		t.Fatalf("RenderApplication() error = %v", err)
@@ -271,7 +284,7 @@ func TestArgoCDRenderer_MultiSourceValuesRef(t *testing.T) {
 	}
 
 	// RepoURL matching makes the ref resolve to the local worktree (repoDir).
-	r := NewArgoCDRenderer(RenderOptions{RepoURL: repoURL})
+	r := mustNewArgoCDRenderer(t, RenderOptions{RepoURL: repoURL})
 	result, err := r.RenderApplication(context.Background(), app, repoDir, "abcdef1234567890")
 	if err != nil {
 		t.Fatalf("RenderApplication() error = %v", err)
@@ -297,7 +310,7 @@ func TestArgoCDRenderer_NativeParity(t *testing.T) {
 		t.Fatalf("native RenderApplication() error = %v", err)
 	}
 
-	argocd := NewArgoCDRenderer(RenderOptions{})
+	argocd := mustNewArgoCDRenderer(t, RenderOptions{})
 	argocdResult, err := argocd.RenderApplication(context.Background(), app, repoDir, "abcdef1234567890")
 	if err != nil {
 		t.Fatalf("argocd RenderApplication() error = %v", err)
@@ -378,7 +391,7 @@ func TestBuildManifestRequest_RepoCreds(t *testing.T) {
 			}, nil
 		},
 	}
-	r := NewArgoCDRenderer(opts)
+	r := mustNewArgoCDRenderer(t, opts)
 	app := testApp("creds-app", "chart", nil)
 	ctx := context.Background()
 
@@ -427,7 +440,7 @@ func TestBuildManifestRequest_RepoCreds(t *testing.T) {
 	})
 
 	t.Run("nil ResolveRepo falls back to a bare repo", func(t *testing.T) {
-		bare := NewArgoCDRenderer(RenderOptions{})
+		bare := mustNewArgoCDRenderer(t, RenderOptions{})
 		q, err := bare.buildManifestRequest(ctx, app, app.Spec.Source, nil)
 		if err != nil {
 			t.Fatalf("buildManifestRequest() error: %v", err)
@@ -438,7 +451,7 @@ func TestBuildManifestRequest_RepoCreds(t *testing.T) {
 	})
 
 	t.Run("resolve errors fail the request with the root cause", func(t *testing.T) {
-		failing := NewArgoCDRenderer(RenderOptions{
+		failing := mustNewArgoCDRenderer(t, RenderOptions{
 			ResolveRepo: func(context.Context, string, string) (*argoappv1.Repository, error) {
 				return nil, context.DeadlineExceeded
 			},
@@ -449,8 +462,132 @@ func TestBuildManifestRequest_RepoCreds(t *testing.T) {
 	})
 }
 
+// TestBuildManifestRequest_GitSourceCarriesOCIDependencyCreds is the
+// regression test for the 401s on git-path charts with private OCI
+// dependencies: an enableOCI HELM-type repository (the classic
+// `type: helm` + `enableOCI: true` secret shape) must reach the request's
+// Repos for a plain git source — it rides the helm list unconditionally, NOT
+// the IsOCI-gated OCI list — with its credentials seeded into the engine's
+// registry auth file and stripped from the entry itself, so `helm dependency
+// build` authenticates from HELM_REGISTRY_CONFIG without ever running
+// `helm registry login` (macOS: shared-keychain writes and login/logout
+// races across concurrent renders).
+func TestBuildManifestRequest_GitSourceCarriesOCIDependencyCreds(t *testing.T) {
+	opts := RenderOptions{
+		HelmRepos: []*argoappv1.Repository{{
+			Repo: "ghcr.io/acme", Name: "acme/app-template", Type: "helm",
+			EnableOCI: true, Username: "bot", Password: "tok",
+		}},
+		HelmRepoCreds: []*argoappv1.RepoCreds{{
+			URL: "registry.example.com/templates", Type: "helm", EnableOCI: true,
+			Username: "tpl-bot", Password: "tpl-tok",
+		}},
+	}
+	r := mustNewArgoCDRenderer(t, opts)
+
+	app := testApp("git-app", "charts/umbrella", nil) // git path source, not OCI
+	q, err := r.buildManifestRequest(context.Background(), app, app.Spec.Source, nil)
+	if err != nil {
+		t.Fatalf("buildManifestRequest() error: %v", err)
+	}
+
+	if len(q.Repos) != 1 || q.Repos[0].Repo != "ghcr.io/acme" || !q.Repos[0].EnableOCI {
+		t.Fatalf("Repos = %+v, want the enableOCI helm repository offered to a git source (its OCI dependencies need it)", q.Repos)
+	}
+	if q.Repos[0].Username != "" || q.Repos[0].Password != "" {
+		t.Error("request repo kept its credentials — DependencyBuild would exec `helm registry login`/`logout`")
+	}
+	if len(q.HelmRepoCreds) != 1 || q.HelmRepoCreds[0].Username != "" {
+		t.Errorf("HelmRepoCreds = %+v, want the template offered, credential-stripped", q.HelmRepoCreds)
+	}
+
+	// The stripped credentials must be waiting in the engine-owned registry
+	// config helm children read via HELM_REGISTRY_CONFIG.
+	authFile := os.Getenv("HELM_REGISTRY_CONFIG")
+	if authFile == "" || r.ownedRegistryAuth == nil || authFile != r.ownedRegistryAuth.path {
+		t.Fatalf("HELM_REGISTRY_CONFIG = %q, want the engine-owned auth file", authFile)
+	}
+	auths := readAuths(t, authFile)
+	if want := base64.StdEncoding.EncodeToString([]byte("bot:tok")); auths["ghcr.io"].Auth != want {
+		t.Errorf("auth file ghcr.io = %q, want the repository secret credentials", auths["ghcr.io"].Auth)
+	}
+	if want := base64.StdEncoding.EncodeToString([]byte("tpl-bot:tpl-tok")); auths["registry.example.com"].Auth != want {
+		t.Errorf("auth file registry.example.com = %q, want the credential template credentials", auths["registry.example.com"].Auth)
+	}
+}
+
+// TestNewArgoCDRendererIsolatesHelmEnv pins the engine's environment
+// contract: inherited helm variables are scrubbed (a first-occurrence
+// duplicate would defeat ArgoCD's appended per-command temp homes), and
+// HELM_REGISTRY_CONFIG points at the engine-owned per-run auth file — the
+// mechanism that keeps registry logins out of the user's helm state and the
+// macOS keychain. Concurrent constructions each own a distinct file.
+func TestNewArgoCDRendererIsolatesHelmEnv(t *testing.T) {
+	for _, v := range inheritedHelmEnvVars {
+		t.Setenv(v, "/inherited")
+	}
+
+	r := mustNewArgoCDRenderer(t, RenderOptions{})
+	for _, v := range inheritedHelmEnvVars {
+		if v == "HELM_REGISTRY_CONFIG" {
+			continue
+		}
+		if got, set := os.LookupEnv(v); set {
+			t.Errorf("%s = %q survived engine construction", v, got)
+		}
+	}
+	got := os.Getenv("HELM_REGISTRY_CONFIG")
+	if r.ownedRegistryAuth == nil || got != r.ownedRegistryAuth.path {
+		t.Fatalf("HELM_REGISTRY_CONFIG = %q, want the engine-owned auth file %v", got, r.ownedRegistryAuth)
+	}
+	if _, err := os.Stat(got); err != nil {
+		t.Fatalf("owned auth file missing: %v", err)
+	}
+
+	second := mustNewArgoCDRenderer(t, RenderOptions{})
+	if second.ownedRegistryAuth.path == r.ownedRegistryAuth.path {
+		t.Error("two engines share one auth file")
+	}
+
+	r.Cleanup()
+	if _, err := os.Stat(r.ownedRegistryAuth.path); !os.IsNotExist(err) {
+		t.Error("Cleanup() left the auth file (it holds tokens) behind")
+	}
+}
+
+// TestNewArgoCDRendererPreservesLocalRegistryConfig pins the
+// --repo-creds=local piercing: the user's own registry config survives the
+// environment scrub and no engine-owned file is created, so OCI pulls
+// authenticate with the user's own logins, read-only.
+func TestNewArgoCDRendererPreservesLocalRegistryConfig(t *testing.T) {
+	t.Setenv("HELM_REGISTRY_CONFIG", "/user/original.json")
+	t.Setenv("HELM_CONFIG_HOME", "/user/helm")
+
+	r := mustNewArgoCDRenderer(t, RenderOptions{
+		HelmRegistryConfig: "/user/registry/config.json",
+		HelmRepos: []*argoappv1.Repository{{
+			Repo: "ghcr.io/acme", Type: "helm", EnableOCI: true, Username: "u", Password: "p",
+		}},
+	})
+
+	if got := os.Getenv("HELM_REGISTRY_CONFIG"); got != "/user/registry/config.json" {
+		t.Errorf("HELM_REGISTRY_CONFIG = %q, want the local-mode registry config", got)
+	}
+	if _, set := os.LookupEnv("HELM_CONFIG_HOME"); set {
+		t.Error("HELM_CONFIG_HOME survived — helm children would resolve the user config over the isolated home")
+	}
+	if r.ownedRegistryAuth != nil {
+		t.Error("local mode built an engine-owned auth file; it must read the user's config instead")
+	}
+	// Without an owned file there is nowhere safe to strip credentials to;
+	// the lists must pass through untouched.
+	if r.opts.HelmRepos[0].Username != "u" {
+		t.Error("local-mode repositories were credential-stripped")
+	}
+}
+
 func TestBuildManifestRequest_InstanceNameAndProject(t *testing.T) {
-	r := NewArgoCDRenderer(RenderOptions{ArgoCDNamespace: "argocd"})
+	r := mustNewArgoCDRenderer(t, RenderOptions{ArgoCDNamespace: "argocd"})
 	ctx := context.Background()
 
 	app := testApp("my-app", "chart", nil)
@@ -481,7 +618,7 @@ func TestBuildManifestRequest_InstanceNameAndProject(t *testing.T) {
 
 func TestPrepareRefSources_ResolvedRepo(t *testing.T) {
 	repoURL := "https://github.com/example/repo.git"
-	r := NewArgoCDRenderer(RenderOptions{
+	r := mustNewArgoCDRenderer(t, RenderOptions{
 		RepoURL: repoURL,
 		ResolveRepo: func(_ context.Context, url, _ string) (*argoappv1.Repository, error) {
 			return &argoappv1.Repository{Repo: url, Username: "ref-user", Password: "ref-pass"}, nil
@@ -548,7 +685,7 @@ func TestArgoCDRenderer_ExternalRenderableSource(t *testing.T) {
 	app := testApp("ext-app", "chart", nil)
 	app.Spec.Source.RepoURL = extURL
 
-	r := NewArgoCDRenderer(RenderOptions{RepoURL: "https://github.com/example/local-repo.git"})
+	r := mustNewArgoCDRenderer(t, RenderOptions{RepoURL: "https://github.com/example/local-repo.git"})
 	result, err := r.RenderApplication(context.Background(), app, localWorktree, "rev")
 	if err != nil {
 		t.Fatalf("RenderApplication() error: %v", err)
@@ -588,7 +725,7 @@ func TestArgoCDRenderer_ExternalValuesRef(t *testing.T) {
 	}
 	app.Spec.Destination = cluster.ApplicationDestination{Namespace: "default"}
 
-	r := NewArgoCDRenderer(RenderOptions{RepoURL: "https://github.com/example/repo.git"})
+	r := mustNewArgoCDRenderer(t, RenderOptions{RepoURL: "https://github.com/example/repo.git"})
 	result, err := r.RenderApplication(context.Background(), app, localRepo, "rev")
 	if err != nil {
 		t.Fatalf("RenderApplication() error: %v", err)

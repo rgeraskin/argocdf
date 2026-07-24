@@ -51,7 +51,7 @@ func (f *Factory) CreateRepository() (*git.Repository, error) {
 // pass to helm; it is ignored when --no-api-versions is set. creds carries
 // the repository credentials loaded per --repo-creds (nil in `none` mode, or
 // when loading was skipped).
-func (f *Factory) CreateRenderFactory(kubeVersion string, apiVersions []string, creds *cluster.RepoCredentials) applicationRenderer {
+func (f *Factory) CreateRenderFactory(kubeVersion string, apiVersions []string, creds *cluster.RepoCredentials) (applicationRenderer, error) {
 	if f.config.NoAPIVersions {
 		apiVersions = nil
 	}
@@ -74,11 +74,12 @@ func (f *Factory) CreateRenderFactory(kubeVersion string, apiVersions []string, 
 		opts.HelmRepoCreds = creds.HelmRepoCreds
 		opts.OCIRepoCreds = creds.OCIRepoCreds
 		opts.ResolveRepo = creds.Resolve
+		opts.HelmRegistryConfig = creds.HelmRegistryConfig
 	}
 	if f.config.Renderer == config.RendererArgoCD {
 		return render.NewArgoCDRenderer(opts)
 	}
-	return render.NewFactory(opts)
+	return render.NewFactory(opts), nil
 }
 
 // baseCacheDir resolves the base argocdf cache directory: the explicit

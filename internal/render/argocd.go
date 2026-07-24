@@ -56,10 +56,24 @@ type ArgoCDRenderer struct {
 	// helm is used only for its remote-chart fetching (persistent chart cache);
 	// all templating goes through GenerateManifests.
 	helm *HelmRenderer
+	// ownedRegistryAuth is the per-run registry auth file when this engine
+	// created one (all --repo-creds modes except local, which pierces with the
+	// user's own registry config instead). Removed by Cleanup.
+	ownedRegistryAuth *registryAuthFile
 }
 
 // NewArgoCDRenderer creates a renderer backed by reposerver's GenerateManifests.
-func NewArgoCDRenderer(opts RenderOptions) *ArgoCDRenderer {
+//
+// Construction has process-global side effects that make ArgoCD's helm
+// isolation actually hold outside a repo-server container: the inherited helm
+// environment is scrubbed (see inheritedHelmEnvVars) and HELM_REGISTRY_CONFIG
+// is pointed at either the user's registry config (--repo-creds=local, via
+// opts.HelmRegistryConfig) or an argocdf-owned per-run auth file seeded from
+// the credential lists — whose OCI entries are then stripped of
+// username/password so ArgoCD's DependencyBuild never execs `helm registry
+// login`/`logout` (on macOS those land in the shared system keychain via
+// ORAS native-store detection and race across concurrent renders).
+func NewArgoCDRenderer(opts RenderOptions) (*ArgoCDRenderer, error) {
 	// GenerateManifests logs through the process-global logrus logger, which
 	// argocdf does not otherwise use. Keep only errors; real failures are
 	// returned as errors and surfaced by argocdf's own logging.
@@ -72,7 +86,45 @@ func NewArgoCDRenderer(opts RenderOptions) *ArgoCDRenderer {
 	if os.Getenv(common.EnvLogLevel) == "" {
 		_ = os.Setenv(common.EnvLogLevel, "error")
 	}
-	return &ArgoCDRenderer{opts: opts, helm: NewHelmRenderer(opts)}
+
+	r := &ArgoCDRenderer{}
+	registryConfig := opts.HelmRegistryConfig
+	if registryConfig == "" {
+		auth, err := newRegistryAuthFile()
+		if err != nil {
+			return nil, err
+		}
+		opts.HelmRepos, err = seedAndStripRepos(auth, opts.HelmRepos)
+		if err == nil {
+			opts.OCIRepos, err = seedAndStripRepos(auth, opts.OCIRepos)
+		}
+		if err == nil {
+			opts.HelmRepoCreds, err = seedAndStripRepoCreds(auth, opts.HelmRepoCreds)
+		}
+		if err == nil {
+			opts.OCIRepoCreds, err = seedAndStripRepoCreds(auth, opts.OCIRepoCreds)
+		}
+		if err != nil {
+			auth.Remove()
+			return nil, err
+		}
+		opts.registryAuth = auth
+		r.ownedRegistryAuth = auth
+		registryConfig = auth.path
+	}
+	isolateHelmEnv(registryConfig)
+
+	r.opts = opts
+	r.helm = NewHelmRenderer(opts)
+	return r, nil
+}
+
+// Cleanup removes the per-run registry auth file (it holds short-lived
+// tokens). Safe to call multiple times and on a renderer that owns none.
+func (r *ArgoCDRenderer) Cleanup() {
+	if r.ownedRegistryAuth != nil {
+		r.ownedRegistryAuth.Remove()
+	}
 }
 
 // RenderApplication renders all sources of an application via ArgoCD's
@@ -232,10 +284,12 @@ func (r *ArgoCDRenderer) buildManifestRequest(
 	}
 
 	// Repo must be non-nil (proxy/creds/env lookups dereference it). The
-	// resolved repo carries creds/proxy/TLS from --repo-creds; dependency
-	// auth flows through Repos/HelmRepoCreds into ArgoCD's own
-	// DependencyBuild (registry login / authenticated repo add, inside the
-	// isolated helm home).
+	// resolved repo carries creds/proxy/TLS from --repo-creds. Dependency
+	// auth flows through Repos/HelmRepoCreds into ArgoCD's DependencyBuild:
+	// classic repositories keep their credentials (authenticated `helm repo
+	// add`), while OCI entries were stripped at construction — their auth
+	// rides the HELM_REGISTRY_CONFIG file instead, so no `helm registry
+	// login`/`logout` ever runs (see registryAuthFile).
 	repo, err := r.resolveSourceRepo(ctx, app.Spec.Project, source.RepoURL)
 	if err != nil {
 		return nil, err

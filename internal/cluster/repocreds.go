@@ -40,6 +40,13 @@ type RepoCredentials struct {
 	// a credential-less default Repository. Each call returns a fresh copy,
 	// safe to mutate and to hand to GenerateManifests.
 	Resolve func(ctx context.Context, repoURL, project string) (*argoappv1.Repository, error)
+
+	// HelmRegistryConfig is the helm registry config path OCI pulls should
+	// authenticate from, when the credential source has one. Only the local
+	// source sets it (the user's own registry config, resolved via `helm
+	// env`); cluster credentials are inline in the lists, so the argocd
+	// engine builds its own registry auth file instead.
+	HelmRegistryConfig string
 }
 
 // LoadRepoCredentials reads ArgoCD's repository secrets and credential
