@@ -160,6 +160,7 @@ ARGOCDF_EXTERNAL_DIFF="delta --side-by-side" argocdf
 
 | Flag                          | Description                                                              | Default       |
 |-------------------------------|--------------------------------------------------------------------------|---------------|
+| `--renderer`                  | Render engine: `native` (argocdf's own helm/kustomize pipeline) or `argocd` (ArgoCD's repo-server code, for exact ArgoCD render parity — see below) | `native`      |
 | `--kube-version`              | Kubernetes version for rendering                                         | Auto-detected |
 | `--kustomize-enable-helm`     | Enable Helm chart inflation via kustomize                                | `false`       |
 | `--kustomize-build-options`   | Additional kustomize build options (space-separated)                     | (none)        |
@@ -167,6 +168,23 @@ ARGOCDF_EXTERNAL_DIFF="delta --side-by-side" argocdf
 | `--helm-skip-refresh`         | Skip refreshing the repo cache during `helm dependency build`            | `true`        |
 | `--helm-add-repos`            | Make chart dependency repos resolvable before dependency build: refresh a matching existing entry, or `helm repo add` + `update` unknown URLs. Mutates the local helm config/cache; intended for CI | `false`       |
 | `--no-api-versions`           | Do not pass cluster-discovered API versions to helm via `--api-versions` | `false`       |
+
+**The `argocd` render engine** (`--renderer=argocd`, env `ARGOCDF_RENDERER=argocd`)
+routes rendering through ArgoCD's own repo-server code
+(`reposerver/repository.GenerateManifests` — the same code path behind
+`argocd app diff --local`), so option translation matches ArgoCD exactly:
+helm runs with `--include-crds` (CRDs from `crds/` appear in diffs), all
+`spec.source.helm`/`kustomize` fields are honored, `$ARGOCD_APP_*` build-env
+substitution works, `.argocd-source*.yaml` overrides are merged, and helm
+dependencies are built in an isolated temp helm home (dependency repos from
+`Chart.yaml` are registered there automatically — `--helm-add-repos` is not
+needed). Notable differences from `native`: CRDs appear in diffs, recursive
+directory sources include hidden (dot-)directories exactly as ArgoCD does,
+YAML is re-serialized from ArgoCD's parsed objects (key order may differ from
+raw helm output; diffs are computed semantically so this does not affect
+results), and `--helm-skip-refresh`/`--helm-add-repos` do not apply. Set
+`ARGOCD_LOG_LEVEL=info` to see ArgoCD's per-command exec traces when
+debugging renders.
 
 ### Output Flags
 

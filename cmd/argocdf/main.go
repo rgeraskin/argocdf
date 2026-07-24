@@ -61,6 +61,9 @@ var (
 	helmAddRepos    bool
 	noAPIVersions   bool
 
+	// Render engine selection
+	renderer string
+
 	// Render cache options
 	noCache  bool
 	cacheDir string
@@ -178,6 +181,9 @@ Examples:
 
 	// Rendering flags
 	rootCmd.Flags().StringVar(&kubeVersion, "kube-version", "", "Kubernetes version for rendering (auto-detected)")
+	rootCmd.Flags().StringVar(&renderer, "renderer", config.DefaultRenderer,
+		"Render engine: 'native' (argocdf's own helm/kustomize pipeline) or 'argocd' "+
+			"(ArgoCD's repo-server code, for exact ArgoCD render parity)")
 
 	// Kustomize build options
 	rootCmd.Flags().BoolVar(&kustomizeEnableHelm, "kustomize-enable-helm", false,
@@ -393,6 +399,7 @@ func runMain(cmd *cobra.Command, args []string) error {
 		HelmSkipRefresh:         helmSkipRefresh,
 		HelmAddRepos:            helmAddRepos,
 		NoAPIVersions:           noAPIVersions,
+		Renderer:                renderer,
 		NoCache:                 noCache,
 		CacheDir:                cacheDir,
 		ExitCode:                exitCode,

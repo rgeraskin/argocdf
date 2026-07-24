@@ -692,6 +692,40 @@ func TestHelmSkipRefresh_CommandArgs(t *testing.T) {
 // collected from chart dependencies: oci://, file://, and @alias references
 // are excluded, duplicates collapse (including trailing-slash variants of one
 // URL), and the result is sorted and slash-normalized.
+func TestIsOCIChartRepo(t *testing.T) {
+	tests := []struct {
+		repoURL string
+		want    bool
+	}{
+		{"oci://ghcr.io/org/charts", true},
+		// ArgoCD stores OCI repos scheme-less (enableOCI on the repo secret).
+		{"ghcr.io/acme", true},
+		{"registry.example.com:5000/charts", true},
+		{"https://charts.example.com", false},
+		{"http://charts.example.com", false},
+	}
+	for _, tt := range tests {
+		if got := isOCIChartRepo(tt.repoURL); got != tt.want {
+			t.Errorf("isOCIChartRepo(%q) = %v, want %v", tt.repoURL, got, tt.want)
+		}
+	}
+}
+
+func TestOCIChartRef(t *testing.T) {
+	tests := []struct {
+		repoURL, chart, want string
+	}{
+		{"oci://ghcr.io/org", "mychart", "oci://ghcr.io/org/mychart"},
+		{"ghcr.io/acme", "somechart", "oci://ghcr.io/acme/somechart"},
+		{"ghcr.io/org/", "mychart", "oci://ghcr.io/org/mychart"},
+	}
+	for _, tt := range tests {
+		if got := ociChartRef(tt.repoURL, tt.chart); got != tt.want {
+			t.Errorf("ociChartRef(%q, %q) = %q, want %q", tt.repoURL, tt.chart, got, tt.want)
+		}
+	}
+}
+
 func TestDependencyRepoURLs(t *testing.T) {
 	deps := []chartDependency{
 		{Name: "cluster", Repository: "https://cloudnative-pg.github.io/charts"},

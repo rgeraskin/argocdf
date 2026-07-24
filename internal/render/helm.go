@@ -226,10 +226,10 @@ func (r *HelmRenderer) handleRemoteChart(ctx context.Context, source *cluster.Ap
 		// rendering stays functional even if the cache cannot be populated.
 	}
 
-	if strings.HasPrefix(repoURL, "oci://") {
+	if isOCIChartRepo(repoURL) {
 		// OCI registry - helm can pull directly; the chart version is
 		// passed separately via --version
-		return repoURL + "/" + source.Chart, nil, "", false, nil
+		return ociChartRef(repoURL, source.Chart), nil, "", false, nil
 	}
 
 	// HTTP/HTTPS repo - need to add repo first
@@ -277,6 +277,25 @@ func dirExists(p string) bool {
 	return err == nil && info.IsDir()
 }
 
+// isOCIChartRepo reports whether a chart source's repoURL refers to an OCI
+// registry. ArgoCD stores OCI helm repositories scheme-less (e.g.
+// "ghcr.io/org", with enableOCI set on the repository secret), so a chart
+// repoURL is OCI both with an explicit oci:// scheme and with no scheme at
+// all — http(s):// are the only classic chart-repository forms.
+func isOCIChartRepo(repoURL string) bool {
+	return strings.HasPrefix(repoURL, "oci://") || !strings.Contains(repoURL, "://")
+}
+
+// ociChartRef builds the oci:// reference helm pulls a chart from, accepting
+// both oci://-prefixed and scheme-less repository URLs.
+func ociChartRef(repoURL, chart string) string {
+	u := strings.TrimSuffix(repoURL, "/")
+	if !strings.HasPrefix(u, "oci://") {
+		u = "oci://" + u
+	}
+	return u + "/" + chart
+}
+
 // pullChartToCache pulls a pinned chart version into the persistent cache using
 // an atomic claim: the chart is unpacked into a sibling temp directory and then
 // renamed into place, so concurrent renders never observe a partial chart. If a
@@ -308,8 +327,8 @@ func (r *HelmRenderer) pullChartToCache(ctx context.Context, source *cluster.App
 	}()
 
 	args := []string{"pull"}
-	if strings.HasPrefix(source.RepoURL, "oci://") {
-		args = append(args, source.RepoURL+"/"+source.Chart)
+	if isOCIChartRepo(source.RepoURL) {
+		args = append(args, ociChartRef(source.RepoURL, source.Chart))
 	} else {
 		args = append(args, source.Chart, "--repo", source.RepoURL)
 	}

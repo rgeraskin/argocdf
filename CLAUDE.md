@@ -95,6 +95,38 @@ The tool supports both single and multi-source applications:
 
 Apps-of-apps pattern is handled via recursive discovery with configurable max depth.
 
+## Render Engines (`--renderer`)
+
+Two engines implement the app-side `applicationRenderer` seam (`internal/app/app.go`),
+selected by `--renderer` / `ARGOCDF_RENDERER` in `Factory.CreateRenderFactory`:
+
+- **`native`** (default) — argocdf's own pipeline (`internal/render`
+  `Factory`/`HelmRenderer`/`KustomizeRenderer`): hand-translates
+  `ApplicationSource` fields to helm/kustomize CLI flags.
+- **`argocd`** — `internal/render/argocd.go` wraps ArgoCD's
+  `reposerver/repository.GenerateManifests` (the `argocd app diff --local` code
+  path) for exact ArgoCD parity: ArgoCD does source-type dispatch, the complete
+  helm/kustomize option translation (incl. `--include-crds` by default, which
+  native lacks), `ARGOCD_APP_*` build-env substitution, `.argocd-source*.yaml`
+  overrides, and dependency builds into an isolated temp helm home (so
+  `--helm-add-repos`/`--helm-skip-refresh` don't apply). argocdf still owns
+  worktrees, remote-chart fetching (chart cache), `$ref` checkout (registered in
+  a `TempPaths` keyed by normalized repo URL — GenerateManifests never clones),
+  and the render cache (`KeyOptions.Renderer` keeps engine entries separate).
+  Integration constraints that matter when touching this file: `q.Repo` and
+  `q.ApplicationSource` must be non-nil, the source is deep-copied because
+  GenerateManifests mutates it, calls are serialized per appPath (dependency
+  builds write `charts/`/`Chart.lock` into the worktree), `isLocal=false` is
+  what ISOLATES the helm home, and the revision param feeds
+  `ARGOCD_APP_REVISION*`. ArgoCD's per-exec tracer is silenced by defaulting
+  `ARGOCD_LOG_LEVEL=error` (explicit values are respected).
+
+The trade-off mirrors the types-import decision: ~85MB extra binary for
+structurally-eliminated behavior drift. On argo-cd version bumps, expect
+`GenerateManifests` signature churn (loud, compile-time) and re-check that the
+in-tree gitops-engine fork hasn't diverged from the published module argocdf
+links.
+
 ### Automatic Helm Dependency Management
 
 When rendering local Helm charts, argocdf automatically runs `helm dependency build` if the chart has a `Chart.yaml` with a `dependencies:` section. Helm is smart enough to skip already-fetched dependencies, so this is safe to run unconditionally.

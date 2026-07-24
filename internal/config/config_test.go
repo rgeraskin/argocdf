@@ -251,6 +251,28 @@ func TestConfigValidate(t *testing.T) {
 			errMsg:  "invalid stdout format",
 		},
 		{
+			name: "valid config with argocd renderer",
+			config: &Config{
+				RepoPath:     tmpDir,
+				StdoutFormat: "fields",
+				MaxDepth:     10,
+				Concurrency:  1,
+				Renderer:     RendererArgoCD,
+			},
+		},
+		{
+			name: "invalid renderer",
+			config: &Config{
+				RepoPath:     tmpDir,
+				StdoutFormat: "fields",
+				MaxDepth:     10,
+				Concurrency:  1,
+				Renderer:     "helmfile",
+			},
+			wantErr: true,
+			errMsg:  "invalid renderer",
+		},
+		{
 			name: "negative lint timeout",
 			config: &Config{
 				RepoPath:     tmpDir,

@@ -37,6 +37,10 @@ type KeyOptions struct {
 	// the mutable repo index content, so the range-without-lock case bypasses
 	// the cache entirely — see chartDepsHermetic.
 	HelmAddRepos bool
+	// Renderer identifies the render engine (native/argocd). The engines emit
+	// different output for the same spec (e.g. ArgoCD's --include-crds default),
+	// so their renders must not share cache entries.
+	Renderer string
 }
 
 // KeyInput bundles everything required to compute a cache key for a single
@@ -125,6 +129,7 @@ func ComputeKey(in KeyInput) (string, bool) {
 		in.Options.KustomizeLoadRestrictor,
 		strconv.FormatBool(in.Options.HelmSkipRefresh),
 		strconv.FormatBool(in.Options.HelmAddRepos),
+		in.Options.Renderer,
 	)
 
 	sources := in.Spec.GetSources()

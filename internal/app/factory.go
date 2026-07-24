@@ -45,10 +45,11 @@ func (f *Factory) CreateRepository() (*git.Repository, error) {
 	return git.Open(f.config.RepoPath)
 }
 
-// CreateRenderFactory creates a render factory. apiVersions is the list of
-// cluster API versions to pass to helm; it is ignored when --no-api-versions
-// is set.
-func (f *Factory) CreateRenderFactory(kubeVersion string, apiVersions []string) *render.Factory {
+// CreateRenderFactory creates the render engine selected by --renderer:
+// argocdf's native helm/kustomize pipeline, or ArgoCD's own repo-server code
+// for exact render parity. apiVersions is the list of cluster API versions to
+// pass to helm; it is ignored when --no-api-versions is set.
+func (f *Factory) CreateRenderFactory(kubeVersion string, apiVersions []string) applicationRenderer {
 	if f.config.NoAPIVersions {
 		apiVersions = nil
 	}
@@ -63,6 +64,9 @@ func (f *Factory) CreateRenderFactory(kubeVersion string, apiVersions []string) 
 		HelmSkipRefresh:         f.config.HelmSkipRefresh,
 		HelmAddRepos:            f.config.HelmAddRepos,
 		ChartCacheDir:           f.chartCacheDir(),
+	}
+	if f.config.Renderer == config.RendererArgoCD {
+		return render.NewArgoCDRenderer(opts)
 	}
 	return render.NewFactory(opts)
 }

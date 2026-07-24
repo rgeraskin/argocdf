@@ -117,8 +117,10 @@ func (f *Factory) GetRenderer(source *cluster.ApplicationSource, repoPath string
 }
 
 // RenderApplication renders all sources for an application and combines the output.
-// The context can be used to cancel long-running render operations.
-func (f *Factory) RenderApplication(ctx context.Context, app *cluster.Application, repoPath string) (*RenderResult, error) {
+// The context can be used to cancel long-running render operations. revision is
+// accepted for interface compatibility with the argocd engine (which uses it
+// for ARGOCD_APP_REVISION* build-env variables); the native engine ignores it.
+func (f *Factory) RenderApplication(ctx context.Context, app *cluster.Application, repoPath, _ string) (*RenderResult, error) {
 	sources := app.Spec.GetSources()
 	if len(sources) == 0 {
 		return &RenderResult{

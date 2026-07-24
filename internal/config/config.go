@@ -38,6 +38,14 @@ const (
 	// process a single app's already-rendered manifests, so they should finish
 	// in well under a second; 5s leaves room for slow policy engines.
 	DefaultLintTimeout = 5 * time.Second
+
+	// RendererNative renders with argocdf's own helm/kustomize pipeline.
+	RendererNative = "native"
+	// RendererArgoCD renders through ArgoCD's own repo-server code
+	// (reposerver/repository.GenerateManifests) for exact ArgoCD parity.
+	RendererArgoCD = "argocd"
+	// DefaultRenderer is the render engine used when --renderer is not given.
+	DefaultRenderer = RendererNative
 )
 
 // DefaultConcurrency returns the default number of applications to render in
@@ -107,6 +115,11 @@ type Config struct {
 	// NoAPIVersions disables passing cluster-discovered API versions to helm
 	// via --api-versions (faster; useful for compatibility).
 	NoAPIVersions bool
+
+	// Renderer selects the render engine: RendererNative (argocdf's own
+	// helm/kustomize pipeline) or RendererArgoCD (ArgoCD's repo-server code,
+	// for exact ArgoCD parity).
+	Renderer string
 
 	// Render cache options
 	NoCache bool // Disable the persistent render cache
@@ -188,6 +201,7 @@ func New() *Config {
 		Namespace:    DefaultNamespace,
 		StdoutFormat: DefaultStdoutFormat,
 		MaxDepth:     DefaultMaxDepth,
+		Renderer:     DefaultRenderer,
 	}
 }
 
@@ -218,6 +232,15 @@ func (c *Config) Validate() error {
 		// Valid
 	default:
 		return fmt.Errorf("invalid stdout format: %s (must be fields, summary, unified, or none)", c.StdoutFormat)
+	}
+
+	// Validate renderer choice. Empty is accepted as "not yet defaulted":
+	// WithDefaults resolves it to DefaultRenderer.
+	switch c.Renderer {
+	case "", RendererNative, RendererArgoCD:
+		// Valid
+	default:
+		return fmt.Errorf("invalid renderer: %s (must be %s or %s)", c.Renderer, RendererNative, RendererArgoCD)
 	}
 
 	// Warn if no output configured
@@ -258,6 +281,9 @@ func (c *Config) WithDefaults() *Config {
 	}
 	if c.LintTimeout == 0 {
 		c.LintTimeout = DefaultLintTimeout
+	}
+	if c.Renderer == "" {
+		c.Renderer = DefaultRenderer
 	}
 	// Note: UnifiedContext is not defaulted here because 0 is a valid value
 	// (meaning no context lines). The default is set by the CLI flag.

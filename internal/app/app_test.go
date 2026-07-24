@@ -602,6 +602,7 @@ func (f *fakeRenderer) RenderApplication(
 	_ context.Context,
 	app *cluster.Application,
 	repoPath string,
+	_ string,
 ) (*render.RenderResult, error) {
 	revision := app.Spec.GetSources()[0].TargetRevision
 
@@ -830,6 +831,7 @@ func (f *newChildFakeRenderer) RenderApplication(
 	_ context.Context,
 	app *cluster.Application,
 	repoPath string,
+	_ string,
 ) (*render.RenderResult, error) {
 	if repoPath == f.baseWorktree {
 		f.mu.Lock()
@@ -955,6 +957,7 @@ func (f *sideStampRenderer) RenderApplication(
 	_ context.Context,
 	_ *cluster.Application,
 	repoPath string,
+	_ string,
 ) (*render.RenderResult, error) {
 	side := "base"
 	if repoPath == f.targetWorktree {
@@ -1097,6 +1100,7 @@ func (f *emptySideRenderer) RenderApplication(
 	_ context.Context,
 	_ *cluster.Application,
 	repoPath string,
+	_ string,
 ) (*render.RenderResult, error) {
 	if repoPath == f.targetWorktree {
 		return &render.RenderResult{Manifests: nil, SourceType: types.SourceTypePlain}, nil

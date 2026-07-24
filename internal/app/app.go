@@ -8,6 +8,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -47,11 +48,14 @@ func ExitCodeFor(err error) int {
 	}
 }
 
-// applicationRenderer is the part of render.Factory that App uses to render an
-// application's manifests. It is a seam that lets tests substitute a fake
-// renderer for the queue/wave orchestration in processApplications.
+// applicationRenderer is the part of the render engine that App uses to render
+// an application's manifests. It is a seam that lets tests substitute a fake
+// renderer for the queue/wave orchestration in processApplications, and lets
+// the factory swap engines (--renderer=native|argocd). revision is the commit
+// being rendered; the argocd engine feeds it into the ARGOCD_APP_REVISION*
+// build-env variables, the native engine ignores it.
 type applicationRenderer interface {
-	RenderApplication(ctx context.Context, app *cluster.Application, repoPath string) (*render.RenderResult, error)
+	RenderApplication(ctx context.Context, app *cluster.Application, repoPath, revision string) (*render.RenderResult, error)
 }
 
 // App is the main application orchestrator.
@@ -631,11 +635,19 @@ func (a *App) processApplications(ctx context.Context, apps []cluster.Applicatio
 		}
 	}
 
-	// Convert map to slice
+	// Convert map to slice, sorted by (namespace, name) so reports are
+	// deterministic run-to-run (map iteration order is randomized). Stable
+	// ordering lets report outputs be compared byte-for-byte across runs.
 	var resultSlice []*types.AppDiff
 	for _, r := range results {
 		resultSlice = append(resultSlice, r)
 	}
+	sort.Slice(resultSlice, func(i, j int) bool {
+		if resultSlice[i].Namespace != resultSlice[j].Namespace {
+			return resultSlice[i].Namespace < resultSlice[j].Namespace
+		}
+		return resultSlice[i].Name < resultSlice[j].Name
+	})
 
 	if a.cache != nil {
 		a.logger.Info("Render cache", "hits", a.cacheHits.Load(), "misses", a.cacheMisses.Load())
@@ -816,7 +828,7 @@ func (a *App) renderBranch(
 		a.logger.Debug("Source path does not exist, treating as "+missingKind,
 			"app", app.Name, "branch", label)
 	} else {
-		result, rerr := a.renderer.RenderApplication(ctx, app, worktreePath)
+		result, rerr := a.renderer.RenderApplication(ctx, app, worktreePath, commit)
 		if rerr != nil {
 			return nil, "", rerr
 		}
@@ -861,6 +873,7 @@ func (a *App) renderCacheKey(app *cluster.Application, commit string) (string, b
 			KustomizeLoadRestrictor: a.cfg.KustomizeLoadRestrictor,
 			HelmSkipRefresh:         a.cfg.HelmSkipRefresh,
 			HelmAddRepos:            a.cfg.HelmAddRepos,
+			Renderer:                a.cfg.Renderer,
 		},
 		Commit: commit,
 		ResolveTree: func(commit, path string) (string, bool) {
