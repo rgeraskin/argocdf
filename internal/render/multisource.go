@@ -46,11 +46,16 @@ func (r *MultiSourceRenderer) RenderMultiSource(ctx context.Context, app *cluste
 	}
 
 	// First pass: identify and clone ref sources
-	refSources, cleanup, err := r.prepareRefSources(sources)
+	refSources, cleanup, err := r.prepareRefSources(ctx, app, sources)
 	if err != nil {
 		return nil, fmt.Errorf("failed to prepare ref sources: %w", err)
 	}
 	defer cleanup()
+
+	// Renderable sources from OTHER git repositories render from their own
+	// checkout at TargetRevision, never from the local worktree.
+	externalRepos := newExternalRepoSet(&r.factory.helmRenderer.opts, app.Spec.Project)
+	defer externalRepos.cleanup()
 
 	// Create per-request renderers with refSources configured
 	// This avoids mutating shared factory state and prevents race conditions
@@ -78,17 +83,22 @@ func (r *MultiSourceRenderer) RenderMultiSource(ctx context.Context, app *cluste
 			continue
 		}
 
+		srcRepoPath, err := externalRepos.repoPathFor(ctx, &sources[i], r.repoPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to render source %d: %w", i, err)
+		}
+
 		// Select the renderer the same way ArgoCD's repo-server does for every
 		// source (single- or multi-source alike): explicit tool config wins,
 		// otherwise the source path is inspected (Chart.yaml -> Helm). That
 		// logic lives in GetRenderer; its decision is mapped onto the
 		// per-request renderers carrying this app's RefSources.
 		var renderer Renderer = kustomizeRenderer
-		if r.factory.GetRenderer(&sources[i], r.repoPath).SourceType() == types.SourceTypeHelm {
+		if r.factory.GetRenderer(&sources[i], srcRepoPath).SourceType() == types.SourceTypeHelm {
 			renderer = helmRenderer
 		}
 
-		manifests, err := renderer.Render(ctx, app, &sources[i], r.repoPath)
+		manifests, err := renderer.Render(ctx, app, &sources[i], srcRepoPath)
 		if err != nil {
 			return nil, fmt.Errorf("failed to render source %d: %w", i, err)
 		}
@@ -103,7 +113,7 @@ func (r *MultiSourceRenderer) RenderMultiSource(ctx context.Context, app *cluste
 }
 
 // prepareRefSources clones/checks out ref sources and returns a map of ref name to local path.
-func (r *MultiSourceRenderer) prepareRefSources(sources []cluster.ApplicationSource) (map[string]string, func(), error) {
+func (r *MultiSourceRenderer) prepareRefSources(ctx context.Context, app *cluster.Application, sources []cluster.ApplicationSource) (map[string]string, func(), error) {
 	refSources := make(map[string]string)
 	tempDirs := make([]string, 0)
 
@@ -143,7 +153,13 @@ func (r *MultiSourceRenderer) prepareRefSources(sources []cluster.ApplicationSou
 			continue
 		}
 
-		// External repo: create a temp directory and clone it.
+		// External repo: create a temp directory and clone it, authenticating
+		// with credentials resolved through --repo-creds.
+		refRepo, err := resolveRepoOrBare(ctx, &r.factory.helmRenderer.opts, app.Spec.Project, source.RepoURL)
+		if err != nil {
+			cleanup()
+			return nil, nil, err
+		}
 		tempDir, err := os.MkdirTemp("", "argocdf-ref-")
 		if err != nil {
 			cleanup()
@@ -151,8 +167,7 @@ func (r *MultiSourceRenderer) prepareRefSources(sources []cluster.ApplicationSou
 		}
 		tempDirs = append(tempDirs, tempDir)
 
-		// Clone the repository using shared git.Clone
-		if err := git.Clone(source.RepoURL, source.TargetRevision, tempDir); err != nil {
+		if err := git.CloneWithCreds(source.RepoURL, source.TargetRevision, tempDir, cloneCredsFromRepo(refRepo)); err != nil {
 			cleanup()
 			return nil, nil, fmt.Errorf("failed to clone ref source %s: %w", source.Ref, err)
 		}

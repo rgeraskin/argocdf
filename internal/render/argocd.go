@@ -91,6 +91,12 @@ func (r *ArgoCDRenderer) RenderApplication(ctx context.Context, app *cluster.App
 	}
 	defer cleanup()
 
+	// Renderable sources from OTHER git repositories (apps-of-apps children
+	// and multi-source apps may reference them) render from their own
+	// checkout at TargetRevision, never from the local worktree.
+	externalRepos := newExternalRepoSet(&r.opts, app.Spec.Project)
+	defer externalRepos.cleanup()
+
 	var all bytes.Buffer
 	sourceType := types.SourceTypeUnknown
 	for i := range sources {
@@ -105,7 +111,13 @@ func (r *ArgoCDRenderer) RenderApplication(ctx context.Context, app *cluster.App
 		default:
 		}
 
-		manifests, srcType, err := r.renderSource(ctx, app, &sources[i], repoPath, revision, refSources, tempPaths)
+		srcRepoPath, err := externalRepos.repoPathFor(ctx, &sources[i], repoPath)
+		if err != nil {
+			rerr := fmt.Errorf("failed to render source %d: %w", i, err)
+			return &RenderResult{Error: rerr}, rerr
+		}
+
+		manifests, srcType, err := r.renderSource(ctx, app, &sources[i], srcRepoPath, revision, refSources, tempPaths)
 		if err != nil {
 			rerr := fmt.Errorf("failed to render source %d: %w", i, err)
 			return &RenderResult{Error: rerr}, rerr
@@ -136,11 +148,26 @@ func (r *ArgoCDRenderer) renderSource(
 		// Remote chart: ArgoCD's repo-server fetches charts BEFORE calling
 		// GenerateManifests, so argocdf does the same — through ArgoCD's own
 		// chart client, wrapped in the persistent chart cache.
-		chartDir, cleanupChart, err := r.helm.fetchRemoteChart(ctx, app, source)
+		chartDir, cached, cleanupChart, err := r.helm.fetchRemoteChart(ctx, app, source)
 		if err != nil {
 			return nil, "", err
 		}
 		defer cleanupChart()
+		if cached {
+			// GenerateManifests may build dependencies INTO appPath (charts/,
+			// Chart.lock, its skip marker). The persistent cache must stay a
+			// pristine shared artifact — and chartDepMutex is process-local,
+			// so concurrent argocdf processes could otherwise corrupt each
+			// other's cache entries — so cache-backed directories are copied
+			// to a private temp dir first. Freshly extracted directories are
+			// already private.
+			privateDir, cleanupCopy, err := copyChartToTempDir(chartDir)
+			if err != nil {
+				return nil, "", err
+			}
+			defer cleanupCopy()
+			chartDir = privateDir
+		}
 		appPath, repoRoot = chartDir, chartDir
 	} else {
 		appPath = filepath.Join(repoPath, source.Path)
@@ -150,7 +177,10 @@ func (r *ArgoCDRenderer) renderSource(
 		repoRoot = repoPath
 	}
 
-	q := r.buildManifestRequest(ctx, app, source, refSources)
+	q, err := r.buildManifestRequest(ctx, app, source, refSources)
+	if err != nil {
+		return nil, "", err
+	}
 
 	// Serialize per appPath: GenerateManifests may write into appPath (helm
 	// dependency build: charts/, Chart.lock, its skip marker) and restores
@@ -188,7 +218,7 @@ func (r *ArgoCDRenderer) buildManifestRequest(
 	app *cluster.Application,
 	source *cluster.ApplicationSource,
 	refSources map[string]*argoappv1.RefTarget,
-) *apiclient.ManifestRequest {
+) (*apiclient.ManifestRequest, error) {
 	// Compose the repository lists per source, mirroring ArgoCD's controller
 	// (controller/state.go:300-315): OCI repos and credential templates are
 	// offered only for oci:// sources. Intentional parity, including the
@@ -201,16 +231,25 @@ func (r *ArgoCDRenderer) buildManifestRequest(
 		repoCreds = append(slices.Clone(repoCreds), r.opts.OCIRepoCreds...)
 	}
 
+	// Repo must be non-nil (proxy/creds/env lookups dereference it). The
+	// resolved repo carries creds/proxy/TLS from --repo-creds; dependency
+	// auth flows through Repos/HelmRepoCreds into ArgoCD's own
+	// DependencyBuild (registry login / authenticated repo add, inside the
+	// isolated helm home).
+	repo, err := r.resolveSourceRepo(ctx, app.Spec.Project, source.RepoURL)
+	if err != nil {
+		return nil, err
+	}
+
 	return &apiclient.ManifestRequest{
-		// Repo must be non-nil (proxy/creds/env lookups dereference it). The
-		// resolved repo carries creds/proxy/TLS from --repo-creds; dependency
-		// auth flows through Repos/HelmRepoCreds into ArgoCD's own
-		// DependencyBuild (registry login / authenticated repo add, inside
-		// the isolated helm home).
-		Repo:               r.resolveSourceRepo(ctx, app.Spec.Project, source.RepoURL),
-		Repos:              repos,
-		HelmRepoCreds:      repoCreds,
-		AppName:            app.Name,
+		Repo:          repo,
+		Repos:         repos,
+		HelmRepoCreds: repoCreds,
+		// AppName is the application INSTANCE name — apps outside the
+		// control-plane namespace qualify as "<namespace>_<name>" — exactly
+		// what ArgoCD sends: it feeds ARGOCD_APP_NAME and the default helm
+		// release name.
+		AppName:            app.InstanceName(r.opts.ArgoCDNamespace),
 		Namespace:          app.Spec.Destination.Namespace,
 		ApplicationSource:  source.DeepCopy(),
 		KubeVersion:        r.opts.KubeVersion, // parseKubeVersion handles vendor suffixes (-gke.*)
@@ -219,6 +258,8 @@ func (r *ArgoCDRenderer) buildManifestRequest(
 		HelmOptions:        &argoappv1.HelmOptions{ValuesFileSchemes: defaultValuesFileSchemes},
 		RefSources:         refSources,
 		HasMultipleSources: len(app.Spec.GetSources()) > 1,
+		// ProjectName feeds the ARGOCD_APP_PROJECT_NAME build-env variable.
+		ProjectName: app.Spec.Project,
 		// AppLabelKey/TrackingMethod are intentionally left empty so no
 		// tracking labels are injected — diffs stay comparable to the native
 		// engine and to plain chart output.
@@ -228,14 +269,14 @@ func (r *ArgoCDRenderer) buildManifestRequest(
 		// errors; argocdf has no AppProject context, so allow everything to
 		// keep the real error visible.
 		ProjectSourceRepos: []string{"*"},
-	}
+	}, nil
 }
 
 // resolveSourceRepo returns the Repository configured for repoURL — with
-// credentials, proxy, and TLS settings from the --repo-creds source — falling
-// back to a bare Repository when no credential source is configured or
-// resolution fails.
-func (r *ArgoCDRenderer) resolveSourceRepo(ctx context.Context, project, repoURL string) *argoappv1.Repository {
+// credentials, proxy, and TLS settings from the --repo-creds source — or a
+// bare Repository when no credential source is configured. Resolution
+// failures are errors (no silent anonymous fallback).
+func (r *ArgoCDRenderer) resolveSourceRepo(ctx context.Context, project, repoURL string) (*argoappv1.Repository, error) {
 	return resolveRepoOrBare(ctx, &r.opts, project, repoURL)
 }
 
@@ -289,10 +330,15 @@ func (r *ArgoCDRenderer) prepareRefSources(
 		if source.Ref == "" {
 			continue
 		}
-		// The resolved repo keeps parity with the request's Repo and
-		// future-proofs private ref repositories.
+		// The resolved repo keeps parity with the request's Repo and carries
+		// the credentials the external clone below authenticates with.
+		refRepo, err := r.resolveSourceRepo(ctx, project, source.RepoURL)
+		if err != nil {
+			cleanup()
+			return nil, nil, nil, err
+		}
 		refSources["$"+source.Ref] = &argoappv1.RefTarget{
-			Repo:           *r.resolveSourceRepo(ctx, project, source.RepoURL),
+			Repo:           *refRepo,
 			TargetRevision: source.TargetRevision,
 			Chart:          source.Chart,
 		}
@@ -315,7 +361,7 @@ func (r *ArgoCDRenderer) prepareRefSources(
 			return nil, nil, nil, fmt.Errorf("failed to create temp dir for ref %s: %w", source.Ref, err)
 		}
 		tempDirs = append(tempDirs, tempDir)
-		if err := git.Clone(source.RepoURL, source.TargetRevision, tempDir); err != nil {
+		if err := git.CloneWithCreds(source.RepoURL, source.TargetRevision, tempDir, cloneCredsFromRepo(refRepo)); err != nil {
 			cleanup()
 			return nil, nil, nil, fmt.Errorf("failed to clone ref source %s: %w", source.Ref, err)
 		}

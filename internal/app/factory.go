@@ -58,6 +58,7 @@ func (f *Factory) CreateRenderFactory(kubeVersion string, apiVersions []string, 
 	opts := render.RenderOptions{
 		RepoPath:                f.config.RepoPath,
 		RepoURL:                 f.config.RepoURL,
+		ArgoCDNamespace:         f.config.ArgoCDNamespace,
 		KubeVersion:             kubeVersion,
 		APIVersions:             apiVersions,
 		KustomizeEnableHelm:     f.config.KustomizeEnableHelm,

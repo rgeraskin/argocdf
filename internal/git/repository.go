@@ -2,6 +2,7 @@
 package git
 
 import (
+	"encoding/base64"
 	"fmt"
 	"os"
 	"os/exec"
@@ -325,6 +326,46 @@ func NormalizeRepoURL(url string) string {
 // accepts branch or tag names, it falls back to a full clone followed by
 // a checkout when the revision is a commit SHA.
 func Clone(repoURL, revision, destPath string) error {
+	return CloneWithCreds(repoURL, revision, destPath, nil)
+}
+
+// CloneCreds carries optional HTTP(S) credentials for CloneWithCreds: basic
+// auth (username/password) or a bearer token. SSH remotes and other
+// credential kinds keep using the ambient git configuration.
+type CloneCreds struct {
+	Username    string
+	Password    string
+	BearerToken string
+}
+
+// authEnv returns GIT_CONFIG_* environment entries that inject an
+// Authorization extraheader for HTTP(S) remotes. Environment-borne config
+// keeps credentials out of argv (visible in `ps`) and off disk.
+func (c *CloneCreds) authEnv(repoURL string) []string {
+	if c == nil || !strings.HasPrefix(repoURL, "http") {
+		return nil
+	}
+	var header string
+	switch {
+	case c.BearerToken != "":
+		header = "Authorization: Bearer " + c.BearerToken
+	case c.Username != "" || c.Password != "":
+		header = "Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte(c.Username+":"+c.Password))
+	default:
+		return nil
+	}
+	return []string{
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=http.extraheader",
+		"GIT_CONFIG_VALUE_0=" + header,
+	}
+}
+
+// CloneWithCreds clones like Clone, authenticating HTTP(S) remotes with the
+// given credentials (nil renders anonymously / with ambient git config).
+func CloneWithCreds(repoURL, revision, destPath string, creds *CloneCreds) error {
+	env := append(os.Environ(), creds.authEnv(repoURL)...)
+
 	args := []string{"clone", "--depth", "1"}
 
 	if revision != "" && revision != "HEAD" {
@@ -334,6 +375,7 @@ func Clone(repoURL, revision, destPath string) error {
 	args = append(args, repoURL, destPath)
 
 	cmd := exec.Command("git", args...)
+	cmd.Env = env
 	output, err := cmd.CombinedOutput()
 	if err == nil {
 		return nil
@@ -351,6 +393,7 @@ func Clone(repoURL, revision, destPath string) error {
 
 	// Full clone, then checkout the revision (works for commit SHAs)
 	cmd = exec.Command("git", "clone", repoURL, destPath)
+	cmd.Env = env
 	if fullOutput, fullErr := cmd.CombinedOutput(); fullErr != nil {
 		return fmt.Errorf("git clone failed: %v\noutput: %s", fullErr, string(fullOutput))
 	}

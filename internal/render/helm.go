@@ -103,9 +103,12 @@ func (r *HelmRenderer) Render(ctx context.Context, app *cluster.Application, sou
 func (r *HelmRenderer) buildArgs(ctx context.Context, app *cluster.Application, source *cluster.ApplicationSource, repoPath string) ([]string, func(), []string, error) {
 	cleanup := func() {}
 	var tempFiles []string
+	var remoteChartDir string
 
-	// Determine release name
-	releaseName := app.Name
+	// Determine release name. Like ArgoCD, the default is the application
+	// INSTANCE name: apps outside the control-plane namespace release as
+	// "<namespace>_<name>" (repo-server: templateOpts.Name = q.AppName).
+	releaseName := app.InstanceName(r.opts.ArgoCDNamespace)
 	if source.Helm != nil && source.Helm.ReleaseName != "" {
 		releaseName = source.Helm.ReleaseName
 	}
@@ -119,11 +122,12 @@ func (r *HelmRenderer) buildArgs(ctx context.Context, app *cluster.Application, 
 		// and the persistent chart cache. The requested version is baked in
 		// by the fetch; helm rejects --version on a local path, so no version
 		// flag is passed.
-		chartDir, cleanupChart, err := r.fetchRemoteChart(ctx, app, source)
+		chartDir, _, cleanupChart, err := r.fetchRemoteChart(ctx, app, source)
 		if err != nil {
 			return nil, nil, nil, err
 		}
 		cleanup = cleanupChart
+		remoteChartDir = chartDir
 		args = append(args, chartDir)
 	} else if source.Path != "" {
 		// Local chart from repository
@@ -152,14 +156,19 @@ func (r *HelmRenderer) buildArgs(ctx context.Context, app *cluster.Application, 
 		args = append(args, "--api-versions", v)
 	}
 
-	// Add Helm-specific options
+	// Add Helm-specific options. Relative helm option paths (valueFiles,
+	// fileParameters) resolve against — and must stay contained in — the
+	// chart directory: for remote charts that is the EXTRACTED chart, not the
+	// git worktree, exactly as ArgoCD resolves them against appPath/repoRoot.
 	if source.Helm != nil {
-		chartDir := repoPath
-		if source.Path != "" {
+		containmentRoot, chartDir := repoPath, repoPath
+		if remoteChartDir != "" {
+			containmentRoot, chartDir = remoteChartDir, remoteChartDir
+		} else if source.Path != "" {
 			chartDir = filepath.Join(repoPath, source.Path)
 		}
 		var err error
-		args, tempFiles, err = r.addHelmOptions(args, source.Helm, repoPath, chartDir)
+		args, tempFiles, err = r.addHelmOptions(args, source.Helm, containmentRoot, chartDir)
 		if err != nil {
 			// Cleanup any temp files created before the error
 			for _, f := range tempFiles {

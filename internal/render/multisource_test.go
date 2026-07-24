@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/rgeraskin/argocdf/internal/cluster"
+	"github.com/rgeraskin/argocdf/internal/types"
 )
 
 func TestIsPureRef(t *testing.T) {
@@ -93,7 +94,7 @@ func TestPrepareRefSources_LocalRepo(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			refSources, cleanup, err := renderer.prepareRefSources([]cluster.ApplicationSource{tt.source})
+			refSources, cleanup, err := renderer.prepareRefSources(context.Background(), &cluster.Application{}, []cluster.ApplicationSource{tt.source})
 			if err != nil {
 				t.Fatalf("prepareRefSources() error = %v", err)
 			}
@@ -123,7 +124,7 @@ func TestPrepareRefSources_RegistersRefWithPath(t *testing.T) {
 	// A source that is both a ref AND renders (has a Path) must still be
 	// registered as a ref so other sources can reference it.
 	source := cluster.ApplicationSource{RepoURL: localURL, Ref: "values", Path: "charts/app"}
-	refSources, cleanup, err := renderer.prepareRefSources([]cluster.ApplicationSource{source})
+	refSources, cleanup, err := renderer.prepareRefSources(context.Background(), &cluster.Application{}, []cluster.ApplicationSource{source})
 	if err != nil {
 		t.Fatalf("prepareRefSources() error = %v", err)
 	}
@@ -295,3 +296,65 @@ func TestRenderMultiSource_ValuesRef(t *testing.T) {
 
 // Verify interfaces are satisfied at compile time
 var _ = reflect.TypeOf((*MultiSourceRenderer)(nil))
+
+// TestRenderMultiSource_ExternalRenderableSource pins the native engine's
+// handling of a renderable source living in ANOTHER git repository: it must
+// render from its own checkout, while local sources keep rendering from the
+// worktree.
+func TestRenderMultiSource_ExternalRenderableSource(t *testing.T) {
+	skipIfNoHelm(t)
+
+	extRepo := t.TempDir()
+	writeArgoTestChart(t, extRepo, "chart", map[string]string{"values.yaml": "greeting: from-external-repo\n"})
+	extURL := initGitRepo(t, extRepo)
+
+	localRepo := t.TempDir()
+	writeTestChart(t, filepath.Join(localRepo, "charts", "app"))
+
+	app := &cluster.Application{}
+	app.Name = "multi-ext"
+	app.Spec.Sources = []cluster.ApplicationSource{
+		{RepoURL: "https://github.com/org/repo", Path: "charts/app"},
+		{RepoURL: extURL, Path: "chart"},
+	}
+
+	factory := NewFactory(RenderOptions{RepoURL: "https://github.com/org/repo"})
+	manifests, err := NewMultiSourceRenderer(factory, localRepo).RenderMultiSource(context.Background(), app)
+	if err != nil {
+		t.Fatalf("RenderMultiSource() error = %v", err)
+	}
+	if !strings.Contains(string(manifests), "from-external-repo") {
+		t.Errorf("external source did not render from its own checkout:\n%s", manifests)
+	}
+	if !strings.Contains(string(manifests), "from-chart") {
+		t.Errorf("local source did not render from the worktree:\n%s", manifests)
+	}
+}
+
+// TestFactoryRenderApplication_ExternalSingleSource pins the apps-of-apps
+// child case in the native engine: a single-source app whose repository is
+// NOT the one being diffed renders from a clone — including Chart.yaml
+// auto-detection against the clone, not the (empty) local worktree.
+func TestFactoryRenderApplication_ExternalSingleSource(t *testing.T) {
+	skipIfNoHelm(t)
+
+	extRepo := t.TempDir()
+	writeArgoTestChart(t, extRepo, "chart", map[string]string{"values.yaml": "greeting: from-external-child\n"})
+	extURL := initGitRepo(t, extRepo)
+
+	app := &cluster.Application{}
+	app.Name = "child"
+	app.Spec.Source = &cluster.ApplicationSource{RepoURL: extURL, Path: "chart"}
+
+	factory := NewFactory(RenderOptions{RepoURL: "https://github.com/org/repo"})
+	result, err := factory.RenderApplication(context.Background(), app, t.TempDir(), "rev")
+	if err != nil {
+		t.Fatalf("RenderApplication() error = %v", err)
+	}
+	if !strings.Contains(string(result.Manifests), "from-external-child") {
+		t.Errorf("external child app did not render from its own checkout:\n%s", result.Manifests)
+	}
+	if result.SourceType != types.SourceTypeHelm {
+		t.Errorf("SourceType = %v, want helm (Chart.yaml auto-detected in the clone)", result.SourceType)
+	}
+}

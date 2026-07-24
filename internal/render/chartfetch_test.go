@@ -5,7 +5,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	argoappv1 "github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
 	utilio "github.com/argoproj/argo-cd/v3/util/io"
@@ -41,7 +43,7 @@ func (f *fakeChartClient) ExtractChart(chart, version string, passCredentials bo
 
 // stubNewChartClient swaps the chart-client constructor for the test,
 // optionally capturing the repo and enableOCI it was called with.
-func stubNewChartClient(t *testing.T, fake *fakeChartClient, gotRepo **argoappv1.Repository, gotEnableOCI *bool) {
+func stubNewChartClient(t *testing.T, client chartClient, gotRepo **argoappv1.Repository, gotEnableOCI *bool) {
 	t.Helper()
 	original := newChartClient
 	newChartClient = func(repo *argoappv1.Repository, enableOCI bool) chartClient {
@@ -51,7 +53,7 @@ func stubNewChartClient(t *testing.T, fake *fakeChartClient, gotRepo **argoappv1
 		if gotEnableOCI != nil {
 			*gotEnableOCI = enableOCI
 		}
-		return fake
+		return client
 	}
 	t.Cleanup(func() { newChartClient = original })
 }
@@ -100,7 +102,7 @@ func TestFetchRemoteChart_ClientInputs(t *testing.T) {
 	source := chartSource("1.2.3")
 	source.Helm = &cluster.ApplicationSourceHelm{PassCredentials: true}
 
-	dir, cleanup, err := r.fetchRemoteChart(context.Background(), chartTestApp(), source)
+	dir, cached, cleanup, err := r.fetchRemoteChart(context.Background(), chartTestApp(), source)
 	if err != nil {
 		t.Fatalf("fetchRemoteChart() error: %v", err)
 	}
@@ -115,8 +117,8 @@ func TestFetchRemoteChart_ClientInputs(t *testing.T) {
 	if len(fake.calls) != 1 || !fake.calls[0].passCredentials {
 		t.Errorf("ExtractChart calls = %+v, want one call with passCredentials from source.Helm", fake.calls)
 	}
-	if dir != fake.extractedDir {
-		t.Errorf("fetchRemoteChart() dir = %q, want the extracted dir (cache disabled)", dir)
+	if dir != fake.extractedDir || cached {
+		t.Errorf("fetchRemoteChart() = (%q, cached=%v), want the extracted dir, uncached", dir, cached)
 	}
 }
 
@@ -128,7 +130,7 @@ func TestFetchRemoteChart_SchemeLessURLHeuristic(t *testing.T) {
 	stubNewChartClient(t, fake, nil, &gotEnableOCI)
 
 	r := NewHelmRenderer(RenderOptions{})
-	_, cleanup, err := r.fetchRemoteChart(context.Background(), chartTestApp(), chartSource("1.2.3"))
+	_, _, cleanup, err := r.fetchRemoteChart(context.Background(), chartTestApp(), chartSource("1.2.3"))
 	if err != nil {
 		t.Fatalf("fetchRemoteChart() error: %v", err)
 	}
@@ -148,14 +150,14 @@ func TestFetchRemoteChart_CachePublishAndHit(t *testing.T) {
 	source := chartSource("1.2.3")
 
 	// Miss: fetches, publishes into the cache, closes the extraction.
-	dir, cleanup, err := r.fetchRemoteChart(context.Background(), chartTestApp(), source)
+	dir, cached, cleanup, err := r.fetchRemoteChart(context.Background(), chartTestApp(), source)
 	if err != nil {
 		t.Fatalf("fetchRemoteChart() error: %v", err)
 	}
 	cleanup()
 	_, wantChartDir := chartCachePaths(cacheBase, source.RepoURL, source.Chart, source.TargetRevision)
-	if dir != wantChartDir {
-		t.Errorf("fetchRemoteChart() dir = %q, want cached chart dir %q", dir, wantChartDir)
+	if dir != wantChartDir || !cached {
+		t.Errorf("fetchRemoteChart() = (%q, cached=%v), want cached chart dir %q", dir, cached, wantChartDir)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "Chart.yaml")); err != nil {
 		t.Errorf("cached chart content missing: %v", err)
@@ -165,13 +167,13 @@ func TestFetchRemoteChart_CachePublishAndHit(t *testing.T) {
 	}
 
 	// Hit: served from the cache, the client is never called again.
-	dir2, cleanup2, err := r.fetchRemoteChart(context.Background(), chartTestApp(), source)
+	dir2, cached2, cleanup2, err := r.fetchRemoteChart(context.Background(), chartTestApp(), source)
 	if err != nil {
 		t.Fatalf("fetchRemoteChart() second call error: %v", err)
 	}
 	cleanup2()
-	if dir2 != wantChartDir {
-		t.Errorf("cache hit dir = %q, want %q", dir2, wantChartDir)
+	if dir2 != wantChartDir || !cached2 {
+		t.Errorf("cache hit = (%q, cached=%v), want %q, cached", dir2, cached2, wantChartDir)
 	}
 	if len(fake.calls) != 1 {
 		t.Errorf("ExtractChart called %d times, want 1 (second call must be a cache hit)", len(fake.calls))
@@ -184,13 +186,13 @@ func TestFetchRemoteChart_UnpinnedSkipsCache(t *testing.T) {
 	stubNewChartClient(t, fake, nil, nil)
 
 	r := NewHelmRenderer(RenderOptions{ChartCacheDir: cacheBase})
-	dir, cleanup, err := r.fetchRemoteChart(context.Background(), chartTestApp(), chartSource("HEAD"))
+	dir, cached, cleanup, err := r.fetchRemoteChart(context.Background(), chartTestApp(), chartSource("HEAD"))
 	if err != nil {
 		t.Fatalf("fetchRemoteChart() error: %v", err)
 	}
 
-	if dir != fake.extractedDir {
-		t.Errorf("fetchRemoteChart() dir = %q, want the extracted dir for an unpinned version", dir)
+	if dir != fake.extractedDir || cached {
+		t.Errorf("fetchRemoteChart() = (%q, cached=%v), want the extracted dir for an unpinned version", dir, cached)
 	}
 	if fake.calls[0].version != "" {
 		t.Errorf("ExtractChart version = %q, want empty (HEAD means latest)", fake.calls[0].version)
@@ -209,7 +211,7 @@ func TestFetchRemoteChart_ErrorWrapsChartAndRepo(t *testing.T) {
 	stubNewChartClient(t, fake, nil, nil)
 
 	r := NewHelmRenderer(RenderOptions{})
-	_, _, err := r.fetchRemoteChart(context.Background(), chartTestApp(), chartSource("1.2.3"))
+	_, _, _, err := r.fetchRemoteChart(context.Background(), chartTestApp(), chartSource("1.2.3"))
 	if err == nil {
 		t.Fatal("fetchRemoteChart() = nil error, want fetch failure")
 	}
@@ -260,12 +262,12 @@ func TestFetchRemoteChart_PublishFailureServesExtracted(t *testing.T) {
 	}
 
 	r := NewHelmRenderer(RenderOptions{ChartCacheDir: blocker})
-	dir, cleanup, err := r.fetchRemoteChart(context.Background(), chartTestApp(), chartSource("1.2.3"))
+	dir, cached, cleanup, err := r.fetchRemoteChart(context.Background(), chartTestApp(), chartSource("1.2.3"))
 	if err != nil {
 		t.Fatalf("fetchRemoteChart() error: %v", err)
 	}
-	if dir != fake.extractedDir {
-		t.Errorf("fetchRemoteChart() dir = %q, want the extracted dir when publishing fails", dir)
+	if dir != fake.extractedDir || cached {
+		t.Errorf("fetchRemoteChart() = (%q, cached=%v), want the extracted dir when publishing fails", dir, cached)
 	}
 	if _, statErr := os.Stat(filepath.Join(dir, "Chart.yaml")); statErr != nil {
 		t.Errorf("served chart content missing after publish failure: %v", statErr)
@@ -284,11 +286,105 @@ func TestFetchRemoteChart_ContextCancelled(t *testing.T) {
 	cancel()
 
 	r := NewHelmRenderer(RenderOptions{})
-	_, _, err := r.fetchRemoteChart(ctx, chartTestApp(), chartSource("1.2.3"))
+	_, _, _, err := r.fetchRemoteChart(ctx, chartTestApp(), chartSource("1.2.3"))
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("fetchRemoteChart() error = %v, want context.Canceled", err)
 	}
 	if len(fake.calls) != 0 {
 		t.Error("chart client must not be called after cancellation")
+	}
+}
+
+// blockingChartClient blocks inside ExtractChart until released, signalling
+// entry — for in-flight cancellation tests.
+type blockingChartClient struct {
+	entered chan struct{}
+	release chan struct{}
+	dir     string
+	closed  chan struct{}
+}
+
+func (b *blockingChartClient) ExtractChart(string, string, bool, int64, bool) (string, utilio.Closer, error) {
+	close(b.entered)
+	<-b.release
+	return b.dir, utilio.NewCloser(func() error {
+		close(b.closed)
+		return nil
+	}), nil
+}
+
+func TestFetchRemoteChart_InFlightCancellation(t *testing.T) {
+	blocking := &blockingChartClient{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+		dir:     chartFixture(t, "mychart"),
+		closed:  make(chan struct{}),
+	}
+	stubNewChartClient(t, blocking, nil, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-blocking.entered // cancel only once the fetch is genuinely in flight
+		cancel()
+	}()
+
+	r := NewHelmRenderer(RenderOptions{})
+	_, _, _, err := r.fetchRemoteChart(ctx, chartTestApp(), chartSource("1.2.3"))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("fetchRemoteChart() error = %v, want context.Canceled while the fetch is in flight", err)
+	}
+
+	// The abandoned fetch drains in the background and its extraction is
+	// released once it finishes.
+	close(blocking.release)
+	select {
+	case <-blocking.closed:
+	case <-time.After(5 * time.Second):
+		t.Error("background drain did not close the abandoned extraction")
+	}
+}
+
+func TestFetchRemoteChart_ResolveErrorIsLoud(t *testing.T) {
+	constructed := false
+	original := newChartClient
+	newChartClient = func(*argoappv1.Repository, bool) chartClient {
+		constructed = true
+		return &fakeChartClient{}
+	}
+	t.Cleanup(func() { newChartClient = original })
+
+	r := NewHelmRenderer(RenderOptions{
+		ResolveRepo: func(context.Context, string, string) (*argoappv1.Repository, error) {
+			return nil, errors.New("token exchange failed")
+		},
+	})
+	_, _, _, err := r.fetchRemoteChart(context.Background(), chartTestApp(), chartSource("1.2.3"))
+	if err == nil || !strings.Contains(err.Error(), "token exchange failed") {
+		t.Errorf("fetchRemoteChart() error = %v, want the credential resolution root cause", err)
+	}
+	if constructed {
+		t.Error("chart client must not be constructed when credential resolution fails")
+	}
+}
+
+func TestCopyChartToTempDir(t *testing.T) {
+	src := chartFixture(t, "mychart")
+	dst, cleanup, err := copyChartToTempDir(src)
+	if err != nil {
+		t.Fatalf("copyChartToTempDir() error: %v", err)
+	}
+	defer cleanup()
+	if dst == src {
+		t.Fatal("copyChartToTempDir() returned the source directory itself")
+	}
+	if _, err := os.Stat(filepath.Join(dst, "Chart.yaml")); err != nil {
+		t.Errorf("copied chart content missing: %v", err)
+	}
+	// Mutating the copy must not touch the source (the shared cache).
+	if err := os.WriteFile(filepath.Join(dst, "Chart.lock"), []byte("deps"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(src, "Chart.lock")); !os.IsNotExist(err) {
+		t.Error("mutating the private copy leaked into the source directory")
 	}
 }

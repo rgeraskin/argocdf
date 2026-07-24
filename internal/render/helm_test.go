@@ -1106,3 +1106,64 @@ dependencies:
 		t.Errorf("repositories.yaml has %d entries, want %d: %+v", len(repos), nRepos, repos)
 	}
 }
+
+func TestBuildArgs_RemoteChartRelativeValueFiles(t *testing.T) {
+	// Relative value files packaged IN a remote chart must resolve against
+	// the extracted chart directory, not the git worktree (ArgoCD resolves
+	// them against appPath).
+	chartDir := filepath.Join(t.TempDir(), "mychart")
+	if err := os.MkdirAll(chartDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(chartDir, "values-prod.yaml"), []byte("env: prod\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stubNewChartClient(t, &fakeChartClient{extractedDir: chartDir}, nil, nil)
+
+	app := &cluster.Application{ObjectMeta: metav1.ObjectMeta{Name: "my-app"}}
+	source := &cluster.ApplicationSource{
+		RepoURL:        "oci://registry.example.com/charts",
+		Chart:          "mychart",
+		TargetRevision: "1.2.3",
+		Helm:           &cluster.ApplicationSourceHelm{ValueFiles: []string{"values-prod.yaml"}},
+	}
+
+	r := NewHelmRenderer(RenderOptions{})
+	args, cleanup, _, err := r.buildArgs(context.TODO(), app, source, t.TempDir())
+	if err != nil {
+		t.Fatalf("buildArgs() unexpected error = %v", err)
+	}
+	defer cleanup()
+
+	want := filepath.Join(chartDir, "values-prod.yaml")
+	if got := argValue(args, "--values"); got != want {
+		t.Errorf("buildArgs() --values = %q, want the file inside the extracted chart %q", got, want)
+	}
+}
+
+func TestBuildArgs_ReleaseNameIsInstanceName(t *testing.T) {
+	app := &cluster.Application{ObjectMeta: metav1.ObjectMeta{Name: "my-app", Namespace: "team-a"}}
+	source := &cluster.ApplicationSource{
+		RepoURL: "https://github.com/example/repo.git",
+		Path:    "charts/myapp",
+	}
+
+	r := NewHelmRenderer(RenderOptions{ArgoCDNamespace: "argocd"})
+	args, _, _, err := r.buildArgs(context.TODO(), app, source, t.TempDir())
+	if err != nil {
+		t.Fatalf("buildArgs() unexpected error = %v", err)
+	}
+	if args[1] != "team-a_my-app" {
+		t.Errorf("release name = %q, want the instance name team-a_my-app (ArgoCD parity)", args[1])
+	}
+
+	// An explicit helm release name still wins.
+	source.Helm = &cluster.ApplicationSourceHelm{ReleaseName: "explicit"}
+	args, _, _, err = r.buildArgs(context.TODO(), app, source, t.TempDir())
+	if err != nil {
+		t.Fatalf("buildArgs() unexpected error = %v", err)
+	}
+	if args[1] != "explicit" {
+		t.Errorf("release name = %q, want the explicit spec release name", args[1])
+	}
+}

@@ -22,11 +22,12 @@ import (
 )
 
 // repoFile mirrors helm's repositories.yaml schema (helm.sh/helm/v3/pkg/repo
-// Entry), stable since helm 3.0. Only the fields argocdf maps are declared:
-// TLS material is stored as file PATHS there (certFile/keyFile/caFile) while
-// ArgoCD's Repository wants data, so those are left for a follow-up, and
-// pass_credentials_all has no Repository equivalent (ArgoCD's --pass-credentials
-// comes from spec.source.helm.passCredentials).
+// Entry), stable since helm 3.0. TLS client material is stored as file PATHS
+// there (certFile/keyFile) while ArgoCD's Repository wants the DATA, so the
+// files are read at load time. caFile has no Repository equivalent (ArgoCD
+// serves CAs from its certificate database, which a CLI run does not have),
+// and pass_credentials_all maps to nothing (ArgoCD's --pass-credentials comes
+// from spec.source.helm.passCredentials).
 type repoFile struct {
 	Repositories []repoEntry `yaml:"repositories"`
 }
@@ -36,6 +37,8 @@ type repoEntry struct {
 	URL                   string `yaml:"url"`
 	Username              string `yaml:"username"`
 	Password              string `yaml:"password"`
+	CertFile              string `yaml:"certFile"`
+	KeyFile               string `yaml:"keyFile"`
 	InsecureSkipTLSVerify bool   `yaml:"insecure_skip_tls_verify"`
 }
 
@@ -52,6 +55,11 @@ type repoEntry struct {
 //
 // A missing repositories.yaml is not an error (empty lists); an unreadable
 // one, or a failing `helm env`, is — the caller treats it as fatal.
+//
+// NOTE: setting HELM_REGISTRY_CONFIG is a deliberate PROCESS-GLOBAL side
+// effect — acceptable for a one-shot CLI where every subsequent helm exec
+// should see the user's registry config, but call this once, at startup,
+// before renders run.
 func LoadLocalRepoCredentials() (*cluster.RepoCredentials, error) {
 	registryConfigPath, err := helmEnv("HELM_REGISTRY_CONFIG")
 	if err != nil {
@@ -124,16 +132,41 @@ func parseRepositoriesFile(path string) ([]*argoappv1.Repository, error) {
 		if entry.URL == "" {
 			continue
 		}
+		certData, err := readOptionalFile(entry.CertFile)
+		if err != nil {
+			return nil, fmt.Errorf("repository %q: %w", entry.Name, err)
+		}
+		keyData, err := readOptionalFile(entry.KeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("repository %q: %w", entry.Name, err)
+		}
 		repos = append(repos, &argoappv1.Repository{
-			Name:     entry.Name,
-			Repo:     entry.URL,
-			Username: entry.Username,
-			Password: entry.Password,
-			Insecure: entry.InsecureSkipTLSVerify,
-			Type:     "helm",
+			Name:              entry.Name,
+			Repo:              entry.URL,
+			Username:          entry.Username,
+			Password:          entry.Password,
+			TLSClientCertData: certData,
+			TLSClientCertKey:  keyData,
+			Insecure:          entry.InsecureSkipTLSVerify,
+			Type:              "helm",
 		})
 	}
 	return repos, nil
+}
+
+// readOptionalFile reads a repositories.yaml-referenced TLS file. An empty
+// path yields empty data; a configured-but-unreadable file is an error (a
+// silently dropped client certificate would surface as a misleading TLS
+// handshake failure).
+func readOptionalFile(path string) (string, error) {
+	if path == "" {
+		return "", nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to read TLS file %s: %w", path, err)
+	}
+	return string(data), nil
 }
 
 // normalizeRepoURL makes repository URL comparison tolerant of trailing

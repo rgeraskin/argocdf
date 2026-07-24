@@ -383,7 +383,10 @@ func TestBuildManifestRequest_RepoCreds(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("non-OCI source carries only the helm halves", func(t *testing.T) {
-		q := r.buildManifestRequest(ctx, app, app.Spec.Source, nil)
+		q, err := r.buildManifestRequest(ctx, app, app.Spec.Source, nil)
+		if err != nil {
+			t.Fatalf("buildManifestRequest() error: %v", err)
+		}
 		if len(q.Repos) != 1 || q.Repos[0].Repo != helmRepo.Repo {
 			t.Errorf("Repos = %+v, want only the helm repositories", q.Repos)
 		}
@@ -397,7 +400,10 @@ func TestBuildManifestRequest_RepoCreds(t *testing.T) {
 
 	t.Run("oci source appends the OCI halves without mutating the options", func(t *testing.T) {
 		source := &cluster.ApplicationSource{RepoURL: "oci://ghcr.io/acme", Chart: "app", TargetRevision: "1.0.0"}
-		q := r.buildManifestRequest(ctx, app, source, nil)
+		q, err := r.buildManifestRequest(ctx, app, source, nil)
+		if err != nil {
+			t.Fatalf("buildManifestRequest() error: %v", err)
+		}
 		if len(q.Repos) != 2 || q.Repos[1].Repo != ociRepo.Repo {
 			t.Errorf("Repos = %+v, want helm + OCI repositories", q.Repos)
 		}
@@ -411,7 +417,10 @@ func TestBuildManifestRequest_RepoCreds(t *testing.T) {
 
 	t.Run("scheme-less helm-OCI source URL is not IsOCI (ArgoCD parity)", func(t *testing.T) {
 		source := &cluster.ApplicationSource{RepoURL: "ghcr.io/acme", Chart: "app", TargetRevision: "1.0.0"}
-		q := r.buildManifestRequest(ctx, app, source, nil)
+		q, err := r.buildManifestRequest(ctx, app, source, nil)
+		if err != nil {
+			t.Fatalf("buildManifestRequest() error: %v", err)
+		}
 		if len(q.Repos) != 1 {
 			t.Errorf("Repos = %+v, want only the helm half for a scheme-less URL", q.Repos)
 		}
@@ -419,23 +428,55 @@ func TestBuildManifestRequest_RepoCreds(t *testing.T) {
 
 	t.Run("nil ResolveRepo falls back to a bare repo", func(t *testing.T) {
 		bare := NewArgoCDRenderer(RenderOptions{})
-		q := bare.buildManifestRequest(ctx, app, app.Spec.Source, nil)
+		q, err := bare.buildManifestRequest(ctx, app, app.Spec.Source, nil)
+		if err != nil {
+			t.Fatalf("buildManifestRequest() error: %v", err)
+		}
 		if q.Repo == nil || q.Repo.Repo != app.Spec.Source.RepoURL || q.Repo.Username != "" {
 			t.Errorf("Repo = %+v, want bare credential-less repository", q.Repo)
 		}
 	})
 
-	t.Run("resolve errors fall back to a bare repo", func(t *testing.T) {
+	t.Run("resolve errors fail the request with the root cause", func(t *testing.T) {
 		failing := NewArgoCDRenderer(RenderOptions{
 			ResolveRepo: func(context.Context, string, string) (*argoappv1.Repository, error) {
 				return nil, context.DeadlineExceeded
 			},
 		})
-		q := failing.buildManifestRequest(ctx, app, app.Spec.Source, nil)
-		if q.Repo == nil || q.Repo.Repo != app.Spec.Source.RepoURL {
-			t.Errorf("Repo = %+v, want bare fallback on resolve error", q.Repo)
+		if _, err := failing.buildManifestRequest(ctx, app, app.Spec.Source, nil); err == nil {
+			t.Error("buildManifestRequest() = nil error, want the credential resolution failure surfaced")
 		}
 	})
+}
+
+func TestBuildManifestRequest_InstanceNameAndProject(t *testing.T) {
+	r := NewArgoCDRenderer(RenderOptions{ArgoCDNamespace: "argocd"})
+	ctx := context.Background()
+
+	app := testApp("my-app", "chart", nil)
+	app.Namespace = "team-a"
+	app.Spec.Project = "payments"
+
+	q, err := r.buildManifestRequest(ctx, app, app.Spec.Source, nil)
+	if err != nil {
+		t.Fatalf("buildManifestRequest() error: %v", err)
+	}
+	if q.AppName != "team-a_my-app" {
+		t.Errorf("AppName = %q, want the instance name team-a_my-app (feeds ARGOCD_APP_NAME and the release name)", q.AppName)
+	}
+	if q.ProjectName != "payments" {
+		t.Errorf("ProjectName = %q, want payments (feeds ARGOCD_APP_PROJECT_NAME)", q.ProjectName)
+	}
+
+	// In the control-plane namespace the instance name is the plain name.
+	app.Namespace = "argocd"
+	q, err = r.buildManifestRequest(ctx, app, app.Spec.Source, nil)
+	if err != nil {
+		t.Fatalf("buildManifestRequest() error: %v", err)
+	}
+	if q.AppName != "my-app" {
+		t.Errorf("AppName = %q, want the plain name inside the control-plane namespace", q.AppName)
+	}
 }
 
 func TestPrepareRefSources_ResolvedRepo(t *testing.T) {
@@ -468,5 +509,91 @@ func TestPrepareRefSources_ResolvedRepo(t *testing.T) {
 	// The local repo must still map to the current worktree, not a clone.
 	if got := tempPaths.GetPathIfExists(argogit.NormalizeGitURL(repoURL)); got != repoPath {
 		t.Errorf("ref repo path = %q, want the local worktree %q", got, repoPath)
+	}
+}
+
+// initGitRepo turns dir into a committed git repository and returns its
+// file:// URL, for external-source clone tests without a network.
+func initGitRepo(t *testing.T, dir string) string {
+	t.Helper()
+	for _, args := range [][]string{
+		{"init", "-q", "-b", "main"},
+		{"add", "."},
+		{"-c", "user.email=test@example.com", "-c", "user.name=test", "commit", "-q", "-m", "init"},
+	} {
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, out)
+		}
+	}
+	return "file://" + dir
+}
+
+// TestArgoCDRenderer_ExternalRenderableSource pins that a renderable source
+// living in ANOTHER git repository renders from its own checkout at
+// TargetRevision — never from the local worktree (which may contain an
+// identically named path, or nothing at all).
+func TestArgoCDRenderer_ExternalRenderableSource(t *testing.T) {
+	requireHelm(t)
+
+	// The external repo carries the chart; the local worktree does NOT.
+	extRepo := t.TempDir()
+	writeArgoTestChart(t, extRepo, "chart", map[string]string{
+		"values.yaml": "greeting: from-external-repo\n",
+	})
+	extURL := initGitRepo(t, extRepo)
+
+	localWorktree := t.TempDir() // deliberately empty
+
+	app := testApp("ext-app", "chart", nil)
+	app.Spec.Source.RepoURL = extURL
+
+	r := NewArgoCDRenderer(RenderOptions{RepoURL: "https://github.com/example/local-repo.git"})
+	result, err := r.RenderApplication(context.Background(), app, localWorktree, "rev")
+	if err != nil {
+		t.Fatalf("RenderApplication() error: %v", err)
+	}
+
+	if !strings.Contains(string(result.Manifests), "from-external-repo") {
+		t.Errorf("manifests do not contain the external repo's values:\n%s", result.Manifests)
+	}
+}
+
+// TestArgoCDRenderer_ExternalValuesRef pins the external-$ref clone path: a
+// values file referenced from ANOTHER git repository must be cloned and
+// resolved, while the chart itself renders from the local worktree.
+func TestArgoCDRenderer_ExternalValuesRef(t *testing.T) {
+	requireHelm(t)
+
+	refRepo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(refRepo, "envs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(refRepo, "envs", "prod.yaml"), []byte("greeting: from-external-ref\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	refURL := initGitRepo(t, refRepo)
+
+	localRepo := t.TempDir()
+	writeArgoTestChart(t, localRepo, "chart", nil)
+
+	app := &cluster.Application{ObjectMeta: metav1.ObjectMeta{Name: "ref-app"}}
+	app.Spec.Sources = []cluster.ApplicationSource{
+		{
+			RepoURL: "https://github.com/example/repo.git",
+			Path:    "chart",
+			Helm:    &cluster.ApplicationSourceHelm{ValueFiles: []string{"$vals/envs/prod.yaml"}},
+		},
+		{RepoURL: refURL, Ref: "vals"},
+	}
+	app.Spec.Destination = cluster.ApplicationDestination{Namespace: "default"}
+
+	r := NewArgoCDRenderer(RenderOptions{RepoURL: "https://github.com/example/repo.git"})
+	result, err := r.RenderApplication(context.Background(), app, localRepo, "rev")
+	if err != nil {
+		t.Fatalf("RenderApplication() error: %v", err)
+	}
+	if !strings.Contains(string(result.Manifests), "from-external-ref") {
+		t.Errorf("manifests do not carry the external ref values:\n%s", result.Manifests)
 	}
 }

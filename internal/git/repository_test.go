@@ -556,3 +556,35 @@ func TestRemoteRefAndAncestry(t *testing.T) {
 		t.Errorf("CountCommitsBetween(c1, c2) = %d, want 1", n)
 	}
 }
+
+func TestCloneCredsAuthEnv(t *testing.T) {
+	basic := &CloneCreds{Username: "user", Password: "pass"}
+	env := basic.authEnv("https://github.com/org/private.git")
+	want := []string{
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=http.extraheader",
+		"GIT_CONFIG_VALUE_0=Authorization: Basic dXNlcjpwYXNz", // base64(user:pass)
+	}
+	if len(env) != 3 || env[0] != want[0] || env[1] != want[1] || env[2] != want[2] {
+		t.Errorf("authEnv() = %v, want %v", env, want)
+	}
+
+	bearer := &CloneCreds{BearerToken: "tok123"}
+	env = bearer.authEnv("https://github.com/org/private.git")
+	if len(env) != 3 || env[2] != "GIT_CONFIG_VALUE_0=Authorization: Bearer tok123" {
+		t.Errorf("authEnv() bearer = %v, want a Bearer extraheader", env)
+	}
+
+	// SSH remotes use ambient git configuration, never HTTP headers.
+	if env := basic.authEnv("git@github.com:org/private.git"); env != nil {
+		t.Errorf("authEnv() for ssh remote = %v, want nil", env)
+	}
+	// nil and empty creds add nothing.
+	var none *CloneCreds
+	if env := none.authEnv("https://github.com/org/repo.git"); env != nil {
+		t.Errorf("authEnv() on nil creds = %v, want nil", env)
+	}
+	if env := (&CloneCreds{}).authEnv("https://github.com/org/repo.git"); env != nil {
+		t.Errorf("authEnv() on empty creds = %v, want nil", env)
+	}
+}

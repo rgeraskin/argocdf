@@ -32,6 +32,12 @@ type RenderOptions struct {
 	// files can be read from the local branch checkout instead of a remote clone.
 	RepoURL string
 
+	// ArgoCDNamespace is the ArgoCD control-plane namespace, used to compute
+	// application instance names the way ArgoCD does: apps living outside it
+	// render as "<namespace>_<name>" (feeds ARGOCD_APP_NAME and the default
+	// helm release name).
+	ArgoCDNamespace string
+
 	// KubeVersion is the Kubernetes version to use for rendering
 	KubeVersion string
 
@@ -148,8 +154,19 @@ func (f *Factory) RenderApplication(ctx context.Context, app *cluster.Applicatio
 	// A source that is a pure ref (Ref set, but no Path/Chart) produces no
 	// manifests, so it must go through the multi-source path instead.
 	if len(sources) == 1 && !isPureRef(sources[0]) {
-		renderer := f.GetRenderer(&sources[0], repoPath)
-		manifests, err := renderer.Render(ctx, app, &sources[0], repoPath)
+		// Apps-of-apps children may live entirely in another git repository;
+		// they render from their own checkout, never from the local worktree.
+		srcRepoPath := repoPath
+		if sources[0].Chart == "" && isExternalSource(&f.helmRenderer.opts, &sources[0]) {
+			clonedPath, cleanupClone, err := cloneExternalRepo(ctx, &f.helmRenderer.opts, app.Spec.Project, &sources[0])
+			if err != nil {
+				return &RenderResult{Error: err}, err
+			}
+			defer cleanupClone()
+			srcRepoPath = clonedPath
+		}
+		renderer := f.GetRenderer(&sources[0], srcRepoPath)
+		manifests, err := renderer.Render(ctx, app, &sources[0], srcRepoPath)
 		return &RenderResult{
 			Manifests:  manifests,
 			SourceType: renderer.SourceType(),

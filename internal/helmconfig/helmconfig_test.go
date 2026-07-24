@@ -134,3 +134,35 @@ func TestLoadLocalRepoCredentials_HelmEnvFailureIsFatal(t *testing.T) {
 		t.Error("LoadLocalRepoCredentials() = nil error, want a failure when helm env cannot run")
 	}
 }
+
+func TestParseRepositoriesFile_TLSClientFiles(t *testing.T) {
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "client.crt")
+	keyPath := filepath.Join(dir, "client.key")
+	if err := os.WriteFile(certPath, []byte("CERT-DATA"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, []byte("KEY-DATA"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	repos, err := parseRepositoriesFile(writeFixture(t,
+		"repositories:\n- name: mtls\n  url: https://mtls.acme.example\n  certFile: "+certPath+"\n  keyFile: "+keyPath+"\n"))
+	if err != nil {
+		t.Fatalf("parseRepositoriesFile() error: %v", err)
+	}
+	if len(repos) != 1 {
+		t.Fatalf("got %d repos, want 1", len(repos))
+	}
+	if repos[0].TLSClientCertData != "CERT-DATA" || repos[0].TLSClientCertKey != "KEY-DATA" {
+		t.Errorf("TLS client material not read from files: %+v", repos[0])
+	}
+}
+
+func TestParseRepositoriesFile_UnreadableTLSFileIsAnError(t *testing.T) {
+	repos, err := parseRepositoriesFile(writeFixture(t,
+		"repositories:\n- name: mtls\n  url: https://mtls.acme.example\n  certFile: /nonexistent/client.crt\n"))
+	if err == nil {
+		t.Errorf("configured-but-unreadable certFile must be an error, got repos: %+v", repos)
+	}
+}
