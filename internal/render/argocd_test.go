@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	argoappv1 "github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
+	argogit "github.com/argoproj/argo-cd/v3/util/git"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/yaml"
 
@@ -37,7 +39,7 @@ func writeArgoTestChart(t *testing.T, dir, rel string, extra map[string]string) 
 	t.Helper()
 	chartDir := filepath.Join(dir, rel)
 	files := map[string]string{
-		"Chart.yaml": "apiVersion: v2\nname: testchart\nversion: 0.1.0\n",
+		"Chart.yaml":  "apiVersion: v2\nname: testchart\nversion: 0.1.0\n",
 		"values.yaml": "greeting: hello\n",
 		"templates/cm.yaml": `apiVersion: v1
 kind: ConfigMap
@@ -353,5 +355,118 @@ func TestManifestsToYAML(t *testing.T) {
 
 	if _, err := manifestsToYAML([]string{"{not-json"}); err == nil {
 		t.Error("expected error for invalid JSON input")
+	}
+}
+
+func TestBuildManifestRequest_RepoCreds(t *testing.T) {
+	helmRepo := &argoappv1.Repository{Repo: "https://charts.acme.example", Name: "acme", Username: "helm-user", Type: "helm"}
+	ociRepo := &argoappv1.Repository{Repo: "ghcr.io/acme", Username: "oci-user", Type: "oci", EnableOCI: true}
+	helmTpl := &argoappv1.RepoCreds{URL: "https://charts.acme.example/team", Type: "helm"}
+	ociTpl := &argoappv1.RepoCreds{URL: "registry.acme.example", Type: "oci"}
+
+	opts := RenderOptions{
+		HelmRepos:     []*argoappv1.Repository{helmRepo},
+		OCIRepos:      []*argoappv1.Repository{ociRepo},
+		HelmRepoCreds: []*argoappv1.RepoCreds{helmTpl},
+		OCIRepoCreds:  []*argoappv1.RepoCreds{ociTpl},
+		ResolveRepo: func(_ context.Context, repoURL, _ string) (*argoappv1.Repository, error) {
+			return &argoappv1.Repository{
+				Repo:     repoURL,
+				Username: "resolved-user",
+				Password: "resolved-pass",
+				Proxy:    "http://proxy.local",
+			}, nil
+		},
+	}
+	r := NewArgoCDRenderer(opts)
+	app := testApp("creds-app", "chart", nil)
+	ctx := context.Background()
+
+	t.Run("non-OCI source carries only the helm halves", func(t *testing.T) {
+		q := r.buildManifestRequest(ctx, app, app.Spec.Source, nil)
+		if len(q.Repos) != 1 || q.Repos[0].Repo != helmRepo.Repo {
+			t.Errorf("Repos = %+v, want only the helm repositories", q.Repos)
+		}
+		if len(q.HelmRepoCreds) != 1 || q.HelmRepoCreds[0].URL != helmTpl.URL {
+			t.Errorf("HelmRepoCreds = %+v, want only the helm templates", q.HelmRepoCreds)
+		}
+		if q.Repo.Username != "resolved-user" || q.Repo.Proxy != "http://proxy.local" {
+			t.Errorf("Repo = %+v, want the resolved repository (creds + proxy)", q.Repo)
+		}
+	})
+
+	t.Run("oci source appends the OCI halves without mutating the options", func(t *testing.T) {
+		source := &cluster.ApplicationSource{RepoURL: "oci://ghcr.io/acme", Chart: "app", TargetRevision: "1.0.0"}
+		q := r.buildManifestRequest(ctx, app, source, nil)
+		if len(q.Repos) != 2 || q.Repos[1].Repo != ociRepo.Repo {
+			t.Errorf("Repos = %+v, want helm + OCI repositories", q.Repos)
+		}
+		if len(q.HelmRepoCreds) != 2 || q.HelmRepoCreds[1].URL != ociTpl.URL {
+			t.Errorf("HelmRepoCreds = %+v, want helm + OCI templates", q.HelmRepoCreds)
+		}
+		if len(r.opts.HelmRepos) != 1 || len(r.opts.HelmRepoCreds) != 1 {
+			t.Error("per-source composition mutated the shared option slices")
+		}
+	})
+
+	t.Run("scheme-less helm-OCI source URL is not IsOCI (ArgoCD parity)", func(t *testing.T) {
+		source := &cluster.ApplicationSource{RepoURL: "ghcr.io/acme", Chart: "app", TargetRevision: "1.0.0"}
+		q := r.buildManifestRequest(ctx, app, source, nil)
+		if len(q.Repos) != 1 {
+			t.Errorf("Repos = %+v, want only the helm half for a scheme-less URL", q.Repos)
+		}
+	})
+
+	t.Run("nil ResolveRepo falls back to a bare repo", func(t *testing.T) {
+		bare := NewArgoCDRenderer(RenderOptions{})
+		q := bare.buildManifestRequest(ctx, app, app.Spec.Source, nil)
+		if q.Repo == nil || q.Repo.Repo != app.Spec.Source.RepoURL || q.Repo.Username != "" {
+			t.Errorf("Repo = %+v, want bare credential-less repository", q.Repo)
+		}
+	})
+
+	t.Run("resolve errors fall back to a bare repo", func(t *testing.T) {
+		failing := NewArgoCDRenderer(RenderOptions{
+			ResolveRepo: func(context.Context, string, string) (*argoappv1.Repository, error) {
+				return nil, context.DeadlineExceeded
+			},
+		})
+		q := failing.buildManifestRequest(ctx, app, app.Spec.Source, nil)
+		if q.Repo == nil || q.Repo.Repo != app.Spec.Source.RepoURL {
+			t.Errorf("Repo = %+v, want bare fallback on resolve error", q.Repo)
+		}
+	})
+}
+
+func TestPrepareRefSources_ResolvedRepo(t *testing.T) {
+	repoURL := "https://github.com/example/repo.git"
+	r := NewArgoCDRenderer(RenderOptions{
+		RepoURL: repoURL,
+		ResolveRepo: func(_ context.Context, url, _ string) (*argoappv1.Repository, error) {
+			return &argoappv1.Repository{Repo: url, Username: "ref-user", Password: "ref-pass"}, nil
+		},
+	})
+	repoPath := t.TempDir()
+	sources := []cluster.ApplicationSource{
+		{RepoURL: repoURL, Ref: "values"},
+		{RepoURL: repoURL, Path: "chart"},
+	}
+
+	refSources, tempPaths, cleanup, err := r.prepareRefSources(context.Background(), "default", sources, repoPath)
+	if err != nil {
+		t.Fatalf("prepareRefSources() error: %v", err)
+	}
+	defer cleanup()
+
+	target := refSources["$values"]
+	if target == nil {
+		t.Fatal("missing $values ref target")
+	}
+	if target.Repo.Username != "ref-user" || target.Repo.Password != "ref-pass" {
+		t.Errorf("RefTarget.Repo = %+v, want the resolved repository credentials", target.Repo)
+	}
+	// The local repo must still map to the current worktree, not a clone.
+	if got := tempPaths.GetPathIfExists(argogit.NormalizeGitURL(repoURL)); got != repoPath {
+		t.Errorf("ref repo path = %q, want the local worktree %q", got, repoPath)
 	}
 }

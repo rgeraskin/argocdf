@@ -46,6 +46,17 @@ const (
 	RendererArgoCD = "argocd"
 	// DefaultRenderer is the render engine used when --renderer is not given.
 	DefaultRenderer = RendererNative
+
+	// RepoCredsCluster reads repository credentials from ArgoCD's repository
+	// secrets in the cluster (the control-plane namespace).
+	RepoCredsCluster = "cluster"
+	// RepoCredsLocal reads repository credentials from the user's local helm
+	// config (repositories.yaml entries and the registry config).
+	RepoCredsLocal = "local"
+	// RepoCredsNone renders anonymously, without repository credentials.
+	RepoCredsNone = "none"
+	// DefaultRepoCreds is the credential source used when --repo-creds is not given.
+	DefaultRepoCreds = RepoCredsCluster
 )
 
 // DefaultConcurrency returns the default number of applications to render in
@@ -73,8 +84,19 @@ type Config struct {
 	// Kubernetes configuration
 	KubeconfigPath string
 	Context        string
-	Namespace      string
-	AllNamespaces  bool
+	// ArgoCDNamespace is the ArgoCD control-plane namespace: repository
+	// secrets and settings are read from it, and it is where Applications are
+	// listed unless ApplicationNamespaces is set.
+	ArgoCDNamespace string
+	// ApplicationNamespaces, when non-empty, is the EXHAUSTIVE list of
+	// namespaces scanned for Applications (the ArgoCD namespace is included
+	// only if listed). Entries may be literal names, glob patterns (team-*),
+	// or /regex/-wrapped regular expressions — ArgoCD's
+	// --application-namespaces pattern syntax.
+	ApplicationNamespaces []string
+	// AllNamespaces is CLI sugar for ApplicationNamespaces=["*"], normalized
+	// in WithDefaults.
+	AllNamespaces bool
 
 	// Git configuration
 	RepoPath     string
@@ -120,6 +142,11 @@ type Config struct {
 	// helm/kustomize pipeline) or RendererArgoCD (ArgoCD's repo-server code,
 	// for exact ArgoCD parity).
 	Renderer string
+
+	// RepoCreds selects where repository credentials come from:
+	// RepoCredsCluster (ArgoCD repository secrets; read failures are fatal),
+	// RepoCredsLocal (the user's helm config), or RepoCredsNone (anonymous).
+	RepoCreds string
 
 	// Render cache options
 	NoCache bool // Disable the persistent render cache
@@ -198,10 +225,11 @@ func ParseFileOutput(spec string) (FileOutput, error) {
 func New() *Config {
 	return &Config{
 		// Context is left empty to use kubectl's current context
-		Namespace:    DefaultNamespace,
-		StdoutFormat: DefaultStdoutFormat,
-		MaxDepth:     DefaultMaxDepth,
-		Renderer:     DefaultRenderer,
+		ArgoCDNamespace: DefaultNamespace,
+		StdoutFormat:    DefaultStdoutFormat,
+		MaxDepth:        DefaultMaxDepth,
+		Renderer:        DefaultRenderer,
+		RepoCreds:       DefaultRepoCreds,
 	}
 }
 
@@ -243,6 +271,16 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("invalid renderer: %s (must be %s or %s)", c.Renderer, RendererNative, RendererArgoCD)
 	}
 
+	// Validate the repository credential source. Empty is accepted as "not
+	// yet defaulted": WithDefaults resolves it to DefaultRepoCreds.
+	switch c.RepoCreds {
+	case "", RepoCredsCluster, RepoCredsLocal, RepoCredsNone:
+		// Valid
+	default:
+		return fmt.Errorf("invalid repo-creds source: %s (must be %s, %s, or %s)",
+			c.RepoCreds, RepoCredsCluster, RepoCredsLocal, RepoCredsNone)
+	}
+
 	// Warn if no output configured
 	if c.StdoutFormat == "none" && len(c.FileOutputs) == 0 {
 		return fmt.Errorf("no output configured: --stdout is 'none' and no --file outputs specified")
@@ -267,8 +305,16 @@ func (c *Config) Validate() error {
 func (c *Config) WithDefaults() *Config {
 	// Note: Context is intentionally not defaulted here.
 	// Empty context means kubectl will use the current context from kubeconfig.
-	if c.Namespace == "" {
-		c.Namespace = DefaultNamespace
+	if c.ArgoCDNamespace == "" {
+		c.ArgoCDNamespace = DefaultNamespace
+	}
+	if c.RepoCreds == "" {
+		c.RepoCreds = DefaultRepoCreds
+	}
+	// -A is sugar for the match-everything pattern; "*" subsumes any other
+	// entry, so it simply replaces the list.
+	if c.AllNamespaces {
+		c.ApplicationNamespaces = []string{"*"}
 	}
 	if c.StdoutFormat == "" {
 		c.StdoutFormat = DefaultStdoutFormat
@@ -288,4 +334,23 @@ func (c *Config) WithDefaults() *Config {
 	// Note: UnifiedContext is not defaulted here because 0 is a valid value
 	// (meaning no context lines). The default is set by the CLI flag.
 	return c
+}
+
+// NativeOnlyFlagWarnings reports warnings for helm flags that have no effect
+// with the argocd renderer (it registers chart dependency repositories itself,
+// inside an isolated helm home). The *Set arguments indicate the user
+// explicitly set the flag (command line or environment) — defaults never warn,
+// which matters for --helm-skip-refresh whose default is true.
+func (c *Config) NativeOnlyFlagWarnings(helmSkipRefreshSet, helmAddReposSet bool) []string {
+	if c.Renderer != RendererArgoCD {
+		return nil
+	}
+	var warnings []string
+	if helmSkipRefreshSet {
+		warnings = append(warnings, "--helm-skip-refresh has no effect with --renderer=argocd (native renderer only)")
+	}
+	if helmAddReposSet {
+		warnings = append(warnings, "--helm-add-repos has no effect with --renderer=argocd (native renderer only)")
+	}
+	return warnings
 }

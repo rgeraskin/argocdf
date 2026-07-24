@@ -4,6 +4,21 @@
 
 > **Note:** argocdf aims to reproduce how ArgoCD renders and diffs your applications, and reuses parts of ArgoCD's codebase to do so (which is why the binary isn't tiny). Still, it's not a perfect replica — some behaviors and features differ. See [DIFFERENCES.md](DIFFERENCES.md) for a detailed comparison with ArgoCD's implementation.
 
+## `argocd app diff` vs argocdf
+
+ArgoCD ships its own diff command, so why argocdf?
+
+|                      | `argocd app diff`                                                     | argocdf                                                                                      |
+|----------------------|-----------------------------------------------------------------------|----------------------------------------------------------------------------------------------|
+| **Needs**            | A running, reachable argocd-server + `argocd login`                   | Only kubectl access to the cluster                                                           |
+| **Scope**            | ONE app, named by you                                                 | ALL apps affected by your git change, discovered automatically (incl. apps-of-apps children) |
+| **Compares**         | Desired state vs the app's **live** target state                      | Base branch vs target branch (what your PR will change)                                      |
+| **`--local` mode**   | Renders a pre-checked-out path with your helm config, no repo secrets | `--repo-creds=local` reproduces exactly that credential behavior                             |
+| **Repo credentials** | The server-side repo-server resolves them from ArgoCD's secrets       | `--repo-creds=cluster` (default) reads the same secrets through the same ArgoCD code         |
+| **Output**           | Terminal diff                                                         | Terminal, GitHub markdown (PR-comment-ready, split-aware), unified patch, interactive HTML   |
+
+In short: `argocd app diff` answers "how does this one app differ from the cluster right now"; argocdf answers "what will this PR change, across every affected app" — and runs fine in CI with nothing but a kubeconfig.
+
 ## Features
 
 - **Auto-detection**: Automatically detects repository path, branches, and cluster version
@@ -23,12 +38,9 @@
 2. **Fetches applications**: Lists ArgoCD Applications from the specified namespace(s)
 3. **Analyzes changes**: Compares git branches (from their merge base) to find changed files
 4. **Filters affected apps**: Identifies applications whose source paths have changes
-5. **Renders manifests**: For each affected app, renders both sides from ephemeral
-   worktrees (the merge base and the target branch tip) — the user's working tree
-   is never touched
+5. **Renders manifests**: For each affected app, renders both sides from ephemeral worktrees (the merge base and the target branch tip) — the user's working tree is never touched
 6. **Computes diffs**: Compares rendered manifests to identify changes
-7. **Recursive discovery**: If diffs contain new or modified Application CRDs,
-   adds them to the queue (see below)
+7. **Recursive discovery**: If diffs contain new or modified Application CRDs, adds them to the queue (see below)
 8. **Outputs results**: Displays colored terminal output and/or generates HTML report
 
 ### Apps-of-Apps Rendering Order
@@ -112,6 +124,13 @@ argocdf --context my-cluster
 # Scan all namespaces for ArgoCD applications
 argocdf --all-namespaces
 
+# Apps-in-any-namespace: scan exactly these namespaces
+# (globs and /regex/ work; add 'argocd' explicitly if wanted)
+argocdf --application-namespaces 'argocd,team-*'
+
+# Private repos without cluster secret access: use your helm logins
+argocdf --repo-creds local
+
 # Quiet mode with markdown file output
 argocdf -q -f md-fields:pr-comment.md
 
@@ -140,12 +159,15 @@ ARGOCDF_EXTERNAL_DIFF="delta --side-by-side" argocdf
 
 ### Kubernetes Flags
 
-| Flag               | Short | Description                | Default           |
-|--------------------|-------|----------------------------|-------------------|
-| `--kubeconfig`     | `-k`  | Path to kubeconfig file    | `~/.kube/config`  |
-| `--context`        |       | Kubernetes context to use  | (from kubeconfig) |
-| `--namespace`      | `-n`  | ArgoCD namespace to search | `argocd`          |
-| `--all-namespaces` | `-A`  | Search all namespaces      | `false`           |
+| Flag                       | Short | Description                                                                                                                                                                                             | Default           |
+|----------------------------|-------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-------------------|
+| `--kubeconfig`             | `-k`  | Path to kubeconfig file                                                                                                                                                                                 | `~/.kube/config`  |
+| `--context`                |       | Kubernetes context to use                                                                                                                                                                               | (from kubeconfig) |
+| `--argocd-namespace`       |       | ArgoCD control-plane namespace: repository secrets/settings are read here, and Applications are listed here unless `--application-namespaces` is set                                                    | `argocd`          |
+| `--application-namespaces` |       | Comma-separated list of namespaces to scan for Applications — **exhaustive** when set (include the ArgoCD namespace explicitly if wanted); entries may be literal names, globs (`team-*`), or `/regex/` | (unset)           |
+| `--all-namespaces`         | `-A`  | Scan all namespaces (same as `--application-namespaces='*'`)                                                                                                                                            | `false`           |
+
+An all-literal `--application-namespaces` list is served with one namespaced read per entry, so strictly namespace-scoped RBAC suffices; any glob or `/regex/` entry requires cluster-wide list permission (as `-A` always did).
 
 ### Git Flags
 
@@ -158,33 +180,31 @@ ARGOCDF_EXTERNAL_DIFF="delta --side-by-side" argocdf
 
 ### Rendering Flags
 
-| Flag                          | Description                                                              | Default       |
-|-------------------------------|--------------------------------------------------------------------------|---------------|
-| `--renderer`                  | Render engine: `native` (argocdf's own helm/kustomize pipeline) or `argocd` (ArgoCD's repo-server code, for exact ArgoCD render parity — see below) | `native`      |
-| `--kube-version`              | Kubernetes version for rendering                                         | Auto-detected |
-| `--kustomize-enable-helm`     | Enable Helm chart inflation via kustomize                                | `false`       |
-| `--kustomize-build-options`   | Additional kustomize build options (space-separated)                     | (none)        |
-| `--kustomize-load-restrictor` | Load restrictor mode (e.g., `LoadRestrictionsNone`)                      | (none)        |
-| `--helm-skip-refresh`         | Skip refreshing the repo cache during `helm dependency build`            | `true`        |
-| `--helm-add-repos`            | Make chart dependency repos resolvable before dependency build: refresh a matching existing entry, or `helm repo add` + `update` unknown URLs. Mutates the local helm config/cache; intended for CI | `false`       |
-| `--no-api-versions`           | Do not pass cluster-discovered API versions to helm via `--api-versions` | `false`       |
+| Flag                          | Description                                                                                                                                                                                                                | Default       |
+|-------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------|
+| `--renderer`                  | Render engine: `native` (argocdf's own helm/kustomize pipeline) or `argocd` (ArgoCD's repo-server code, for exact ArgoCD render parity — see below)                                                                        | `native`      |
+| `--kube-version`              | Kubernetes version for rendering                                                                                                                                                                                           | Auto-detected |
+| `--kustomize-enable-helm`     | Enable Helm chart inflation via kustomize                                                                                                                                                                                  | `false`       |
+| `--kustomize-build-options`   | Additional kustomize build options (space-separated)                                                                                                                                                                       | (none)        |
+| `--kustomize-load-restrictor` | Load restrictor mode (e.g., `LoadRestrictionsNone`)                                                                                                                                                                        | (none)        |
+| `--repo-creds`                | Repository credential source: `cluster` (ArgoCD repository secrets), `local` (your helm config), `none` (anonymous) — see below                                                                                            | `cluster`     |
+| `--helm-skip-refresh`         | Skip refreshing the repo cache during `helm dependency build` (native renderer only)                                                                                                                                       | `true`        |
+| `--helm-add-repos`            | Make chart dependency repos resolvable before dependency build: refresh a matching existing entry, or `helm repo add` + `update` unknown URLs. Mutates the local helm config/cache; intended for CI (native renderer only) | `false`       |
+| `--no-api-versions`           | Do not pass cluster-discovered API versions to helm via `--api-versions`                                                                                                                                                   | `false`       |
 
-**The `argocd` render engine** (`--renderer=argocd`, env `ARGOCDF_RENDERER=argocd`)
-routes rendering through ArgoCD's own repo-server code
-(`reposerver/repository.GenerateManifests` — the same code path behind
-`argocd app diff --local`), so option translation matches ArgoCD exactly:
-helm runs with `--include-crds` (CRDs from `crds/` appear in diffs), all
-`spec.source.helm`/`kustomize` fields are honored, `$ARGOCD_APP_*` build-env
-substitution works, `.argocd-source*.yaml` overrides are merged, and helm
-dependencies are built in an isolated temp helm home (dependency repos from
-`Chart.yaml` are registered there automatically — `--helm-add-repos` is not
-needed). Notable differences from `native`: CRDs appear in diffs, recursive
-directory sources include hidden (dot-)directories exactly as ArgoCD does,
-YAML is re-serialized from ArgoCD's parsed objects (key order may differ from
-raw helm output; diffs are computed semantically so this does not affect
-results), and `--helm-skip-refresh`/`--helm-add-repos` do not apply. Set
-`ARGOCD_LOG_LEVEL=info` to see ArgoCD's per-command exec traces when
-debugging renders.
+**The `argocd` render engine** (`--renderer=argocd`, env `ARGOCDF_RENDERER=argocd`) routes rendering through ArgoCD's own repo-server code (`reposerver/repository.GenerateManifests` — the same code path behind `argocd app diff --local`), so option translation matches ArgoCD exactly: helm runs with `--include-crds` (CRDs from `crds/` appear in diffs), all `spec.source.helm`/`kustomize` fields are honored, `$ARGOCD_APP_*` build-env substitution works, `.argocd-source*.yaml` overrides are merged, and helm dependencies are built in an isolated temp helm home (dependency repos from `Chart.yaml` are registered there automatically — `--helm-add-repos` is not needed).
+
+Notable differences from `native`: CRDs appear in diffs, recursive directory sources include hidden (dot-)directories exactly as ArgoCD does, YAML is re-serialized from ArgoCD's parsed objects (key order may differ from raw helm output; diffs are computed semantically so this does not affect results), and `--helm-skip-refresh`/`--helm-add-repos` do not apply. Set `ARGOCD_LOG_LEVEL=info` to see ArgoCD's per-command exec traces when debugging renders.
+
+### Repository Credentials (`--repo-creds`)
+
+Private chart repositories and registries authenticate through one of three credential sources — all three run the identical render pipeline and differ only in where credentials come from:
+
+- **`cluster`** (default) — read ArgoCD's repository secrets and credential templates from `--argocd-namespace`, using ArgoCD's own `util/db` code, and feed them into rendering exactly as the application controller does. Private OCI and classic chart sources and their private chart dependencies then work with zero local helm setup. RBAC needed: `get,list,watch` on Secrets and ConfigMaps in the ArgoCD namespace (note: like ArgoCD's own components, argocdf lists ALL secrets in that namespace — the repository secrets are found by label). A read failure aborts the run with a message naming the other modes; a cluster without repository secrets simply renders credential-less.
+- **`local`** — use your own helm configuration: classic repository entries from repositories.yaml (credentials are stored inline there by `helm repo add --username … --password …`), and your `helm registry login` state for OCI registries — including credential helpers such as the macOS keychain. Nothing is ever written to your helm config. Setup contract: `helm registry login` for private OCI registries, `helm repo add` with credentials for private classic repos (it serves purely as a credential store — no `helm repo update` needed); public repositories need nothing. This is the mode for users whose RBAC does not include the ArgoCD namespace.
+- **`none`** — render anonymously (public repositories only).
+
+In both credentialed modes, remote chart downloads run through ArgoCD's own chart client (the repo-server's fetch path), so username/password, TLS client certificates, CA bundles, `insecure`, and proxy settings from the resolved repository all apply — in both render engines.
 
 ### Output Flags
 
@@ -210,7 +230,11 @@ argocdf -f md-unified,split:pr-comment.md
 argocdf -f md-fields,split=30000:pr-comment.md
 ```
 
-When the report fits in one part, the output is a single file, identical to running without `split`. Otherwise parts are written to `pr-comment.md`, `pr-comment.2.md`, `pr-comment.3.md`, … — each a self-contained document (upsert marker, `part i/N` heading, balanced `<details>` blocks and code fences) that CI can post as its own PR comment. An application's report is kept in a single part; only an app that alone exceeds the limit is split across parts at resource boundaries, and only a single resource diff larger than a whole part gets truncated (with a note). The summary and footer land on the last part. Leftover part files from a previous, larger run are removed automatically.
+When the report fits in one part, the output is a single file, identical to running without `split`. Otherwise parts are written to `pr-comment.md`, `pr-comment.2.md`, `pr-comment.3.md`, … — each a self-contained document (upsert marker, `part i/N` heading, balanced `<details>` blocks and code fences) that CI can post as its own PR comment.
+
+An application's report is kept in a single part; only an app that alone exceeds the limit is split across parts at resource boundaries, and only a single resource diff larger than a whole part gets truncated (with a note).
+
+The summary and footer land on the last part. Leftover part files from a previous, larger run are removed automatically.
 
 ### Recursion Flags
 
@@ -227,33 +251,18 @@ When the report fits in one part, the output is a single file, identical to runn
 
 ### Lint Flags
 
-| Flag             | Description                                                          | Default |
-|------------------|----------------------------------------------------------------------|---------|
-| `--lint`         | Shell command that lints rendered manifests (can be repeated)        | none    |
-| `--lint-timeout` | Timeout for each lint command invocation                             | `5s`    |
+| Flag             | Description                                                   | Default |
+|------------------|---------------------------------------------------------------|---------|
+| `--lint`         | Shell command that lints rendered manifests (can be repeated) | none    |
+| `--lint-timeout` | Timeout for each lint command invocation                      | `5s`    |
 
-Each `--lint` command receives an application's rendered multi-doc YAML on stdin
-(via `sh -c`) and emits findings as **one warning per stdout line**. Both sides
-are linted separately, and each side's command runs **with that side's checkout
-as its working directory** — a repo-relative policy path (like `policies/` below)
-resolves to the policy files as of that branch, so changing a policy in a PR is
-itself reflected in the lint results. Every finding lands in the report's
-warning block with the same side labels used for parse warnings:
+Each `--lint` command receives an application's rendered multi-doc YAML on stdin (via `sh -c`) and emits findings as **one warning per stdout line**. Both sides are linted separately, and each side's command runs **with that side's checkout as its working directory** — a repo-relative policy path (like `policies/` below) resolves to the policy files as of that branch, so changing a policy in a PR is itself reflected in the lint results. Every finding lands in the report's warning block with the same side labels used for parse warnings:
 
 - `[base]`-only — the violation existed on the base branch and this change **fixes** it
 - `[target]`-only — this change **introduces** the violation
 - both sides — pre-existing, untouched by this change
 
-The exit code is the only health signal: stdout lines are always reported as
-warnings, and a spawn failure, timeout, or exit ≠ 0 adds one non-fatal
-`lint "<command>": ...` warning line. That warning echoes a truncated prefix of
-the command, so don't embed secrets in the command text — pass them via the
-environment or files instead. Tools like kyverno and conftest exit
-non-zero when policies fail (normal operation), so end the pipeline in an
-adapter — typically `jq`, which also normalizes any tool's output to
-line-per-finding. Use `jq -rn 'input | ...'` rather than plain `jq`: `input`
-demands at least one JSON document, so if the tool crashes and produces empty
-output the adapter exits non-zero instead of silently passing.
+The exit code is the only health signal: stdout lines are always reported as warnings, and a spawn failure, timeout, or exit ≠ 0 adds one non-fatal `lint "<command>": ...` warning line. That warning echoes a truncated prefix of the command, so don't embed secrets in the command text — pass them via the environment or files instead. Tools like kyverno and conftest exit non-zero when policies fail (normal operation), so end the pipeline in an adapter — typically `jq`, which also normalizes any tool's output to line-per-finding. Use `jq -rn 'input | ...'` rather than plain `jq`: `input` demands at least one JSON document, so if the tool crashes and produces empty output the adapter exits non-zero instead of silently passing.
 
 ```bash
 # kyverno (inline — see the script advice below)
@@ -267,11 +276,7 @@ argocdf --lint 'conftest test - --policy policy/ --output json 2>/dev/null \
       | "[conftest] " + gsub("\n"; " ")'\'''
 ```
 
-These inline commands are only meant to show the contract — the shell quoting
-gets cryptic fast. For real use, put the tool + jq pipeline into a small script
-committed to your repo and pass that to `--lint`. Because each side's command
-runs in that side's worktree, the script — like the policies it references — is
-picked up in each branch's own version:
+These inline commands are only meant to show the contract — the shell quoting gets cryptic fast. For real use, put the tool + jq pipeline into a small script committed to your repo and pass that to `--lint`. Because each side's command runs in that side's worktree, the script — like the policies it references — is picked up in each branch's own version:
 
 ```bash
 argocdf --lint ./scripts/lint-manifests.sh
@@ -314,28 +319,24 @@ conftest test - --policy policy/ --output json 2>/dev/null <<<"$manifests" |
 
 ## Environment Variables
 
-Every flag can also be set through an environment variable. The variable name is
-the flag name upper-cased, with dashes replaced by underscores, and prefixed with
-`ARGOCDF_`:
+Every flag can also be set through an environment variable. The variable name is the flag name upper-cased, with dashes replaced by underscores, and prefixed with `ARGOCDF_`:
 
 | Flag                          | Environment variable                |
 |-------------------------------|-------------------------------------|
 | `--repo-dir`                  | `ARGOCDF_REPO_DIR`                  |
 | `--repo-url`                  | `ARGOCDF_REPO_URL`                  |
-| `--namespace`                 | `ARGOCDF_NAMESPACE`                 |
+| `--argocd-namespace`          | `ARGOCDF_ARGOCD_NAMESPACE`          |
+| `--application-namespaces`    | `ARGOCDF_APPLICATION_NAMESPACES`    |
 | `--context`                   | `ARGOCDF_CONTEXT`                   |
 | `--kustomize-enable-helm`     | `ARGOCDF_KUSTOMIZE_ENABLE_HELM`     |
 | `--kustomize-load-restrictor` | `ARGOCDF_KUSTOMIZE_LOAD_RESTRICTOR` |
 | ...                           | `ARGOCDF_<FLAG>` for any other flag |
 
-Precedence is **explicit flag > environment variable > default**, so a flag passed
-on the command line always wins over the matching environment variable. Empty
-variables are ignored.
+`ARGOCDF_APPLICATION_NAMESPACES` accepts a comma-separated list (`team-a,team-*`), exactly like ArgoCD's own `ARGOCD_APPLICATION_NAMESPACES`.
 
-Repeatable flags (`--file`, `--lint`) carry exactly **one** value when set through
-their environment variable — the whole value is taken verbatim (lint commands may
-contain commas and quotes, so no splitting is possible). Repeat the flag on the
-command line to configure multiple values.
+Precedence is **explicit flag > environment variable > default**, so a flag passed on the command line always wins over the matching environment variable. Empty variables are ignored.
+
+Repeatable flags (`--file`, `--lint`) carry exactly **one** value when set through their environment variable — the whole value is taken verbatim (lint commands may contain commas and quotes, so no splitting is possible). Repeat the flag on the command line to configure multiple values.
 
 ```bash
 # These two invocations are equivalent
@@ -403,8 +404,7 @@ argocdf -f html-side-by-side:report.html
 
 ## Development
 
-This project uses [mise](https://mise.jdx.dev/) to pin toolchain versions
-(`.mise.toml`) and define tasks. Run `mise tasks` to list them.
+This project uses [mise](https://mise.jdx.dev/) to pin toolchain versions (`.mise.toml`) and define tasks. Run `mise tasks` to list them.
 
 ```bash
 # Build (produces ./argocdf)
@@ -445,6 +445,7 @@ argocdf/
 │   ├── config/                 # Configuration struct and auto-detection logic
 │   ├── cluster/                # K8s client-go wrapper, ArgoCD Application operations
 │   ├── git/                    # Repository operations, changed-files detection, worktrees
+│   ├── helmconfig/             # Local repo credentials from the user's helm config
 │   ├── render/                 # Helm/Kustomize rendering, multi-source, chart cache
 │   ├── rendercache/            # Persistent content-addressed render cache
 │   ├── diff/                   # Manifest comparison and recursive apps-of-apps discovery

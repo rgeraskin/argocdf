@@ -21,8 +21,8 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/argoproj/argo-cd/v3/common"
@@ -85,7 +85,7 @@ func (r *ArgoCDRenderer) RenderApplication(ctx context.Context, app *cluster.App
 		return &RenderResult{SourceType: types.SourceTypeUnknown}, nil
 	}
 
-	refSources, tempPaths, cleanup, err := r.prepareRefSources(sources, repoPath)
+	refSources, tempPaths, cleanup, err := r.prepareRefSources(ctx, app.Spec.Project, sources, repoPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to prepare ref sources: %w", err)
 	}
@@ -134,9 +134,9 @@ func (r *ArgoCDRenderer) renderSource(
 	var appPath, repoRoot string
 	if source.Chart != "" {
 		// Remote chart: ArgoCD's repo-server fetches charts BEFORE calling
-		// GenerateManifests, so argocdf does the same, reusing the native
-		// persistent chart cache for pinned versions.
-		chartDir, cleanupChart, err := r.ensureRemoteChart(ctx, source)
+		// GenerateManifests, so argocdf does the same — through ArgoCD's own
+		// chart client, wrapped in the persistent chart cache.
+		chartDir, cleanupChart, err := r.helm.fetchRemoteChart(ctx, app, source)
 		if err != nil {
 			return nil, "", err
 		}
@@ -150,7 +150,7 @@ func (r *ArgoCDRenderer) renderSource(
 		repoRoot = repoPath
 	}
 
-	q := r.buildManifestRequest(app, source, refSources)
+	q := r.buildManifestRequest(ctx, app, source, refSources)
 
 	// Serialize per appPath: GenerateManifests may write into appPath (helm
 	// dependency build: charts/, Chart.lock, its skip marker) and restores
@@ -184,13 +184,32 @@ func (r *ArgoCDRenderer) renderSource(
 // .argocd-source*.yaml overrides), so the source is deep-copied — requests
 // must never share an ApplicationSource across goroutines.
 func (r *ArgoCDRenderer) buildManifestRequest(
+	ctx context.Context,
 	app *cluster.Application,
 	source *cluster.ApplicationSource,
 	refSources map[string]*argoappv1.RefTarget,
 ) *apiclient.ManifestRequest {
+	// Compose the repository lists per source, mirroring ArgoCD's controller
+	// (controller/state.go:300-315): OCI repos and credential templates are
+	// offered only for oci:// sources. Intentional parity, including the
+	// degradations — an https chart with oci:// dependencies gets no OCI
+	// creds, and a scheme-less helm-OCI source URL does not count as IsOCI —
+	// exactly like stock ArgoCD.
+	repos, repoCreds := r.opts.HelmRepos, r.opts.HelmRepoCreds
+	if source.IsOCI() {
+		repos = append(slices.Clone(repos), r.opts.OCIRepos...)
+		repoCreds = append(slices.Clone(repoCreds), r.opts.OCIRepoCreds...)
+	}
+
 	return &apiclient.ManifestRequest{
-		// Repo must be non-nil (proxy/creds/env lookups dereference it).
-		Repo:               &argoappv1.Repository{Repo: source.RepoURL},
+		// Repo must be non-nil (proxy/creds/env lookups dereference it). The
+		// resolved repo carries creds/proxy/TLS from --repo-creds; dependency
+		// auth flows through Repos/HelmRepoCreds into ArgoCD's own
+		// DependencyBuild (registry login / authenticated repo add, inside
+		// the isolated helm home).
+		Repo:               r.resolveSourceRepo(ctx, app.Spec.Project, source.RepoURL),
+		Repos:              repos,
+		HelmRepoCreds:      repoCreds,
 		AppName:            app.Name,
 		Namespace:          app.Spec.Destination.Namespace,
 		ApplicationSource:  source.DeepCopy(),
@@ -210,6 +229,14 @@ func (r *ArgoCDRenderer) buildManifestRequest(
 		// keep the real error visible.
 		ProjectSourceRepos: []string{"*"},
 	}
+}
+
+// resolveSourceRepo returns the Repository configured for repoURL — with
+// credentials, proxy, and TLS settings from the --repo-creds source — falling
+// back to a bare Repository when no credential source is configured or
+// resolution fails.
+func (r *ArgoCDRenderer) resolveSourceRepo(ctx context.Context, project, repoURL string) *argoappv1.Repository {
+	return resolveRepoOrBare(ctx, &r.opts, project, repoURL)
 }
 
 // kustomizeOptions maps argocdf's kustomize flags onto ArgoCD's KustomizeOptions
@@ -243,6 +270,8 @@ func (r *ArgoCDRenderer) kustomizeOptions() *argoappv1.KustomizeOptions {
 // field), while the native engine joins the ref source's Path first. The
 // argocd engine follows ArgoCD.
 func (r *ArgoCDRenderer) prepareRefSources(
+	ctx context.Context,
+	project string,
 	sources []cluster.ApplicationSource,
 	repoPath string,
 ) (map[string]*argoappv1.RefTarget, utilio.TempPaths, func(), error) {
@@ -260,8 +289,10 @@ func (r *ArgoCDRenderer) prepareRefSources(
 		if source.Ref == "" {
 			continue
 		}
+		// The resolved repo keeps parity with the request's Repo and
+		// future-proofs private ref repositories.
 		refSources["$"+source.Ref] = &argoappv1.RefTarget{
-			Repo:           argoappv1.Repository{Repo: source.RepoURL},
+			Repo:           *r.resolveSourceRepo(ctx, project, source.RepoURL),
 			TargetRevision: source.TargetRevision,
 			Chart:          source.Chart,
 		}
@@ -292,67 +323,6 @@ func (r *ArgoCDRenderer) prepareRefSources(
 	}
 
 	return refSources, tempPaths, cleanup, nil
-}
-
-// ensureRemoteChart materializes a remote chart as a local directory: from the
-// persistent chart cache when the version is pinned and caching is enabled,
-// otherwise via a one-shot `helm pull` into a temp dir (also the fallback when
-// populating the cache fails, so rendering stays functional).
-func (r *ArgoCDRenderer) ensureRemoteChart(ctx context.Context, source *cluster.ApplicationSource) (string, func(), error) {
-	cacheDir, chartDir, hit, enabled := chartCacheDecision(
-		r.opts.ChartCacheDir, source.RepoURL, source.Chart, source.TargetRevision, dirExists,
-	)
-	if enabled {
-		if hit {
-			return chartDir, func() {}, nil
-		}
-		if err := r.helm.pullChartToCache(ctx, source, cacheDir, chartDir); err == nil {
-			return chartDir, func() {}, nil
-		}
-	}
-	return pullChartToTempDir(ctx, source)
-}
-
-// pullChartToTempDir pulls and unpacks a chart into a fresh temp directory
-// using an isolated helm home. Unlike the cache path it accepts unpinned
-// versions (ranges, empty = latest). The returned cleanup removes the temp dir.
-func pullChartToTempDir(ctx context.Context, source *cluster.ApplicationSource) (string, func(), error) {
-	tmp, err := os.MkdirTemp("", "argocdf-chart-")
-	if err != nil {
-		return "", nil, fmt.Errorf("failed to create temp chart dir: %w", err)
-	}
-	cleanup := func() { _ = SafeRemoveAll(tmp) }
-
-	homeTmp, err := os.MkdirTemp("", "argocdf-helmhome-")
-	if err != nil {
-		cleanup()
-		return "", nil, fmt.Errorf("failed to create temp helm home: %w", err)
-	}
-	defer func() { _ = SafeRemoveAll(homeTmp) }()
-
-	args := []string{"pull"}
-	if isOCIChartRepo(source.RepoURL) {
-		args = append(args, ociChartRef(source.RepoURL, source.Chart))
-	} else {
-		args = append(args, source.Chart, "--repo", source.RepoURL)
-	}
-	if source.TargetRevision != "" && source.TargetRevision != "HEAD" {
-		args = append(args, "--version", source.TargetRevision)
-	}
-	args = append(args, "--untar", "--untardir", tmp)
-
-	cmd := exec.CommandContext(ctx, "helm", args...)
-	cmd.Env = isolatedHelmEnv(homeTmp)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		cleanup()
-		if ctx.Err() != nil {
-			return "", nil, ctx.Err()
-		}
-		return "", nil, fmt.Errorf("failed to pull helm chart: %v\noutput: %s", err, output)
-	}
-
-	// helm pull --untar unpacks into a directory named after the chart.
-	return filepath.Join(tmp, filepath.Base(source.Chart)), cleanup, nil
 }
 
 // manifestsToYAML converts GenerateManifests' output (one JSON document string

@@ -65,6 +65,27 @@ func (s *ApplicationService) List(ctx context.Context, namespace string) ([]Appl
 	return s.convertList(list)
 }
 
+// ListNamespaces retrieves ArgoCD Applications from each of the given
+// namespaces with one namespaced List call per entry, so strictly
+// namespace-scoped RBAC suffices (no cluster-wide list). Duplicate entries
+// are queried once.
+func (s *ApplicationService) ListNamespaces(ctx context.Context, namespaces []string) ([]Application, error) {
+	seen := make(map[string]struct{}, len(namespaces))
+	var apps []Application
+	for _, ns := range namespaces {
+		if _, ok := seen[ns]; ok {
+			continue
+		}
+		seen[ns] = struct{}{}
+		nsApps, err := s.List(ctx, ns)
+		if err != nil {
+			return nil, err
+		}
+		apps = append(apps, nsApps...)
+	}
+	return apps, nil
+}
+
 // ListAllNamespaces retrieves ArgoCD Applications from all namespaces.
 func (s *ApplicationService) ListAllNamespaces(ctx context.Context) ([]Application, error) {
 	list, err := s.client.dynamicClient.Resource(ApplicationGVR).

@@ -48,8 +48,10 @@ func (f *Factory) CreateRepository() (*git.Repository, error) {
 // CreateRenderFactory creates the render engine selected by --renderer:
 // argocdf's native helm/kustomize pipeline, or ArgoCD's own repo-server code
 // for exact render parity. apiVersions is the list of cluster API versions to
-// pass to helm; it is ignored when --no-api-versions is set.
-func (f *Factory) CreateRenderFactory(kubeVersion string, apiVersions []string) applicationRenderer {
+// pass to helm; it is ignored when --no-api-versions is set. creds carries
+// the repository credentials loaded per --repo-creds (nil in `none` mode, or
+// when loading was skipped).
+func (f *Factory) CreateRenderFactory(kubeVersion string, apiVersions []string, creds *cluster.RepoCredentials) applicationRenderer {
 	if f.config.NoAPIVersions {
 		apiVersions = nil
 	}
@@ -64,6 +66,13 @@ func (f *Factory) CreateRenderFactory(kubeVersion string, apiVersions []string) 
 		HelmSkipRefresh:         f.config.HelmSkipRefresh,
 		HelmAddRepos:            f.config.HelmAddRepos,
 		ChartCacheDir:           f.chartCacheDir(),
+	}
+	if creds != nil {
+		opts.HelmRepos = creds.HelmRepos
+		opts.OCIRepos = creds.OCIRepos
+		opts.HelmRepoCreds = creds.HelmRepoCreds
+		opts.OCIRepoCreds = creds.OCIRepoCreds
+		opts.ResolveRepo = creds.Resolve
 	}
 	if f.config.Renderer == config.RendererArgoCD {
 		return render.NewArgoCDRenderer(opts)

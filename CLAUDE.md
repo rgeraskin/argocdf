@@ -50,9 +50,10 @@ The tool follows a pipeline architecture orchestrated by `internal/app/app.go`:
 | `cmd/argocdf` | CLI entry point (Cobra) |
 | `internal/app` | Main orchestrator and factory |
 | `internal/config` | Configuration and auto-detection |
-| `internal/cluster` | K8s client, ArgoCD Application types (via type aliases) |
+| `internal/cluster` | K8s client, ArgoCD Application types (via type aliases), cluster repo credentials (`util/db`), namespace matching |
+| `internal/helmconfig` | Local repo credentials from the user's helm config (`--repo-creds=local`) |
 | `internal/git` | Repository operations, change detection, URL normalization |
-| `internal/render` | Helm/Kustomize manifest rendering |
+| `internal/render` | Helm/Kustomize manifest rendering, chart fetching via ArgoCD's chart client |
 | `internal/diff` | Manifest comparison, apps-of-apps discovery |
 | `internal/output` | Output writers (terminal, markdown, HTML, unified) |
 
@@ -97,35 +98,23 @@ Apps-of-apps pattern is handled via recursive discovery with configurable max de
 
 ## Render Engines (`--renderer`)
 
-Two engines implement the app-side `applicationRenderer` seam (`internal/app/app.go`),
-selected by `--renderer` / `ARGOCDF_RENDERER` in `Factory.CreateRenderFactory`:
+Two engines implement the app-side `applicationRenderer` seam (`internal/app/app.go`), selected by `--renderer` / `ARGOCDF_RENDERER` in `Factory.CreateRenderFactory`:
 
-- **`native`** (default) — argocdf's own pipeline (`internal/render`
-  `Factory`/`HelmRenderer`/`KustomizeRenderer`): hand-translates
-  `ApplicationSource` fields to helm/kustomize CLI flags.
-- **`argocd`** — `internal/render/argocd.go` wraps ArgoCD's
-  `reposerver/repository.GenerateManifests` (the `argocd app diff --local` code
-  path) for exact ArgoCD parity: ArgoCD does source-type dispatch, the complete
-  helm/kustomize option translation (incl. `--include-crds` by default, which
-  native lacks), `ARGOCD_APP_*` build-env substitution, `.argocd-source*.yaml`
-  overrides, and dependency builds into an isolated temp helm home (so
-  `--helm-add-repos`/`--helm-skip-refresh` don't apply). argocdf still owns
-  worktrees, remote-chart fetching (chart cache), `$ref` checkout (registered in
-  a `TempPaths` keyed by normalized repo URL — GenerateManifests never clones),
-  and the render cache (`KeyOptions.Renderer` keeps engine entries separate).
-  Integration constraints that matter when touching this file: `q.Repo` and
-  `q.ApplicationSource` must be non-nil, the source is deep-copied because
-  GenerateManifests mutates it, calls are serialized per appPath (dependency
-  builds write `charts/`/`Chart.lock` into the worktree), `isLocal=false` is
-  what ISOLATES the helm home, and the revision param feeds
-  `ARGOCD_APP_REVISION*`. ArgoCD's per-exec tracer is silenced by defaulting
-  `ARGOCD_LOG_LEVEL=error` (explicit values are respected).
+- **`native`** (default) — argocdf's own pipeline (`internal/render` `Factory`/`HelmRenderer`/`KustomizeRenderer`): hand-translates `ApplicationSource` fields to helm/kustomize CLI flags.
+- **`argocd`** — `internal/render/argocd.go` wraps ArgoCD's `reposerver/repository.GenerateManifests` (the `argocd app diff --local` code path) for exact ArgoCD parity: ArgoCD does source-type dispatch, the complete helm/kustomize option translation (incl. `--include-crds` by default, which native lacks), `ARGOCD_APP_*` build-env substitution, `.argocd-source*.yaml` overrides, and dependency builds into an isolated temp helm home (so `--helm-add-repos`/`--helm-skip-refresh` don't apply — their usage strings say "(native renderer only)" and config warns when they're combined with this engine). argocdf still owns worktrees, remote-chart fetching (through ArgoCD's `util/helm.Client.ExtractChart` wrapped in the persistent chart cache — see `internal/render/chartfetch.go`), `$ref` checkout (registered in a `TempPaths` keyed by normalized repo URL — GenerateManifests never clones), and the render cache (`KeyOptions.Renderer` keeps engine entries separate). Integration constraints that matter when touching this file: `q.Repo` and `q.ApplicationSource` must be non-nil, the source is deep-copied because GenerateManifests mutates it, calls are serialized per appPath (dependency builds write `charts/`/`Chart.lock` into the worktree), `isLocal=false` is what ISOLATES the helm home (in ALL `--repo-creds` modes), and the revision param feeds `ARGOCD_APP_REVISION*`. ArgoCD's per-exec tracer is silenced by defaulting `ARGOCD_LOG_LEVEL=error` (explicit values are respected).
 
-The trade-off mirrors the types-import decision: ~85MB extra binary for
-structurally-eliminated behavior drift. On argo-cd version bumps, expect
-`GenerateManifests` signature churn (loud, compile-time) and re-check that the
-in-tree gitops-engine fork hasn't diverged from the published module argocdf
-links.
+### Repository Credentials (`--repo-creds cluster|local|none`)
+
+All three modes run the identical pipeline; they differ only in what fills the credential fields of `render.RenderOptions` (four `Repository`/`RepoCreds` lists + a `ResolveRepo` closure; `none` leaves them empty — render code is mode-blind):
+
+- **cluster** (default): `internal/cluster/repocreds.go` reads ArgoCD's repository secrets via ArgoCD's own `util/db`/`util/settings` from `--argocd-namespace`. Gotchas encoded there: a preflight `Secrets List (Limit:1)` probe MUST run before the settings manager's first use (its informer `WaitForCacheSync` has no internal timeout — forbidden RBAC would hang forever), the manager context is bounded (~30s; the synced informer indexer keeps serving reads after it ends), and `logrus.SetLevel(ErrorLevel)` must be set first (the settings manager logs at Info). Load failures are FATAL in app.initialize with a message naming the other modes.
+- **local**: `internal/helmconfig` parses repositories.yaml (classic creds are inline there) into the same lists and sets `HELM_REGISTRY_CONFIG` to the user's registry config (resolved via `helm env`) — an explicit helm env var beats the isolated `HELM_CONFIG_HOME`-derived default, so OCI logins (including credential helpers) pierce the isolated homes read-only.
+- The argocd engine composes `q.Repos`/`q.HelmRepoCreds` per source with ArgoCD's `source.IsOCI()` gate (mirroring controller/state.go:300-315, including its degradations) and resolves `q.Repo` through `ResolveRepo`; dependency auth then happens entirely inside ArgoCD's `DependencyBuild`.
+- IMPORT BOUNDARY: only `internal/cluster` and `internal/app` may import `util/db`/`util/settings`; `internal/render` sees only the lists + closure.
+
+Namespace flags: `--argocd-namespace` (control-plane; secrets + default app listing) and `--application-namespaces` (EXHAUSTIVE list, glob + `/regex/` entries matched via ArgoCD's `glob.MatchStringInList` — deliberately WITHOUT `IsNamespaceEnabled`'s control-plane short-circuit; all-literal lists are served per-namespace so namespace-scoped RBAC suffices). `-A` normalizes to `["*"]` in config.WithDefaults.
+
+The trade-off mirrors the types-import decision: ~85MB extra binary for structurally-eliminated behavior drift. On argo-cd version bumps, expect `GenerateManifests` signature churn (loud, compile-time) and re-check that the in-tree gitops-engine fork hasn't diverged from the published module argocdf links.
 
 ### Automatic Helm Dependency Management
 
@@ -137,28 +126,9 @@ Caveat: `helm dependency build` never adds or refreshes classic HTTP(S) chart re
 
 ## Linting Rendered Manifests (`--lint`)
 
-`--lint "shell command"` (repeatable; `--lint-timeout`, default 5s) pipes each
-affected app's rendered multi-doc YAML into the command's stdin via `sh -c`, per
-side. Each side's command runs with that side's ephemeral worktree as its
-working directory, so repo-relative policy paths resolve to the branch's own
-version of the files (a PR changing a policy lints each side with its own
-policy). Every non-empty stdout line becomes a warning appended to
-`ManifestSetDiff.ParseWarnings` with the existing `[base]`/`[target]` labels
-(`diff.LabelSide`), so all writers, badges, and split-packing handle lint
-findings with zero writer-specific code. The label semantics double as the
-diff: `[base]`-only = fixed by the PR, `[target]`-only = introduced, both =
-pre-existing.
+`--lint "shell command"` (repeatable; `--lint-timeout`, default 5s) pipes each affected app's rendered multi-doc YAML into the command's stdin via `sh -c`, per side. Each side's command runs with that side's ephemeral worktree as its working directory, so repo-relative policy paths resolve to the branch's own version of the files (a PR changing a policy lints each side with its own policy). Every non-empty stdout line becomes a warning appended to `ManifestSetDiff.ParseWarnings` with the existing `[base]`/`[target]` labels (`diff.LabelSide`), so all writers, badges, and split-packing handle lint findings with zero writer-specific code. The label semantics double as the diff: `[base]`-only = fixed by the PR, `[target]`-only = introduced, both = pre-existing.
 
-The runner lives in `internal/lint` and is spliced into `processOneApp`
-(`internal/app/app.go`) after `DiffManifests`; sides with an empty render
-(new/deleted apps) are skipped. Error contract: the process outcome is the only
-health signal — stdout lines are always kept, and spawn failure, timeout, or
-exit ≠ 0 appends one non-fatal self-identifying warning line. Stdout content
-never influences error detection; tools that exit non-zero on findings
-(kyverno, conftest) are expected to sit behind a jq adapter that exits 0
-(README documents the `jq -rn 'input | ...'` pattern, which also catches a
-crashed upstream tool producing empty output). `ARGOCDF_LINT` can carry only a
-single command (StringArray-via-env limitation); repeat `--lint` for several.
+The runner lives in `internal/lint` and is spliced into `processOneApp` (`internal/app/app.go`) after `DiffManifests`; sides with an empty render (new/deleted apps) are skipped. Error contract: the process outcome is the only health signal — stdout lines are always kept, and spawn failure, timeout, or exit ≠ 0 appends one non-fatal self-identifying warning line. Stdout content never influences error detection; tools that exit non-zero on findings (kyverno, conftest) are expected to sit behind a jq adapter that exits 0 (README documents the `jq -rn 'input | ...'` pattern, which also catches a crashed upstream tool producing empty output). `ARGOCDF_LINT` can carry only a single command (StringArray-via-env limitation); repeat `--lint` for several.
 
 ## Running the Tool
 
@@ -170,7 +140,10 @@ single command (StringArray-via-env limitation); repeat `--lint` for several.
 ./argocdf --base main --target feature-branch
 
 # Different cluster/namespace
-./argocdf --context prod-cluster -n argocd
+./argocdf --context prod-cluster --argocd-namespace argocd
+
+# Apps-in-any-namespace (exhaustive list; globs and /regex/ allowed)
+./argocdf --application-namespaces 'argocd,team-*'
 
 # Scan all namespaces
 ./argocdf -A
@@ -190,14 +163,7 @@ single command (StringArray-via-env limitation); repeat `--lint` for several.
 - `html-side-by-side` - Interactive HTML with side-by-side diff
 - `unified` - Patch-compatible unified diff
 
-Markdown formats accept the `split[=N]` option (options ride on the format
-segment, so paths with commas/colons stay intact): a report larger than N bytes
-(default 60000, under GitHub's 65,536-char comment cap) is written as multiple
-self-contained part files — `pr-comment.md`, `pr-comment.2.md`, ... — each with
-the upsert marker, a `part i/N` heading, and balanced `<details>`/fences. Apps
-stay whole within a part; an app that alone exceeds the limit is split at
-resource boundaries; a single oversized resource diff is truncated with a note.
-Packing lives in `internal/output/markdown.go` (`assembleParts`/`packBodies`).
+Markdown formats accept the `split[=N]` option (options ride on the format segment, so paths with commas/colons stay intact): a report larger than N bytes (default 60000, under GitHub's 65,536-char comment cap) is written as multiple self-contained part files — `pr-comment.md`, `pr-comment.2.md`, ... — each with the upsert marker, a `part i/N` heading, and balanced `<details>`/fences. Apps stay whole within a part; an app that alone exceeds the limit is split at resource boundaries; a single oversized resource diff is truncated with a note. Packing lives in `internal/output/markdown.go` (`assembleParts`/`packBodies`).
 
 ```bash
 # Quiet mode with markdown file output
@@ -222,25 +188,13 @@ ARGOCDF_EXTERNAL_DIFF="delta --side-by-side" ./argocdf
 
 ## Configuration & Environment Variables
 
-Configuration flows through Cobra flags into `internal/config.Config`. Every flag
-is also settable via an environment variable named `ARGOCDF_<FLAG>` (flag name
-upper-cased, dashes → underscores), e.g. `--repo-dir` → `ARGOCDF_REPO_DIR`.
+Configuration flows through Cobra flags into `internal/config.Config`. Every flag is also settable via an environment variable named `ARGOCDF_<FLAG>` (flag name upper-cased, dashes → underscores), e.g. `--repo-dir` → `ARGOCDF_REPO_DIR`.
 
-This is wired by `bindEnv` in `cmd/argocdf/main.go`, which runs first in
-`runMain`. It uses **viper `AutomaticEnv()`** with prefix `ARGOCDF` and a
-`-`→`_` key replacer as a pure env lookup — `viper.BindPFlags` is not called
-because it isn't needed (env values are applied directly through `pflag.Set`, so
-they are parsed by each flag's own type and invalid values fail fast with a typed
-error). In this setup `v.IsSet(name)` is true only when the env var is actually
-set (non-empty).
+This is wired by `bindEnv` in `cmd/argocdf/main.go`, which runs first in `runMain`. It uses **viper `AutomaticEnv()`** with prefix `ARGOCDF` and a `-`→`_` key replacer as a pure env lookup — `viper.BindPFlags` is not called because it isn't needed (env values are applied directly through `pflag.Set`, so they are parsed by each flag's own type and invalid values fail fast with a typed error). In this setup `v.IsSet(name)` is true only when the env var is actually set (non-empty).
 
-Precedence — **explicit flag > environment variable > default** — is enforced by
-the `f.Changed` guard in `bindEnv`: flags the user passed on the command line are
-skipped, so their env vars never override them. That guard is the load-bearing
-line; keep it if you refactor this.
+Precedence — **explicit flag > environment variable > default** — is enforced by the `f.Changed` guard in `bindEnv`: flags the user passed on the command line are skipped, so their env vars never override them. That guard is the load-bearing line; keep it if you refactor this.
 
-Two variables are read directly (no flag equivalent): `ARGOCDF_EXTERNAL_DIFF`
-(`internal/output/terminal.go`) and `KUBECONFIG` (`internal/config/detect.go`).
+Two variables are read directly (no flag equivalent): `ARGOCDF_EXTERNAL_DIFF` (`internal/output/terminal.go`) and `KUBECONFIG` (`internal/config/detect.go`).
 
 ## Test Data
 

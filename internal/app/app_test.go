@@ -1157,3 +1157,128 @@ func TestProcessOneAppLintSkipsEmptyTarget(t *testing.T) {
 		t.Errorf("expected the app's resource to diff as removed, got -%d", len(setDiff.Removed))
 	}
 }
+
+// fakeLister fakes the applicationLister seam and records which listing
+// method fetchApplications routed to.
+type fakeLister struct {
+	apps        map[string][]cluster.Application // per-namespace
+	listCalls   []string
+	listNsCalls [][]string
+	allCalls    int
+}
+
+func (f *fakeLister) List(_ context.Context, namespace string) ([]cluster.Application, error) {
+	f.listCalls = append(f.listCalls, namespace)
+	return f.apps[namespace], nil
+}
+
+func (f *fakeLister) ListNamespaces(_ context.Context, namespaces []string) ([]cluster.Application, error) {
+	f.listNsCalls = append(f.listNsCalls, namespaces)
+	var out []cluster.Application
+	for _, ns := range namespaces {
+		out = append(out, f.apps[ns]...)
+	}
+	return out, nil
+}
+
+func (f *fakeLister) ListAllNamespaces(context.Context) ([]cluster.Application, error) {
+	f.allCalls++
+	var out []cluster.Application
+	for _, apps := range f.apps {
+		out = append(out, apps...)
+	}
+	return out, nil
+}
+
+func appInNamespace(name, namespace string) cluster.Application {
+	app := cluster.Application{}
+	app.Name = name
+	app.Namespace = namespace
+	return app
+}
+
+func newNamespaceLister() *fakeLister {
+	return &fakeLister{apps: map[string][]cluster.Application{
+		"argocd": {appInNamespace("root", "argocd")},
+		"team-a": {appInNamespace("a", "team-a")},
+		"team-b": {appInNamespace("b", "team-b")},
+		"ops":    {appInNamespace("o", "ops")},
+	}}
+}
+
+func namespacesOf(apps []cluster.Application) map[string]bool {
+	out := map[string]bool{}
+	for _, a := range apps {
+		out[a.Namespace] = true
+	}
+	return out
+}
+
+func TestFetchApplications_NamespaceRouting(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("unset list scans only the argocd namespace", func(t *testing.T) {
+		lister := newNamespaceLister()
+		a := &App{cfg: &config.Config{ArgoCDNamespace: "argocd"}, appService: lister}
+		apps, err := a.fetchApplications(ctx)
+		if err != nil {
+			t.Fatalf("fetchApplications() error: %v", err)
+		}
+		if len(lister.listCalls) != 1 || lister.listCalls[0] != "argocd" {
+			t.Errorf("List calls = %v, want exactly one for argocd", lister.listCalls)
+		}
+		if lister.allCalls != 0 || len(lister.listNsCalls) != 0 {
+			t.Error("unset list must not trigger multi-namespace or cluster-wide listing")
+		}
+		if !namespacesOf(apps)["argocd"] || len(apps) != 1 {
+			t.Errorf("apps = %v, want only the argocd namespace", namespacesOf(apps))
+		}
+	})
+
+	t.Run("all-literal list uses per-namespace reads, argocd not implicit", func(t *testing.T) {
+		lister := newNamespaceLister()
+		a := &App{
+			cfg:        &config.Config{ArgoCDNamespace: "argocd", ApplicationNamespaces: []string{"team-a", "team-b"}},
+			appService: lister,
+		}
+		apps, err := a.fetchApplications(ctx)
+		if err != nil {
+			t.Fatalf("fetchApplications() error: %v", err)
+		}
+		if len(lister.listNsCalls) != 1 || strings.Join(lister.listNsCalls[0], ",") != "team-a,team-b" {
+			t.Errorf("ListNamespaces calls = %v, want one call with the exact entries", lister.listNsCalls)
+		}
+		if lister.allCalls != 0 || len(lister.listCalls) != 0 {
+			t.Error("literal list must not trigger cluster-wide or single-namespace listing")
+		}
+		got := namespacesOf(apps)
+		if got["argocd"] {
+			t.Error("the argocd namespace must NOT be implicitly included (exhaustive semantics)")
+		}
+		if !got["team-a"] || !got["team-b"] || len(apps) != 2 {
+			t.Errorf("apps namespaces = %v, want exactly team-a and team-b", got)
+		}
+	})
+
+	t.Run("pattern entry lists cluster-wide and filters", func(t *testing.T) {
+		lister := newNamespaceLister()
+		a := &App{
+			cfg:        &config.Config{ArgoCDNamespace: "argocd", ApplicationNamespaces: []string{"team-*"}},
+			appService: lister,
+		}
+		apps, err := a.fetchApplications(ctx)
+		if err != nil {
+			t.Fatalf("fetchApplications() error: %v", err)
+		}
+		if lister.allCalls != 1 {
+			t.Errorf("ListAllNamespaces calls = %d, want 1 for a pattern entry", lister.allCalls)
+		}
+		got := namespacesOf(apps)
+		if got["argocd"] || got["ops"] {
+			t.Errorf("apps namespaces = %v, want non-matching namespaces filtered out", got)
+		}
+		if !got["team-a"] || !got["team-b"] || len(apps) != 2 {
+			t.Errorf("apps namespaces = %v, want exactly the team-* matches", got)
+		}
+	})
+}

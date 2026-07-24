@@ -1,9 +1,13 @@
 package cluster
 
 import (
+	"context"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
 )
 
 func TestConvertOne(t *testing.T) {
@@ -388,5 +392,55 @@ func TestFilterByRepoURL(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// fakeApplicationObject builds a minimal unstructured Application for the
+// dynamic fake client.
+func fakeApplicationObject(name, namespace string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "argoproj.io/v1alpha1",
+		"kind":       "Application",
+		"metadata": map[string]interface{}{
+			"name":      name,
+			"namespace": namespace,
+		},
+		"spec": map[string]interface{}{
+			"project": "default",
+			"source": map[string]interface{}{
+				"repoURL": "https://github.com/example/repo",
+				"path":    "app",
+			},
+			"destination": map[string]interface{}{
+				"namespace": "default",
+			},
+		},
+	}}
+}
+
+func TestListNamespaces(t *testing.T) {
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+		runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{ApplicationGVR: "ApplicationList"},
+		fakeApplicationObject("app-a", "team-a"),
+		fakeApplicationObject("app-b", "team-b"),
+		fakeApplicationObject("root", "argocd"),
+	)
+	svc := NewApplicationService(&Client{dynamicClient: dyn})
+
+	// Duplicate entries are queried once; unlisted namespaces stay out.
+	apps, err := svc.ListNamespaces(context.Background(), []string{"team-a", "team-b", "team-a"})
+	if err != nil {
+		t.Fatalf("ListNamespaces() error: %v", err)
+	}
+	if len(apps) != 2 {
+		t.Fatalf("ListNamespaces() = %d apps, want 2 (deduplicated, argocd excluded)", len(apps))
+	}
+	got := map[string]bool{}
+	for _, app := range apps {
+		got[app.Namespace] = true
+	}
+	if !got["team-a"] || !got["team-b"] || got["argocd"] {
+		t.Errorf("ListNamespaces() namespaces = %v, want exactly team-a and team-b", got)
 	}
 }

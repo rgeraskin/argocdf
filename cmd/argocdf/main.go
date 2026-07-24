@@ -31,25 +31,26 @@ var (
 	Date    = ""
 
 	// Config flags
-	kubeconfigPath string
-	kubeContext    string
-	namespace      string
-	allNamespaces  bool
-	repoPath       string
-	repoURL        string
-	baseBranch     string
-	targetBranch   string
-	kubeVersion    string
-	stdoutFormat   string
-	fileOutputs    []string
-	quiet          bool
-	verbose        bool
-	noRecursive    bool
-	maxDepth       int
-	concurrency    int
-	unifiedContext int
-	exitCode       bool
-	marker         string
+	kubeconfigPath        string
+	kubeContext           string
+	argocdNamespace       string
+	applicationNamespaces []string
+	allNamespaces         bool
+	repoPath              string
+	repoURL               string
+	baseBranch            string
+	targetBranch          string
+	kubeVersion           string
+	stdoutFormat          string
+	fileOutputs           []string
+	quiet                 bool
+	verbose               bool
+	noRecursive           bool
+	maxDepth              int
+	concurrency           int
+	unifiedContext        int
+	exitCode              bool
+	marker                string
 
 	// Kustomize build options
 	kustomizeEnableHelm     bool
@@ -63,6 +64,9 @@ var (
 
 	// Render engine selection
 	renderer string
+
+	// Repository credential source
+	repoCreds string
 
 	// Render cache options
 	noCache  bool
@@ -170,8 +174,15 @@ Examples:
 	// Kubernetes flags
 	rootCmd.Flags().StringVarP(&kubeconfigPath, "kubeconfig", "k", "", "Path to kubeconfig file")
 	rootCmd.Flags().StringVar(&kubeContext, "context", config.DefaultContext, "Kubernetes context to use")
-	rootCmd.Flags().StringVarP(&namespace, "namespace", "n", config.DefaultNamespace, "ArgoCD namespace to search")
-	rootCmd.Flags().BoolVarP(&allNamespaces, "all-namespaces", "A", false, "Search all namespaces")
+	rootCmd.Flags().StringVar(&argocdNamespace, "argocd-namespace", config.DefaultNamespace,
+		"ArgoCD control-plane namespace: repository secrets and settings are read here, "+
+			"and Applications are listed here unless --application-namespaces is set")
+	rootCmd.Flags().StringSliceVar(&applicationNamespaces, "application-namespaces", nil,
+		"Comma-separated list of namespaces to scan for Applications (exhaustive when set — "+
+			"include the ArgoCD namespace explicitly if wanted); entries may be literal names, "+
+			"globs like 'team-*', or /regex/")
+	rootCmd.Flags().BoolVarP(&allNamespaces, "all-namespaces", "A", false,
+		"Scan all namespaces (same as --application-namespaces='*')")
 
 	// Git flags
 	rootCmd.Flags().StringVarP(&repoPath, "repo-dir", "r", "", "Path to git repository (default: current directory)")
@@ -184,6 +195,10 @@ Examples:
 	rootCmd.Flags().StringVar(&renderer, "renderer", config.DefaultRenderer,
 		"Render engine: 'native' (argocdf's own helm/kustomize pipeline) or 'argocd' "+
 			"(ArgoCD's repo-server code, for exact ArgoCD render parity)")
+	rootCmd.Flags().StringVar(&repoCreds, "repo-creds", config.DefaultRepoCreds,
+		"Repository credential source: 'cluster' (ArgoCD repository secrets from --argocd-namespace; "+
+			"read failures are fatal), 'local' (your helm config: registry logins and repositories.yaml "+
+			"entries), or 'none' (anonymous)")
 
 	// Kustomize build options
 	rootCmd.Flags().BoolVar(&kustomizeEnableHelm, "kustomize-enable-helm", false,
@@ -195,9 +210,9 @@ Examples:
 
 	// Helm options
 	rootCmd.Flags().BoolVar(&helmSkipRefresh, "helm-skip-refresh", true,
-		"Skip refreshing repository cache during helm dependency build")
+		"Skip refreshing repository cache during helm dependency build (native renderer only)")
 	rootCmd.Flags().BoolVar(&helmAddRepos, "helm-add-repos", false,
-		"Make chart dependency repos resolvable before dependency build: refresh a matching existing entry, or helm repo add + update unknown URLs; mutates the local helm config/cache, intended for CI")
+		"Make chart dependency repos resolvable before dependency build: refresh a matching existing entry, or helm repo add + update unknown URLs; mutates the local helm config/cache, intended for CI (native renderer only)")
 	rootCmd.Flags().BoolVar(&noAPIVersions, "no-api-versions", false,
 		"Do not pass cluster-discovered API versions to helm via --api-versions")
 
@@ -380,7 +395,8 @@ func runMain(cmd *cobra.Command, args []string) error {
 	cfg := &config.Config{
 		KubeconfigPath:          kubeconfigPath,
 		Context:                 kubeContext,
-		Namespace:               namespace,
+		ArgoCDNamespace:         argocdNamespace,
+		ApplicationNamespaces:   applicationNamespaces,
 		AllNamespaces:           allNamespaces,
 		RepoPath:                repoPath,
 		RepoURL:                 repoURL,
@@ -400,6 +416,7 @@ func runMain(cmd *cobra.Command, args []string) error {
 		HelmAddRepos:            helmAddRepos,
 		NoAPIVersions:           noAPIVersions,
 		Renderer:                renderer,
+		RepoCreds:               repoCreds,
 		NoCache:                 noCache,
 		CacheDir:                cacheDir,
 		ExitCode:                exitCode,
@@ -422,6 +439,16 @@ func runMain(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Explicitly set native-only helm flags do nothing under the argocd
+	// renderer; say so instead of silently ignoring them. bindEnv marks
+	// env-provided flags as Changed, so env values are covered too.
+	for _, warning := range cfg.NativeOnlyFlagWarnings(
+		cmd.Flags().Changed("helm-skip-refresh"),
+		cmd.Flags().Changed("helm-add-repos"),
+	) {
+		logger.Warn(warning)
+	}
+
 	logger.Info("Using repository URL", "repoURL", cfg.RepoURL)
 
 	logger.Debug("Configuration",
@@ -430,7 +457,8 @@ func runMain(cmd *cobra.Command, args []string) error {
 		"base", cfg.BaseBranch,
 		"target", cfg.TargetBranch,
 		"context", cfg.Context,
-		"namespace", cfg.Namespace,
+		"argocdNamespace", cfg.ArgoCDNamespace,
+		"applicationNamespaces", cfg.ApplicationNamespaces,
 	)
 
 	// Create and run the app

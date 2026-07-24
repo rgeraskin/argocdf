@@ -273,6 +273,28 @@ func TestConfigValidate(t *testing.T) {
 			errMsg:  "invalid renderer",
 		},
 		{
+			name: "valid repo-creds sources",
+			config: &Config{
+				RepoPath:     tmpDir,
+				StdoutFormat: "fields",
+				MaxDepth:     10,
+				Concurrency:  1,
+				RepoCreds:    RepoCredsLocal,
+			},
+		},
+		{
+			name: "invalid repo-creds source",
+			config: &Config{
+				RepoPath:     tmpDir,
+				StdoutFormat: "fields",
+				MaxDepth:     10,
+				Concurrency:  1,
+				RepoCreds:    "vault",
+			},
+			wantErr: true,
+			errMsg:  "invalid repo-creds source",
+		},
+		{
 			name: "negative lint timeout",
 			config: &Config{
 				RepoPath:     tmpDir,
@@ -353,10 +375,40 @@ func TestConfigWithDefaults(t *testing.T) {
 			desc:   "Context should be set to default",
 		},
 		{
-			name:   "sets default namespace",
+			name:   "sets default argocd namespace",
 			config: &Config{},
-			check:  func(c *Config) bool { return c.Namespace == DefaultNamespace },
-			desc:   "Namespace should be set to default",
+			check:  func(c *Config) bool { return c.ArgoCDNamespace == DefaultNamespace },
+			desc:   "ArgoCDNamespace should be set to default",
+		},
+		{
+			name:   "sets default repo-creds source",
+			config: &Config{},
+			check:  func(c *Config) bool { return c.RepoCreds == RepoCredsCluster },
+			desc:   "RepoCreds should default to cluster",
+		},
+		{
+			name:   "all-namespaces normalizes to the match-everything pattern",
+			config: &Config{AllNamespaces: true},
+			check: func(c *Config) bool {
+				return len(c.ApplicationNamespaces) == 1 && c.ApplicationNamespaces[0] == "*"
+			},
+			desc: "-A should become ApplicationNamespaces=[\"*\"]",
+		},
+		{
+			name:   "all-namespaces overrides an explicit namespace list",
+			config: &Config{AllNamespaces: true, ApplicationNamespaces: []string{"team-a"}},
+			check: func(c *Config) bool {
+				return len(c.ApplicationNamespaces) == 1 && c.ApplicationNamespaces[0] == "*"
+			},
+			desc: "'*' subsumes any other entry",
+		},
+		{
+			name:   "application namespaces list is preserved without -A",
+			config: &Config{ApplicationNamespaces: []string{"team-a", "team-*"}},
+			check: func(c *Config) bool {
+				return len(c.ApplicationNamespaces) == 2 && c.ApplicationNamespaces[1] == "team-*"
+			},
+			desc: "explicit list should be preserved",
 		},
 		{
 			name:   "sets default stdout format",
@@ -377,10 +429,10 @@ func TestConfigWithDefaults(t *testing.T) {
 			desc:   "Custom context should be preserved",
 		},
 		{
-			name:   "preserves custom namespace",
-			config: &Config{Namespace: "custom-ns"},
-			check:  func(c *Config) bool { return c.Namespace == "custom-ns" },
-			desc:   "Custom namespace should be preserved",
+			name:   "preserves custom argocd namespace",
+			config: &Config{ArgoCDNamespace: "custom-ns"},
+			check:  func(c *Config) bool { return c.ArgoCDNamespace == "custom-ns" },
+			desc:   "Custom ArgoCD namespace should be preserved",
 		},
 		{
 			name:   "preserves custom stdout format",
@@ -412,14 +464,41 @@ func TestNew(t *testing.T) {
 	if cfg.Context != DefaultContext {
 		t.Errorf("New() Context = %v, want %v", cfg.Context, DefaultContext)
 	}
-	if cfg.Namespace != DefaultNamespace {
-		t.Errorf("New() Namespace = %v, want %v", cfg.Namespace, DefaultNamespace)
+	if cfg.ArgoCDNamespace != DefaultNamespace {
+		t.Errorf("New() ArgoCDNamespace = %v, want %v", cfg.ArgoCDNamespace, DefaultNamespace)
+	}
+	if cfg.RepoCreds != DefaultRepoCreds {
+		t.Errorf("New() RepoCreds = %v, want %v", cfg.RepoCreds, DefaultRepoCreds)
 	}
 	if cfg.StdoutFormat != DefaultStdoutFormat {
 		t.Errorf("New() StdoutFormat = %v, want %v", cfg.StdoutFormat, DefaultStdoutFormat)
 	}
 	if cfg.MaxDepth != DefaultMaxDepth {
 		t.Errorf("New() MaxDepth = %v, want %v", cfg.MaxDepth, DefaultMaxDepth)
+	}
+}
+
+func TestNativeOnlyFlagWarnings(t *testing.T) {
+	tests := []struct {
+		name           string
+		renderer       string
+		skipRefreshSet bool
+		addReposSet    bool
+		wantCount      int
+	}{
+		{"native renderer never warns", RendererNative, true, true, 0},
+		{"argocd renderer with flag defaults never warns", RendererArgoCD, false, false, 0},
+		{"argocd renderer warns per explicitly set flag", RendererArgoCD, true, true, 2},
+		{"argocd renderer warns for helm-add-repos alone", RendererArgoCD, false, true, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := &Config{Renderer: tt.renderer}
+			got := c.NativeOnlyFlagWarnings(tt.skipRefreshSet, tt.addReposSet)
+			if len(got) != tt.wantCount {
+				t.Errorf("NativeOnlyFlagWarnings() = %v, want %d warnings", got, tt.wantCount)
+			}
+		})
 	}
 }
 

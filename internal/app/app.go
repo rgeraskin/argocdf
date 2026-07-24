@@ -19,6 +19,7 @@ import (
 	"github.com/rgeraskin/argocdf/internal/config"
 	"github.com/rgeraskin/argocdf/internal/diff"
 	"github.com/rgeraskin/argocdf/internal/git"
+	"github.com/rgeraskin/argocdf/internal/helmconfig"
 	"github.com/rgeraskin/argocdf/internal/lint"
 	"github.com/rgeraskin/argocdf/internal/output"
 	"github.com/rgeraskin/argocdf/internal/render"
@@ -58,13 +59,22 @@ type applicationRenderer interface {
 	RenderApplication(ctx context.Context, app *cluster.Application, repoPath, revision string) (*render.RenderResult, error)
 }
 
+// applicationLister is the slice of cluster.ApplicationService that App uses
+// to fetch Applications from the cluster — a seam so tests can pin the
+// namespace-routing behavior of fetchApplications without a live cluster.
+type applicationLister interface {
+	List(ctx context.Context, namespace string) ([]cluster.Application, error)
+	ListNamespaces(ctx context.Context, namespaces []string) ([]cluster.Application, error)
+	ListAllNamespaces(ctx context.Context) ([]cluster.Application, error)
+}
+
 // App is the main application orchestrator.
 type App struct {
 	factory    *Factory
 	cfg        *config.Config
 	logger     *log.Logger
 	kubeClient *cluster.Client
-	appService *cluster.ApplicationService
+	appService applicationLister
 	repo       *git.Repository
 	renderer   applicationRenderer
 	differ     *diff.ManifestDiffer
@@ -117,11 +127,11 @@ func (a *App) Run(ctx context.Context) error {
 	if contextName == "" {
 		contextName = "(current)"
 	}
-	namespace := a.cfg.Namespace
-	if a.cfg.AllNamespaces {
-		namespace = "(all)"
+	namespaces := a.cfg.ArgoCDNamespace
+	if len(a.cfg.ApplicationNamespaces) > 0 {
+		namespaces = strings.Join(a.cfg.ApplicationNamespaces, ",")
 	}
-	a.logger.Info("Fetching ArgoCD applications...", "context", contextName, "namespace", namespace)
+	a.logger.Info("Fetching ArgoCD applications...", "context", contextName, "namespaces", namespaces)
 	apps, err := a.fetchApplications(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to fetch applications: %w", err)
@@ -253,8 +263,35 @@ func (a *App) initialize(ctx context.Context) error {
 		a.logger.Debug("Render cache enabled", "dir", a.cache.Dir())
 	}
 
+	// Load repository credentials per --repo-creds. Load failures are fatal
+	// in cluster and local modes — no silent degradation; the message names
+	// the escape hatches. `none` renders anonymously. A cluster (or helm
+	// config) WITHOUT credentials is not a failure: empty lists render
+	// credential-less.
+	var creds *cluster.RepoCredentials
+	switch a.cfg.RepoCreds {
+	case config.RepoCredsCluster:
+		creds, err = a.kubeClient.LoadRepoCredentials(ctx, a.cfg.ArgoCDNamespace)
+		if err != nil {
+			return fmt.Errorf(
+				"cannot read ArgoCD repository secrets in namespace %q: %w\n"+
+					"fix RBAC, or use --repo-creds=local (your helm config) / --repo-creds=none (anonymous)",
+				a.cfg.ArgoCDNamespace, err)
+		}
+		a.logger.Debug("Loaded repository credentials from cluster secrets",
+			"helmRepos", len(creds.HelmRepos), "ociRepos", len(creds.OCIRepos),
+			"helmRepoCreds", len(creds.HelmRepoCreds), "ociRepoCreds", len(creds.OCIRepoCreds))
+	case config.RepoCredsLocal:
+		creds, err = helmconfig.LoadLocalRepoCredentials()
+		if err != nil {
+			return fmt.Errorf("cannot load local helm credentials: %w", err)
+		}
+		a.logger.Debug("Loaded repository credentials from local helm config",
+			"helmRepos", len(creds.HelmRepos))
+	}
+
 	// Create renderer
-	a.renderer = a.factory.CreateRenderFactory(kubeVersion, apiVersions)
+	a.renderer = a.factory.CreateRenderFactory(kubeVersion, apiVersions, creds)
 
 	// Create differ and discoverer
 	a.differ = a.factory.CreateManifestDiffer()
@@ -407,12 +444,31 @@ func (a *App) warnIfWorkingTreeDirty() {
 	}
 }
 
-// fetchApplications retrieves ArgoCD applications from the cluster.
+// fetchApplications retrieves ArgoCD applications from the configured
+// namespaces. With --application-namespaces unset, only the ArgoCD
+// control-plane namespace is scanned. An all-literal list is served by
+// per-namespace List calls (strictly namespace-scoped RBAC suffices); any
+// glob or /regex/ entry requires a cluster-wide list, filtered afterwards
+// with ArgoCD's own pattern matcher.
 func (a *App) fetchApplications(ctx context.Context) ([]cluster.Application, error) {
-	if a.cfg.AllNamespaces {
-		return a.appService.ListAllNamespaces(ctx)
+	entries := a.cfg.ApplicationNamespaces
+	if len(entries) == 0 {
+		return a.appService.List(ctx, a.cfg.ArgoCDNamespace)
 	}
-	return a.appService.List(ctx, a.cfg.Namespace)
+	if cluster.AllLiteralNamespaces(entries) {
+		return a.appService.ListNamespaces(ctx, entries)
+	}
+	apps, err := a.appService.ListAllNamespaces(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var matched []cluster.Application
+	for _, application := range apps {
+		if cluster.MatchesNamespacePatterns(application.Namespace, entries) {
+			matched = append(matched, application)
+		}
+	}
+	return matched, nil
 }
 
 // filterAffectedApps filters applications that are affected by the changed files.

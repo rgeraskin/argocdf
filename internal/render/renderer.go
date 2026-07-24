@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 
+	argoappv1 "github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
+
 	"github.com/rgeraskin/argocdf/internal/cluster"
 	"github.com/rgeraskin/argocdf/internal/types"
 )
@@ -61,6 +63,20 @@ type RenderOptions struct {
 	// to an immutable version) are cached and reused across runs. Empty
 	// disables the chart download cache (e.g. under --no-cache).
 	ChartCacheDir string
+
+	// Repository credentials (--repo-creds). Render code is mode-blind:
+	// cluster and local modes differ only in what fills these fields, and
+	// `none` leaves them empty. The four lists are kept separate so the
+	// argocd engine can compose Repos/HelmRepoCreds per source with ArgoCD's
+	// IsOCI gate, exactly as the application controller does.
+	HelmRepos     []*argoappv1.Repository
+	OCIRepos      []*argoappv1.Repository
+	HelmRepoCreds []*argoappv1.RepoCreds
+	OCIRepoCreds  []*argoappv1.RepoCreds
+	// ResolveRepo returns the configured Repository for a source repo URL
+	// (never nil on success — unknown URLs yield a credential-less default).
+	// nil means no credential source is configured.
+	ResolveRepo func(ctx context.Context, repoURL, project string) (*argoappv1.Repository, error)
 }
 
 // RenderResult contains the result of rendering an application.
