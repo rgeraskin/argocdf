@@ -241,13 +241,11 @@ func (a *App) initialize(ctx context.Context) error {
 	}
 
 	// Get Kubernetes version for rendering
-	kubeVersion := a.cfg.KubeVersion
-	if kubeVersion == "" {
-		kubeVersion, err = a.kubeClient.GetKubeVersion(ctx)
-		if err != nil {
-			a.logger.Warn("Failed to get cluster version, using default", "error", err)
-			kubeVersion = config.DefaultKubeVersionFallback
-		}
+	kubeVersion, kvErr := resolveKubeVersion(a.cfg.KubeVersion, func() (string, error) {
+		return a.kubeClient.GetKubeVersion(ctx)
+	})
+	if kvErr != nil {
+		a.logger.Warn("Failed to get cluster version, using default", "error", kvErr)
 	}
 	a.logger.Debug("Using Kubernetes version", "version", kubeVersion)
 	a.kubeVersion = kubeVersion
@@ -333,6 +331,23 @@ func (a *App) initialize(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// resolveKubeVersion returns the Kubernetes version to render with. An
+// explicitly configured version wins and skips cluster detection entirely
+// (the e2e kube-version-override behavior); otherwise the version is detected
+// from the cluster, falling back to DefaultKubeVersionFallback when detection
+// fails (the returned error is the detection error, for logging — the
+// returned version is always usable).
+func resolveKubeVersion(explicit string, detect func() (string, error)) (string, error) {
+	if explicit != "" {
+		return explicit, nil
+	}
+	v, err := detect()
+	if err != nil {
+		return config.DefaultKubeVersionFallback, err
+	}
+	return v, nil
 }
 
 // resolveBaseRef resolves the merge base of the base and target branches so

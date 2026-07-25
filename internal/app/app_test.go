@@ -1375,3 +1375,31 @@ func TestProcessApplicationsDeterministicOrder(t *testing.T) {
 		t.Errorf("order differs between runs:\n first: %v\nsecond: %v", first, second)
 	}
 }
+
+// TestResolveKubeVersion pins the --kube-version precedence contract:
+// an explicit version wins WITHOUT consulting the cluster; detection is used
+// otherwise; detection failure falls back to the default (surfacing the error
+// for logging only). This replaced the e2e kube-version-override case.
+func TestResolveKubeVersion(t *testing.T) {
+	detectCalled := false
+	v, err := resolveKubeVersion("1.29.0", func() (string, error) {
+		detectCalled = true
+		return "1.34.8", nil
+	})
+	if err != nil || v != "1.29.0" {
+		t.Errorf("explicit: got (%q, %v), want (\"1.29.0\", nil)", v, err)
+	}
+	if detectCalled {
+		t.Error("explicit version must skip cluster detection entirely")
+	}
+
+	v, err = resolveKubeVersion("", func() (string, error) { return "1.34.8", nil })
+	if err != nil || v != "1.34.8" {
+		t.Errorf("detected: got (%q, %v), want (\"1.34.8\", nil)", v, err)
+	}
+
+	v, err = resolveKubeVersion("", func() (string, error) { return "", errors.New("no cluster") })
+	if err == nil || v != config.DefaultKubeVersionFallback {
+		t.Errorf("fallback: got (%q, %v), want (%q, detection error)", v, err, config.DefaultKubeVersionFallback)
+	}
+}
