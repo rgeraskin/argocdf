@@ -6,6 +6,7 @@ require (
 	github.com/argoproj/argo-cd/v3 v3.3.11
 	github.com/charmbracelet/lipgloss v0.10.0
 	github.com/charmbracelet/log v0.4.0
+	github.com/go-logr/logr v1.4.3
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2
 	github.com/sirupsen/logrus v1.9.3
 	github.com/spf13/cobra v1.10.2
@@ -15,6 +16,7 @@ require (
 	k8s.io/api v0.34.0
 	k8s.io/apimachinery v0.34.0
 	k8s.io/client-go v0.34.0
+	k8s.io/klog/v2 v2.130.1
 	sigs.k8s.io/yaml v1.6.0
 )
 
@@ -69,7 +71,6 @@ require (
 	github.com/go-git/go-billy/v5 v5.6.2 // indirect
 	github.com/go-git/go-git/v5 v5.14.0 // indirect
 	github.com/go-logfmt/logfmt v0.6.0 // indirect
-	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-openapi/jsonpointer v0.22.1 // indirect
 	github.com/go-openapi/jsonreference v0.21.3 // indirect
@@ -180,7 +181,6 @@ require (
 	k8s.io/component-base v0.34.0 // indirect
 	k8s.io/component-helpers v0.34.0 // indirect
 	k8s.io/controller-manager v0.34.0 // indirect
-	k8s.io/klog/v2 v2.130.1 // indirect
 	k8s.io/kube-aggregator v0.34.0 // indirect
 	k8s.io/kube-openapi v0.0.0-20250710124328-f3f2b991d03b // indirect
 	k8s.io/kubectl v0.34.0 // indirect

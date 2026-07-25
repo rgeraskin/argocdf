@@ -5,16 +5,23 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
 
+	argocommon "github.com/argoproj/argo-cd/v3/common"
 	"github.com/charmbracelet/log"
+	"github.com/go-logr/logr"
+	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
+	"k8s.io/klog/v2"
 
 	"github.com/rgeraskin/argocdf/internal/app"
 	"github.com/rgeraskin/argocdf/internal/config"
@@ -347,6 +354,136 @@ func humanizeBytes(n int64) string {
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
+// logrusForwarder is a logrus hook that re-emits every record through
+// argocdf's own logger, so dependency output carries the same timestamped
+// format and a source prefix instead of logrus's own formatting.
+type logrusForwarder struct {
+	logger *log.Logger
+}
+
+func (h *logrusForwarder) Levels() []logrus.Level { return logrus.AllLevels }
+
+func (h *logrusForwarder) Fire(e *logrus.Entry) error {
+	keys := make([]string, 0, len(e.Data))
+	for k := range e.Data {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	args := make([]any, 0, len(keys)*2)
+	for _, k := range keys {
+		args = append(args, k, e.Data[k])
+	}
+	switch e.Level {
+	case logrus.PanicLevel, logrus.FatalLevel, logrus.ErrorLevel:
+		h.logger.Error(e.Message, args...)
+	case logrus.WarnLevel:
+		h.logger.Warn(e.Message, args...)
+	case logrus.InfoLevel:
+		h.logger.Info(e.Message, args...)
+	default:
+		h.logger.Debug(e.Message, args...)
+	}
+	return nil
+}
+
+// klogHandler adapts klog's slog bridge to argocdf's logger. klog encodes
+// verbosity as NEGATIVE slog levels (V(n) → level -n), which charm's level
+// map doesn't know — unmapped levels would render as INFO, leaking V(8)
+// internals like per-request body hexdumps. Drop records below DEBUG (V > 4)
+// and clamp the rest of the sub-info range to DEBUG.
+type klogHandler struct{ inner slog.Handler }
+
+func (h klogHandler) Enabled(ctx context.Context, level slog.Level) bool {
+	if level < slog.LevelDebug {
+		return false
+	}
+	if level < slog.LevelInfo {
+		level = slog.LevelDebug
+	}
+	return h.inner.Enabled(ctx, level)
+}
+
+func (h klogHandler) Handle(ctx context.Context, r slog.Record) error {
+	if r.Level < slog.LevelInfo {
+		r.Level = slog.LevelDebug
+	}
+	// client-go reports a watch aborted by its caller's own context
+	// cancellation at error severity — for argocdf that cancellation is the
+	// deliberate informer shutdown after credential loading (repocreds.go),
+	// and whether it fires mid-request is a timing race. Demote that expected
+	// case so ERRO stays reserved for real watch failures (RBAC, network).
+	if r.Level >= slog.LevelError && recordErrIsContextCanceled(r) {
+		r.Level = slog.LevelDebug
+	}
+	return h.inner.Handle(ctx, r)
+}
+
+// recordErrIsContextCanceled reports whether the record's "err" attribute
+// carries a context.Canceled, in any wrapping.
+func recordErrIsContextCanceled(r slog.Record) bool {
+	canceled := false
+	r.Attrs(func(a slog.Attr) bool {
+		if a.Key != "err" {
+			return true
+		}
+		if err, ok := a.Value.Any().(error); ok && errors.Is(err, context.Canceled) {
+			canceled = true
+		} else if strings.Contains(fmt.Sprintf("%v", a.Value.Any()), context.Canceled.Error()) {
+			canceled = true
+		}
+		return !canceled
+	})
+	return canceled
+}
+
+func (h klogHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return klogHandler{inner: h.inner.WithAttrs(attrs)}
+}
+
+func (h klogHandler) WithGroup(name string) slog.Handler {
+	return klogHandler{inner: h.inner.WithGroup(name)}
+}
+
+// configureDependencyLogging routes the process-global log channels of
+// argocdf's libraries through argocdf's own logger, quieted unless --verbose.
+// Three independent channels:
+//   - ArgoCD logs through the global logrus logger (settings informers,
+//     GenerateManifests); argocdf itself does not use logrus. Records are
+//     re-emitted via our logger under the "argocd" prefix — errors only,
+//     unless --verbose keeps the full stream as a debug channel.
+//   - ArgoCD's exec tracer (util/exec) builds a FRESH logrus logger per
+//     command from ARGOCD_LOG_LEVEL/ARGOCD_LOG_FORMAT, unreachable by the
+//     hook above. BOTH engines reach it — the native engine through ArgoCD's
+//     chart client (chartfetch.go). Default it to text (JSON otherwise) and,
+//     without --verbose, to errors-only; explicit values are respected either
+//     way, so ARGOCD_LOG_LEVEL=info stays available as a render debug channel
+//     even in quiet runs.
+//   - client-go logs through klog — e.g. the reflector reporting the EXPECTED
+//     watch cancellation when ArgoCD's settings informers shut down after
+//     credential loading. Real API failures surface as returned errors, so
+//     klog output is dropped entirely unless --verbose, where it rides our
+//     logger under the "client-go" prefix via klog's slog bridge.
+func configureDependencyLogging(logger *log.Logger, debug bool) {
+	logrus.SetOutput(io.Discard)
+	logrus.AddHook(&logrusForwarder{logger: logger.WithPrefix("argocd")})
+	if !debug {
+		logrus.SetLevel(logrus.ErrorLevel)
+	}
+
+	if os.Getenv(argocommon.EnvLogFormat) == "" {
+		_ = os.Setenv(argocommon.EnvLogFormat, "text")
+	}
+	if !debug && os.Getenv(argocommon.EnvLogLevel) == "" {
+		_ = os.Setenv(argocommon.EnvLogLevel, "error")
+	}
+
+	if debug {
+		klog.SetSlogLogger(slog.New(klogHandler{inner: logger.WithPrefix("client-go")}))
+	} else {
+		klog.SetLogger(logr.Discard())
+	}
+}
+
 func runMain(cmd *cobra.Command, args []string) error {
 	// Seed flags from ARGOCDF_* environment variables before anything reads them,
 	// so env values behave exactly like flags for the rest of the run.
@@ -375,6 +512,8 @@ func runMain(cmd *cobra.Command, args []string) error {
 		ReportTimestamp: true,
 		Level:           logLevel,
 	})
+
+	configureDependencyLogging(logger, logLevel == log.DebugLevel)
 
 	// Handle quiet flag (alias for --stdout none)
 	if quiet {

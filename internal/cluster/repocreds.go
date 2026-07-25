@@ -9,7 +9,6 @@ import (
 	argoappv1 "github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
 	"github.com/argoproj/argo-cd/v3/util/db"
 	"github.com/argoproj/argo-cd/v3/util/settings"
-	"github.com/sirupsen/logrus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 )
@@ -67,12 +66,6 @@ func (c *Client) LoadRepoCredentials(ctx context.Context, namespace string) (*Re
 // loadRepoCredentials is the clientset-generic core of LoadRepoCredentials,
 // separated so tests can drive it with a fake clientset.
 func loadRepoCredentials(ctx context.Context, clientset kubernetes.Interface, namespace string) (*RepoCredentials, error) {
-	// ArgoCD's settings manager logs through the process-global logrus logger
-	// at Info level ("Starting configmap/secret informers", ...). argocdf does
-	// not use logrus itself; keep only errors. NewArgoCDRenderer sets the same
-	// level, but it is constructed after credentials are loaded.
-	logrus.SetLevel(logrus.ErrorLevel)
-
 	// Preflight: the settings manager's first use lazily starts secret and
 	// configmap informers and waits for their caches with NO internal timeout
 	// — with forbidden RBAC that wait blocks until its context dies. A direct

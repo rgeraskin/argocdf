@@ -25,13 +25,11 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/argoproj/argo-cd/v3/common"
 	argoappv1 "github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
 	"github.com/argoproj/argo-cd/v3/reposerver/apiclient"
 	"github.com/argoproj/argo-cd/v3/reposerver/repository"
 	argogit "github.com/argoproj/argo-cd/v3/util/git"
 	utilio "github.com/argoproj/argo-cd/v3/util/io"
-	"github.com/sirupsen/logrus"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"sigs.k8s.io/yaml"
 
@@ -74,19 +72,6 @@ type ArgoCDRenderer struct {
 // login`/`logout` (on macOS those land in the shared system keychain via
 // ORAS native-store detection and race across concurrent renders).
 func NewArgoCDRenderer(opts RenderOptions) (*ArgoCDRenderer, error) {
-	// GenerateManifests logs through the process-global logrus logger, which
-	// argocdf does not otherwise use. Keep only errors; real failures are
-	// returned as errors and surfaced by argocdf's own logging.
-	logrus.SetLevel(logrus.ErrorLevel)
-	// ArgoCD's exec tracer (util/exec) builds a FRESH logrus logger per
-	// command from ARGOCD_LOG_LEVEL/ARGOCD_LOG_FORMAT (default: info + JSON),
-	// which would print a JSON "Trace" line for every helm/kustomize run.
-	// Default it to errors-only, but respect an explicitly set value so
-	// ARGOCD_LOG_LEVEL=info remains available as a render debug channel.
-	if os.Getenv(common.EnvLogLevel) == "" {
-		_ = os.Setenv(common.EnvLogLevel, "error")
-	}
-
 	r := &ArgoCDRenderer{}
 	registryConfig := opts.HelmRegistryConfig
 	if registryConfig == "" {
