@@ -19,6 +19,7 @@ package render
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -227,6 +228,22 @@ func (r *ArgoCDRenderer) renderSource(
 	// parallel waves can. Reuses the same per-path mutex as the native engine.
 	mu := chartDepMutex(appPath)
 	mu.Lock()
+	// ArgoCD applies kustomize overrides (namePrefix, images, patches, ...) by
+	// rewriting kustomization.yaml IN PLACE (`kustomize edit` plus a direct
+	// write for patches — util/kustomize touches no other file). The
+	// repo-server renders from managed checkouts so that mutation is invisible
+	// there; argocdf renders every app from a per-side SHARED worktree, where
+	// it would leak into later renders of the same path (helm's charts/ writes
+	// are content-identical across apps and safe to share; kustomize edits are
+	// app-specific and are not). Snapshot the kustomization file under the
+	// mutex and restore it afterwards — even when the render fails, since the
+	// edit may have already happened. A restore failure is an error: a
+	// poisoned worktree would silently corrupt every later render of the path.
+	restoreKustomization, err := snapshotKustomization(appPath)
+	if err != nil {
+		mu.Unlock()
+		return nil, "", err
+	}
 	resp, err := repository.GenerateManifests(
 		ctx, appPath, repoRoot, revision, q,
 		false, // isLocal=false gives the ISOLATED temp helm home (XDG_*, HELM_CONFIG_HOME)
@@ -234,6 +251,7 @@ func (r *ArgoCDRenderer) renderSource(
 		maxCombinedDirectoryManifestsSize,
 		tempPaths,
 	)
+	err = errors.Join(err, restoreKustomization())
 	mu.Unlock()
 	if err != nil {
 		return nil, "", err
@@ -244,6 +262,39 @@ func (r *ArgoCDRenderer) renderSource(
 		return nil, "", err
 	}
 	return manifests, mapSourceType(resp.SourceType), nil
+}
+
+// snapshotKustomization captures the kustomization file in dir, if one
+// exists, and returns a restore func that writes the original bytes back
+// (preserving mode). Kustomize accepts exactly one kustomization file per
+// directory; the first match wins, mirroring ArgoCD's findKustomizeFile.
+// Directories without one (helm charts, plain manifests) get a no-op restore.
+func snapshotKustomization(dir string) (func() error, error) {
+	for _, name := range KustomizationNames {
+		path := filepath.Join(dir, name)
+		info, err := os.Stat(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, fmt.Errorf("failed to stat %s: %w", path, err)
+		}
+		if info.IsDir() {
+			continue
+		}
+		original, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("failed to snapshot %s: %w", path, err)
+		}
+		restore := func() error {
+			if err := os.WriteFile(path, original, info.Mode()); err != nil {
+				return fmt.Errorf("failed to restore %s after render: %w", path, err)
+			}
+			return nil
+		}
+		return restore, nil
+	}
+	return func() error { return nil }, nil
 }
 
 // buildManifestRequest assembles the per-source ManifestRequest.

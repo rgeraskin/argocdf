@@ -250,6 +250,82 @@ func TestArgoCDRenderer_Kustomize(t *testing.T) {
 	}
 }
 
+// TestArgoCDRenderer_SharedPathKustomizeOverridesDoNotLeak is the regression
+// test for the shared-worktree kustomize leak: ArgoCD applies spec kustomize
+// overrides via `kustomize edit`, which rewrites kustomization.yaml in the
+// source directory. Two apps pointing at the SAME path must not see each
+// other's overrides — the engine snapshots and restores the kustomization
+// file around each render.
+func TestArgoCDRenderer_SharedPathKustomizeOverridesDoNotLeak(t *testing.T) {
+	requireKustomize(t)
+
+	repoDir := t.TempDir()
+	appDir := filepath.Join(repoDir, "kustomize-app")
+	if err := os.MkdirAll(appDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	kustomization := []byte("resources:\n  - cm.yaml\n")
+	if err := os.WriteFile(filepath.Join(appDir, "kustomization.yaml"), kustomization, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(appDir, "cm.yaml"),
+		[]byte("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: kust-cm\ndata:\n  a: b\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	newApp := func(name string, kust *cluster.ApplicationSourceKustomize) *cluster.Application {
+		return &cluster.Application{
+			ObjectMeta: metav1.ObjectMeta{Name: name},
+			Spec: cluster.ApplicationSpec{
+				Source: &cluster.ApplicationSource{
+					RepoURL:   "https://github.com/example/repo.git",
+					Path:      "kustomize-app",
+					Kustomize: kust,
+				},
+				Destination: cluster.ApplicationDestination{Namespace: "default"},
+			},
+		}
+	}
+
+	r := mustNewArgoCDRenderer(t, RenderOptions{})
+
+	// The overrides app renders first and must get its prefix.
+	withOverrides := newApp("kust-overrides", &cluster.ApplicationSourceKustomize{NamePrefix: "base-"})
+	result, err := r.RenderApplication(context.Background(), withOverrides, repoDir, "abcdef1234567890")
+	if err != nil {
+		t.Fatalf("RenderApplication(overrides) error = %v", err)
+	}
+	docs := docsByKindName(t, result.Manifests)
+	if !docs["ConfigMap/base-kust-cm"] {
+		t.Errorf("overrides app missing ConfigMap/base-kust-cm; got %v", docs)
+	}
+
+	// The kustomization file must be byte-identical after the render — the
+	// `kustomize edit set nameprefix` mutation may not outlive it.
+	after, err := os.ReadFile(filepath.Join(appDir, "kustomization.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(kustomization) {
+		t.Errorf("kustomization.yaml mutated after render:\n%s", after)
+	}
+
+	// A later render of the SAME path without overrides must not inherit the
+	// prefix (pre-fix, this yielded ConfigMap/base-kust-cm).
+	plain := newApp("kust-plain", nil)
+	result, err = r.RenderApplication(context.Background(), plain, repoDir, "abcdef1234567890")
+	if err != nil {
+		t.Fatalf("RenderApplication(plain) error = %v", err)
+	}
+	docs = docsByKindName(t, result.Manifests)
+	if !docs["ConfigMap/kust-cm"] {
+		t.Errorf("plain app missing ConfigMap/kust-cm; got %v", docs)
+	}
+	if docs["ConfigMap/base-kust-cm"] {
+		t.Errorf("plain app leaked the other app's namePrefix: got %v", docs)
+	}
+}
+
 func TestArgoCDRenderer_MultiSourceValuesRef(t *testing.T) {
 	requireHelm(t)
 
