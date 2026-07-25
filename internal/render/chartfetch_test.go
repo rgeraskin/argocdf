@@ -215,6 +215,36 @@ func TestFetchRemoteChart_NativeKeepsClientLogin(t *testing.T) {
 	}
 }
 
+// TestFetchRemoteChart_LocalModeStripsClientLogin pins --repo-creds=local
+// under a pierced registry config: there is no owned auth file to seed, but
+// inline OCI credentials are still stripped so ExtractChart never execs
+// `helm registry login` (the macOS keychain race) — the pull authenticates
+// from the user's own registry config instead.
+func TestFetchRemoteChart_LocalModeStripsClientLogin(t *testing.T) {
+	fake := &fakeChartClient{extractedDir: chartFixture(t, "mychart")}
+	var gotRepo *argoappv1.Repository
+	stubNewChartClient(t, fake, &gotRepo, nil)
+
+	r := NewHelmRenderer(RenderOptions{
+		HelmRegistryConfig: "/user/registry/config.json",
+		ResolveRepo: func(_ context.Context, repoURL, _ string) (*argoappv1.Repository, error) {
+			return &argoappv1.Repository{Repo: repoURL, EnableOCI: true, Username: "u", Password: "p"}, nil
+		},
+	})
+	_, _, cleanup, err := r.fetchRemoteChart(context.Background(), chartTestApp(), chartSource("1.2.3"))
+	if err != nil {
+		t.Fatalf("fetchRemoteChart() error: %v", err)
+	}
+	defer cleanup()
+
+	if gotRepo == nil {
+		t.Fatal("chart client never constructed")
+	}
+	if gotRepo.Username != "" || gotRepo.Password != "" {
+		t.Error("chart client received credentials — ExtractChart would exec `helm registry login`")
+	}
+}
+
 func TestFetchRemoteChart_CachePublishAndHit(t *testing.T) {
 	cacheBase := t.TempDir()
 	fake := &fakeChartClient{extractedDir: chartFixture(t, "mychart")}

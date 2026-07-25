@@ -59,6 +59,9 @@ type ArgoCDRenderer struct {
 	// created one (all --repo-creds modes except local, which pierces with the
 	// user's own registry config instead). Removed by Cleanup.
 	ownedRegistryAuth *registryAuthFile
+	// restoreHelmEnv undoes the process-global helm env mutation made at
+	// construction (isolateHelmEnv). Run by Cleanup.
+	restoreHelmEnv func()
 }
 
 // NewArgoCDRenderer creates a renderer backed by reposerver's GenerateManifests.
@@ -98,16 +101,25 @@ func NewArgoCDRenderer(opts RenderOptions) (*ArgoCDRenderer, error) {
 		r.ownedRegistryAuth = auth
 		registryConfig = auth.path
 	}
-	isolateHelmEnv(registryConfig)
+	r.restoreHelmEnv = isolateHelmEnv(registryConfig)
 
 	r.opts = opts
 	r.helm = NewHelmRenderer(opts)
 	return r, nil
 }
 
-// Cleanup removes the per-run registry auth file (it holds short-lived
-// tokens). Safe to call multiple times and on a renderer that owns none.
+// Cleanup restores the pre-construction helm environment and removes the
+// per-run registry auth file (it holds short-lived tokens). Safe to call
+// multiple times and on a renderer that owns no auth file. The renderer must
+// not render after Cleanup. The env restore is a snapshot of THIS instance's
+// construction-time env: the helm env is process-global, so overlapping
+// instances must be cleaned up in LIFO order — an out-of-order Cleanup
+// rewinds a still-live instance's HELM_REGISTRY_CONFIG.
 func (r *ArgoCDRenderer) Cleanup() {
+	if r.restoreHelmEnv != nil {
+		r.restoreHelmEnv()
+		r.restoreHelmEnv = nil
+	}
 	if r.ownedRegistryAuth != nil {
 		r.ownedRegistryAuth.Remove()
 	}
@@ -226,33 +238,39 @@ func (r *ArgoCDRenderer) renderSource(
 	// in the same worktree must not interleave those writes. The repo-server
 	// never faces this (it locks per repo+revision a level above); argocdf's
 	// parallel waves can. Reuses the same per-path mutex as the native engine.
-	mu := chartDepMutex(appPath)
-	mu.Lock()
+	//
 	// ArgoCD applies kustomize overrides (namePrefix, images, patches, ...) by
 	// rewriting kustomization.yaml IN PLACE (`kustomize edit` plus a direct
 	// write for patches — util/kustomize touches no other file). The
 	// repo-server renders from managed checkouts so that mutation is invisible
 	// there; argocdf renders every app from a per-side SHARED worktree, where
 	// it would leak into later renders of the same path (helm's charts/ writes
-	// are content-identical across apps and safe to share; kustomize edits are
-	// app-specific and are not). Snapshot the kustomization file under the
-	// mutex and restore it afterwards — even when the render fails, since the
+	// are content-identical for apps pinning the same dependency versions —
+	// same-path apps with DIVERGENT dependency pins would still interfere, an
+	// accepted residual risk; kustomize edits are app-specific and are not
+	// safe to share). Snapshot the kustomization file under the mutex and
+	// restore it afterwards — even when the render fails or panics, since the
 	// edit may have already happened. A restore failure is an error: a
 	// poisoned worktree would silently corrupt every later render of the path.
-	restoreKustomization, err := snapshotKustomization(appPath)
-	if err != nil {
-		mu.Unlock()
-		return nil, "", err
-	}
-	resp, err := repository.GenerateManifests(
-		ctx, appPath, repoRoot, revision, q,
-		false, // isLocal=false gives the ISOLATED temp helm home (XDG_*, HELM_CONFIG_HOME)
-		argogit.NoopCredsStore{},
-		maxCombinedDirectoryManifestsSize,
-		tempPaths,
-	)
-	err = errors.Join(err, restoreKustomization())
-	mu.Unlock()
+	// Unlock and restore are deferred so a panic inside GenerateManifests
+	// cannot leave the mutex held or the worktree poisoned.
+	resp, err := func() (resp *apiclient.ManifestResponse, err error) {
+		mu := chartDepMutex(appPath)
+		mu.Lock()
+		defer mu.Unlock()
+		restoreKustomization, err := snapshotKustomization(appPath)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { err = errors.Join(err, restoreKustomization()) }()
+		return repository.GenerateManifests(
+			ctx, appPath, repoRoot, revision, q,
+			false, // isLocal=false gives the ISOLATED temp helm home (XDG_*, HELM_CONFIG_HOME)
+			argogit.NoopCredsStore{},
+			maxCombinedDirectoryManifestsSize,
+			tempPaths,
+		)
+	}()
 	if err != nil {
 		return nil, "", err
 	}

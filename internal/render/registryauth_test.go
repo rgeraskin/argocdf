@@ -149,6 +149,12 @@ func TestRegistryAuthKeys(t *testing.T) {
 		{"https://charts.example.com/repo", []string{"charts.example.com"}},
 		{"registry.example.com:5000/acme", []string{"registry.example.com:5000"}},
 		{"oci://docker.io/acme", []string{"docker.io", "index.docker.io", "registry-1.docker.io", "https://index.docker.io/v1/"}},
+		// URL userinfo is not part of the docker-config key.
+		{"https://user:pass@ghcr.io/acme", []string{"ghcr.io"}},
+		{"oci://token@registry.example.com/acme", []string{"registry.example.com"}},
+		// Pathological URLs yield no keys instead of auths[""].
+		{"", nil},
+		{"oci://", nil},
 	}
 	for _, tt := range tests {
 		if got := registryAuthKeys(tt.url); !reflect.DeepEqual(got, tt.want) {

@@ -419,7 +419,11 @@ func (h klogHandler) Handle(ctx context.Context, r slog.Record) error {
 }
 
 // recordErrIsContextCanceled reports whether the record's "err" attribute
-// carries a context.Canceled, in any wrapping.
+// carries a context.Canceled, in any wrapping. The fallback for values that
+// aren't errors.Is-able (pre-stringified attributes, %v-wrapped chains)
+// requires "context canceled" as the TERMINAL cause — the suffix position
+// where Go's error-chain rendering puts it — so an error that merely mentions
+// the text mid-sentence is never demoted.
 func recordErrIsContextCanceled(r slog.Record) bool {
 	canceled := false
 	r.Attrs(func(a slog.Attr) bool {
@@ -428,7 +432,7 @@ func recordErrIsContextCanceled(r slog.Record) bool {
 		}
 		if err, ok := a.Value.Any().(error); ok && errors.Is(err, context.Canceled) {
 			canceled = true
-		} else if strings.Contains(fmt.Sprintf("%v", a.Value.Any()), context.Canceled.Error()) {
+		} else if strings.HasSuffix(strings.TrimSpace(fmt.Sprintf("%v", a.Value.Any())), context.Canceled.Error()) {
 			canceled = true
 		}
 		return !canceled
@@ -465,6 +469,9 @@ func (h klogHandler) WithGroup(name string) slog.Handler {
 //     logger under the "client-go" prefix via klog's slog bridge.
 func configureDependencyLogging(logger *log.Logger, debug bool) {
 	logrus.SetOutput(io.Discard)
+	// Replace, don't stack: a second configuration (tests, library-style
+	// reuse) must not leave two forwarders duplicating every argocd line.
+	logrus.StandardLogger().ReplaceHooks(make(logrus.LevelHooks))
 	logrus.AddHook(&logrusForwarder{logger: logger.WithPrefix("argocd")})
 	if !debug {
 		logrus.SetLevel(logrus.ErrorLevel)

@@ -85,17 +85,29 @@ func (r *HelmRenderer) fetchRemoteChart(ctx context.Context, app *cluster.Applic
 	// Under the argocd engine, OCI credentials ride the engine's registry
 	// auth file instead of ArgoCD's `helm registry login` (which on macOS
 	// writes to the shared system keychain — see registryAuthFile). Recording
-	// them lazily here covers repos known only through ResolveRepo. The
-	// stripped copy makes ExtractChart skip its login/logout entirely; the
-	// helm pull then authenticates from the file. Failures are LOUD, per the
-	// no-anonymous-fallback contract above.
-	if auth := r.opts.registryAuth; auth != nil && enableOCI && repo.Username != "" && repo.Password != "" {
-		if err := auth.Ensure(repo.Repo, repo.Username, repo.Password); err != nil {
-			return "", false, nil, fmt.Errorf("failed to record registry credentials for %s: %w", source.RepoURL, err)
+	// them lazily here covers repos known only through ResolveRepo. Under
+	// --repo-creds=local there is no owned auth file: OCI auth is defined to
+	// ride the user's own registry config (the pierced HELM_REGISTRY_CONFIG),
+	// and inline username/password on an OCI-flavored entry — nothing `helm
+	// repo add` can produce — would reintroduce the login, so it is stripped
+	// the same way without seeding. The stripped copy makes ExtractChart skip
+	// its login/logout entirely; the helm pull then authenticates from the
+	// effective registry config. Failures are LOUD, per the
+	// no-anonymous-fallback contract above. The native engine without a
+	// pierced registry config keeps the client's own login flow (ambient helm
+	// environment).
+	if enableOCI && repo.Username != "" && repo.Password != "" {
+		auth := r.opts.registryAuth
+		if auth != nil {
+			if err := auth.Ensure(repo.Repo, repo.Username, repo.Password); err != nil {
+				return "", false, nil, fmt.Errorf("failed to record registry credentials for %s: %w", source.RepoURL, err)
+			}
 		}
-		repo = repo.DeepCopy()
-		repo.Username = ""
-		repo.Password = ""
+		if auth != nil || r.opts.HelmRegistryConfig != "" {
+			repo = repo.DeepCopy()
+			repo.Username = ""
+			repo.Password = ""
+		}
 	}
 	client := newChartClient(repo, enableOCI)
 

@@ -56,6 +56,13 @@ func TestKlogHandler_LevelMapping(t *testing.T) {
 			want:   slog.LevelError,
 		},
 		{
+			// The string fallback matches only the TERMINAL cause (suffix);
+			// an error that merely mentions the text mid-sentence is real.
+			name:   "mid-sentence context-canceled mention stays error",
+			record: klogRecord(slog.LevelError, slog.String("err", "context canceled by peer: connection reset")),
+			want:   slog.LevelError,
+		},
+		{
 			name:   "error without err attr stays error",
 			record: klogRecord(slog.LevelError),
 			want:   slog.LevelError,

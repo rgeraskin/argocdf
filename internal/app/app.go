@@ -117,14 +117,20 @@ func New(cfg *config.Config, logger *log.Logger) (*App, error) {
 
 // Run executes the main application logic.
 func (a *App) Run(ctx context.Context) error {
+	// The argocd engine keeps a per-run registry auth file with short-lived
+	// tokens and mutates the process helm env; undo both on the way out. The
+	// defer is registered BEFORE initialize and resolves a.renderer at unwind
+	// time, so an initialize failure AFTER renderer construction (e.g. output
+	// writer creation) still cleans up.
+	defer func() {
+		if c, ok := a.renderer.(interface{ Cleanup() }); ok {
+			c.Cleanup()
+		}
+	}()
+
 	// Initialize components
 	if err := a.initialize(ctx); err != nil {
 		return fmt.Errorf("initialization failed: %w", err)
-	}
-	// The argocd engine keeps a per-run registry auth file with short-lived
-	// tokens; remove it on the way out (normal exit and unwinding alike).
-	if c, ok := a.renderer.(interface{ Cleanup() }); ok {
-		defer c.Cleanup()
 	}
 
 	// Fetch ArgoCD applications
@@ -147,6 +153,20 @@ func (a *App) Run(ctx context.Context) error {
 	// after the target branch diverged don't show up as phantom changes
 	a.logger.Info("Analyzing git changes...")
 	a.baseRef = a.resolveBaseRef()
+
+	// Resolve the compared commits once, straight from the object database (no
+	// worktree needed). They feed the render cache keys and the provenance
+	// footer — which must carry the SHAs even on the no-apps-affected path
+	// below, where a durable (PR-comment) report is still written.
+	a.baseCommit, err = a.repo.CommitHash(a.baseRef)
+	if err != nil {
+		return fmt.Errorf("failed to resolve base commit: %w", err)
+	}
+	a.targetCommit, err = a.repo.CommitHash(a.cfg.TargetBranch)
+	if err != nil {
+		return fmt.Errorf("failed to resolve target commit: %w", err)
+	}
+
 	changedFiles, err := a.repo.GetDiff(a.baseRef, a.cfg.TargetBranch)
 	if err != nil {
 		return fmt.Errorf("failed to get changed files: %w", err)
@@ -387,9 +407,9 @@ func (a *App) effectiveBaseBranch() string {
 }
 
 // setupWorktrees creates ephemeral detached worktrees for the base ref and the
-// target branch tip and resolves their commit hashes (reused for cache keys).
-// It always returns a non-nil cleanup function so callers can defer it
-// unconditionally, even on error (partial worktrees are cleaned up).
+// target branch tip (their commits were already resolved in Run). It always
+// returns a non-nil cleanup function so callers can defer it unconditionally,
+// even on error (partial worktrees are cleaned up).
 //
 // Behavior note: the target side renders the COMMITTED target branch tip, not
 // the user's (possibly dirty) working tree. warnIfWorkingTreeDirty surfaces
@@ -418,17 +438,6 @@ func (a *App) setupWorktrees() (func(), error) {
 	}
 	cleanups = append(cleanups, targetCleanup)
 	a.targetWorktree = targetPath
-
-	// Resolve commits once from the main repo's object database (no checkout);
-	// renderCacheKey reuses these for every app.
-	a.baseCommit, err = a.repo.CommitHash(a.baseRef)
-	if err != nil {
-		return cleanupAll, fmt.Errorf("failed to resolve base commit: %w", err)
-	}
-	a.targetCommit, err = a.repo.CommitHash(a.cfg.TargetBranch)
-	if err != nil {
-		return cleanupAll, fmt.Errorf("failed to resolve target commit: %w", err)
-	}
 
 	a.logger.Debug("Created ephemeral worktrees",
 		"base", a.baseWorktree, "baseCommit", a.baseCommit,
@@ -712,6 +721,11 @@ func (a *App) processApplications(ctx context.Context, apps []cluster.Applicatio
 		}
 		return resultSlice[i].Name < resultSlice[j].Name
 	})
+	// Child name lists follow discovery order (map iteration inside the render
+	// results); sort them too so any output surfacing them stays deterministic.
+	for _, r := range resultSlice {
+		sort.Strings(r.ChildAppNames)
+	}
 
 	if a.cache != nil {
 		a.logger.Info("Render cache", "hits", a.cacheHits.Load(), "misses", a.cacheMisses.Load())

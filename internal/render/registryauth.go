@@ -178,12 +178,33 @@ var inheritedHelmEnvVars = []string{
 // either argocdf's own auth file, or the user's registry config under
 // --repo-creds=local (the documented read-only piercing of the isolated
 // helm homes).
-func isolateHelmEnv(registryConfig string) {
+//
+// It returns a restore func that reinstates the pre-call values. A one-shot
+// CLI run wouldn't need it, but Cleanup restoring the env keeps repeated
+// engine construction in one process (tests, library-style reuse) from
+// accumulating a scrubbed env whose HELM_REGISTRY_CONFIG points at a deleted
+// auth file.
+func isolateHelmEnv(registryConfig string) (restore func()) {
+	saved := make(map[string]*string, len(inheritedHelmEnvVars))
 	for _, v := range inheritedHelmEnvVars {
+		if val, ok := os.LookupEnv(v); ok {
+			saved[v] = &val
+		} else {
+			saved[v] = nil
+		}
 		_ = os.Unsetenv(v)
 	}
 	if registryConfig != "" {
 		_ = os.Setenv("HELM_REGISTRY_CONFIG", registryConfig)
+	}
+	return func() {
+		for _, v := range inheritedHelmEnvVars {
+			if val := saved[v]; val != nil {
+				_ = os.Setenv(v, *val)
+			} else {
+				_ = os.Unsetenv(v)
+			}
+		}
 	}
 }
 
@@ -248,7 +269,8 @@ func seedAndStripRepoCreds(auth *registryAuthFile, creds []*argoappv1.RepoCreds)
 // registryAuthKeys returns the docker-config auth keys for a repository URL.
 // Helm resolves credentials by registry host. Docker Hub is special-cased to
 // its legacy server address alongside the plain hosts, mirroring how docker
-// and ORAS clients store and look up Hub credentials.
+// and ORAS clients store and look up Hub credentials. Pathological URLs that
+// yield no host return no keys — writing auths[""] would help nothing.
 func registryAuthKeys(repoURL string) []string {
 	host := repoURL
 	host = strings.TrimPrefix(host, "oci://")
@@ -256,6 +278,15 @@ func registryAuthKeys(repoURL string) []string {
 	host = strings.TrimPrefix(host, "http://")
 	if i := strings.IndexByte(host, '/'); i >= 0 {
 		host = host[:i]
+	}
+	// URL userinfo is not part of the docker-config key: a user:pass@host URL
+	// must key on the host alone, or the entry is written where no pull will
+	// ever look it up.
+	if i := strings.LastIndexByte(host, '@'); i >= 0 {
+		host = host[i+1:]
+	}
+	if host == "" {
+		return nil
 	}
 	switch host {
 	case "docker.io", "index.docker.io", "registry-1.docker.io":

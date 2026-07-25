@@ -625,9 +625,60 @@ func TestNewArgoCDRendererIsolatesHelmEnv(t *testing.T) {
 		t.Error("two engines share one auth file")
 	}
 
+	// Overlapping instances snapshot process-global env at construction and
+	// must clean up LIFO (see Cleanup): second's restore rewinds to r's env,
+	// r's to the inherited one.
+	second.Cleanup()
+	if got := os.Getenv("HELM_REGISTRY_CONFIG"); got != r.ownedRegistryAuth.path {
+		t.Errorf("HELM_REGISTRY_CONFIG = %q after LIFO Cleanup of the second engine, want the first engine's auth file", got)
+	}
 	r.Cleanup()
 	if _, err := os.Stat(r.ownedRegistryAuth.path); !os.IsNotExist(err) {
 		t.Error("Cleanup() left the auth file (it holds tokens) behind")
+	}
+	if got := os.Getenv("HELM_REGISTRY_CONFIG"); got != "/inherited" {
+		t.Errorf("HELM_REGISTRY_CONFIG = %q after the full unwind, want the inherited value", got)
+	}
+}
+
+// TestArgoCDRendererCleanupRestoresHelmEnv pins the other half of the env
+// contract: Cleanup undoes the process-global scrub, so repeated engine use
+// in one process (tests, library-style reuse) never leaves the environment
+// scrubbed with HELM_REGISTRY_CONFIG pointing at a deleted auth file.
+func TestArgoCDRendererCleanupRestoresHelmEnv(t *testing.T) {
+	t.Setenv("HELM_CONFIG_HOME", "/inherited/helm")
+	t.Setenv("HELM_REGISTRY_CONFIG", "/inherited/registry.json")
+	// Present-but-unset vars must stay unset after the restore; t.Setenv
+	// records the original value for post-test restoration.
+	t.Setenv("HELM_CACHE_HOME", "placeholder")
+	_ = os.Unsetenv("HELM_CACHE_HOME")
+
+	r, err := NewArgoCDRenderer(RenderOptions{})
+	if err != nil {
+		t.Fatalf("NewArgoCDRenderer() error = %v", err)
+	}
+	owned := r.ownedRegistryAuth.path
+
+	r.Cleanup()
+	if got := os.Getenv("HELM_CONFIG_HOME"); got != "/inherited/helm" {
+		t.Errorf("HELM_CONFIG_HOME = %q after Cleanup, want the inherited value restored", got)
+	}
+	if got := os.Getenv("HELM_REGISTRY_CONFIG"); got != "/inherited/registry.json" {
+		t.Errorf("HELM_REGISTRY_CONFIG = %q after Cleanup, want the inherited value restored", got)
+	}
+	if got, set := os.LookupEnv("HELM_CACHE_HOME"); set {
+		t.Errorf("HELM_CACHE_HOME = %q after Cleanup, want it back to unset", got)
+	}
+	if _, statErr := os.Stat(owned); !os.IsNotExist(statErr) {
+		t.Error("Cleanup() left the auth file behind")
+	}
+
+	// Cleanup is idempotent: a second call must not re-run the restore over
+	// an environment that legitimately changed since.
+	t.Setenv("HELM_REGISTRY_CONFIG", "/changed/after.json")
+	r.Cleanup()
+	if got := os.Getenv("HELM_REGISTRY_CONFIG"); got != "/changed/after.json" {
+		t.Errorf("second Cleanup() re-ran the env restore; HELM_REGISTRY_CONFIG = %q", got)
 	}
 }
 
