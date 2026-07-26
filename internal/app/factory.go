@@ -77,7 +77,15 @@ func (f *Factory) CreateRenderFactory(kubeVersion string, apiVersions []string, 
 		opts.HelmRegistryConfig = creds.HelmRegistryConfig
 	}
 	if f.config.Renderer == config.RendererArgoCD {
-		return render.NewArgoCDRenderer(opts)
+		// Explicit nil check instead of returning the call directly: that
+		// would convert a typed-nil *ArgoCDRenderer into a NON-nil
+		// applicationRenderer on error, and Run's deferred cleanup would then
+		// call Cleanup on a nil receiver and panic during error unwinding.
+		r, err := render.NewArgoCDRenderer(opts)
+		if err != nil {
+			return nil, err
+		}
+		return r, nil
 	}
 	return render.NewFactory(opts), nil
 }
