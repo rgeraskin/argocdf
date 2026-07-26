@@ -122,6 +122,40 @@ func (d *AppDiscoverer) FindNewApplications(oldContent, newContent string) ([]Di
 	return newlyAdded, nil
 }
 
+// FindRemovedApplications compares old and new manifests to find Applications
+// present in oldContent but absent from newContent. An empty newContent yields
+// every old app (the parent's whole render disappeared, e.g. the parent itself
+// was removed), which is what cascades removal to grandchildren.
+func (d *AppDiscoverer) FindRemovedApplications(oldContent, newContent string) ([]DiscoveredApplication, error) {
+	oldApps, err := d.DiscoverApplications(oldContent)
+	if err != nil {
+		return nil, fmt.Errorf("failed to discover old applications: %w", err)
+	}
+
+	newApps, err := d.DiscoverApplications(newContent)
+	if err != nil {
+		return nil, fmt.Errorf("failed to discover new applications: %w", err)
+	}
+
+	// Build set of new app names
+	newNames := make(map[string]bool)
+	for _, app := range newApps {
+		key := appKey(app.Namespace, app.Name)
+		newNames[key] = true
+	}
+
+	// Find apps that are in old but not in new
+	var removed []DiscoveredApplication
+	for _, app := range oldApps {
+		key := appKey(app.Namespace, app.Name)
+		if !newNames[key] {
+			removed = append(removed, app)
+		}
+	}
+
+	return removed, nil
+}
+
 // ModifiedApplication represents a child app that exists in both old and new but has changes.
 type ModifiedApplication struct {
 	Name      string
@@ -174,7 +208,7 @@ func (d *AppDiscoverer) FindModifiedApplications(oldContent, newContent string) 
 type AppDiffQueue struct {
 	pending   []QueuedApp
 	processed map[string]bool
-	// processedSpecs records the (Spec, OldSpec) identity each app was last
+	// processedSpecs records the specSignature identity each app was last
 	// processed with. It is used by RequeueProcessed to break requeue loops
 	// (e.g. self-managing root apps that discover their own Application CRD).
 	processedSpecs map[string]string
@@ -194,15 +228,23 @@ type QueuedApp struct {
 	// FindNewApplications). Such apps have no base-branch counterpart, so the
 	// base render is skipped entirely and the app diffs as fully added.
 	IsNew bool
+	// IsRemoved marks an app discovered only on the base branch (via
+	// FindRemovedApplications). Such apps have no target-branch counterpart, so
+	// the target render is skipped entirely and the app diffs as fully removed.
+	IsRemoved bool
 }
 
-// specSignature returns a stable identity for an app's (Spec, OldSpec) pair.
-// Apps requeued with an identical signature to what was already processed are
-// refused, which terminates apps-of-apps requeue loops.
+// specSignature returns a stable identity for an app's processing inputs:
+// (Spec, OldSpec, IsNew, IsRemoved). Apps requeued with an identical signature
+// to what was already processed are refused, which terminates apps-of-apps
+// requeue loops. The render-skip flags are part of the identity because they
+// change the outcome for the same specs: a child rediscovered as removed
+// typically carries the exact spec it was already processed with (the cluster
+// spec matches the base branch) and differs only in the empty target side.
 func specSignature(app QueuedApp) string {
 	spec, _ := json.Marshal(app.Spec)
 	oldSpec, _ := json.Marshal(app.OldSpec)
-	return string(spec) + "|" + string(oldSpec)
+	return fmt.Sprintf("%s|%s|%t|%t", spec, oldSpec, app.IsNew, app.IsRemoved)
 }
 
 // NewAppDiffQueue creates a new AppDiffQueue.
@@ -282,6 +324,7 @@ func (q *AppDiffQueue) UpdatePending(app QueuedApp) bool {
 			q.pending[i].ParentApp = app.ParentApp
 			q.pending[i].ParentNamespace = app.ParentNamespace
 			q.pending[i].IsNew = app.IsNew
+			q.pending[i].IsRemoved = app.IsRemoved
 			return true
 		}
 	}

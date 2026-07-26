@@ -3,6 +3,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -995,6 +996,328 @@ func TestProcessApplicationsNewChildSkipsBaseRender(t *testing.T) {
 	if childDiff.SourceType != types.SourceTypeHelm {
 		t.Errorf("new-child SourceType = %q, want %q (from the target render)",
 			childDiff.SourceType, types.SourceTypeHelm)
+	}
+}
+
+// removedChildFakeRenderer simulates a parent app whose target branch drops a
+// child Application from its catalog while the child's own sources still exist
+// there: rendering the removed child against the target worktree would succeed
+// and wrongly diff the child as alive — only the IsRemoved flag makes the skip
+// correct. The child's base render carries a grandchild Application CRD so the
+// removal must cascade one level further.
+type removedChildFakeRenderer struct {
+	baseWorktree   string
+	targetWorktree string
+
+	mu            sync.Mutex
+	targetRenders []string // app names rendered against the target worktree
+}
+
+func (f *removedChildFakeRenderer) RenderApplication(
+	_ context.Context,
+	app *cluster.Application,
+	repoPath string,
+	_ string,
+) (*render.RenderResult, error) {
+	if repoPath == f.targetWorktree {
+		f.mu.Lock()
+		f.targetRenders = append(f.targetRenders, app.Name)
+		f.mu.Unlock()
+	}
+
+	var manifests string
+	switch app.Name {
+	case "parent":
+		// The PR removes the child through the parent: no child CRD on target.
+		manifests = revConfigMap("parent-cm", "v1")
+		if repoPath == f.baseWorktree {
+			manifests += "---\n" + appCRD("doomed-child", "v1")
+		}
+	case "doomed-child":
+		// Renders identically on both worktrees: the child's sources survive
+		// the catalog removal, so a target render would return live manifests.
+		manifests = revConfigMap("doomed-child-cm", "v1") + "---\n" + appCRD("doomed-grandchild", "v1")
+	case "doomed-grandchild":
+		manifests = revConfigMap("doomed-grandchild-cm", "v1")
+	}
+
+	return &render.RenderResult{
+		Manifests:  []byte(manifests),
+		SourceType: types.SourceTypeHelm,
+	}, nil
+}
+
+// newRemovedChildApp builds an App wired to a removedChildFakeRenderer.
+func newRemovedChildApp(t *testing.T, maxDepth int) (*App, *removedChildFakeRenderer) {
+	t.Helper()
+	logger := log.New(nil)
+	logger.SetLevel(log.FatalLevel)
+
+	cfg := &config.Config{Concurrency: 4, MaxDepth: maxDepth}
+	fake := &removedChildFakeRenderer{
+		baseWorktree:   "/fake/base",
+		targetWorktree: "/fake/target",
+	}
+	return &App{
+		factory:        NewFactory(cfg, logger),
+		cfg:            cfg,
+		logger:         logger,
+		renderer:       fake,
+		differ:         diff.NewManifestDiffer(),
+		discoverer:     diff.NewAppDiscoverer(),
+		baseWorktree:   fake.baseWorktree,
+		targetWorktree: fake.targetWorktree,
+	}, fake
+}
+
+// dummyChartSpec is the cluster-side spec the removed-child tests hand to the
+// initially-affected apps.
+func dummyChartSpec(revision string) cluster.ApplicationSpec {
+	return cluster.ApplicationSpec{
+		Source: &cluster.ApplicationSource{
+			RepoURL:        "https://example.com/org/repo.git",
+			Chart:          "dummy",
+			TargetRevision: revision,
+		},
+	}
+}
+
+// TestProcessApplicationsRemovedChildSkipsTargetRender pins the IsRemoved
+// contract end to end: a child Application present only in the parent's base
+// render is queued with IsRemoved, never rendered against the target worktree
+// (its sources still exist there), and its base resources report as fully
+// removed. An Application inside the removed child's own base render cascades
+// into a removed grandchild.
+func TestProcessApplicationsRemovedChildSkipsTargetRender(t *testing.T) {
+	a, fake := newRemovedChildApp(t, 5)
+
+	parent := cluster.Application{Spec: dummyChartSpec("cluster")}
+	parent.Name = "parent"
+	parent.Namespace = "argocd"
+
+	diffs, err := a.processApplications(context.Background(), []cluster.Application{parent})
+	if err != nil {
+		t.Fatalf("processApplications() error: %v", err)
+	}
+
+	byName := make(map[string]*types.AppDiff, len(diffs))
+	for _, d := range diffs {
+		if d.Error != nil {
+			t.Errorf("app %q finished with error: %v", d.Name, d.Error)
+		}
+		byName[d.Name] = d
+	}
+	if len(diffs) != 3 || byName["doomed-child"] == nil || byName["doomed-grandchild"] == nil {
+		t.Fatalf("got %d results (%v), want parent + removed child + removed grandchild",
+			len(diffs), slicesOfNames(diffs))
+	}
+
+	// The target render must be skipped, not attempted: the fake would return
+	// live manifests for the child on the target worktree.
+	fake.mu.Lock()
+	targetRenders := fake.targetRenders
+	fake.mu.Unlock()
+	for _, name := range targetRenders {
+		if name != "parent" {
+			t.Errorf("%q was rendered against the target worktree; want target render skipped", name)
+		}
+	}
+
+	childDiff := byName["doomed-child"]
+	if childDiff.RenderedNew != "" {
+		t.Errorf("doomed-child RenderedNew = %q, want empty", childDiff.RenderedNew)
+	}
+	if !strings.Contains(childDiff.RenderedOld, "doomed-child-cm") {
+		t.Errorf("doomed-child RenderedOld missing expected manifest:\n%s", childDiff.RenderedOld)
+	}
+	setDiff, ok := childDiff.DiffResult.(*diff.ManifestSetDiff)
+	if !ok {
+		t.Fatalf("doomed-child DiffResult is %T, want *diff.ManifestSetDiff", childDiff.DiffResult)
+	}
+	if len(setDiff.Added) != 0 || len(setDiff.Removed) != 2 || len(setDiff.Modified) != 0 {
+		t.Errorf("doomed-child diff = +%d -%d ~%d, want +0 -2 ~0",
+			len(setDiff.Added), len(setDiff.Removed), len(setDiff.Modified))
+	}
+	if childDiff.SourceType != types.SourceTypeHelm {
+		t.Errorf("doomed-child SourceType = %q, want %q (from the base render)",
+			childDiff.SourceType, types.SourceTypeHelm)
+	}
+	if childDiff.ParentAppName != "parent" {
+		t.Errorf("doomed-child ParentAppName = %q, want %q", childDiff.ParentAppName, "parent")
+	}
+
+	grandchildDiff := byName["doomed-grandchild"]
+	if grandchildDiff.RenderedNew != "" {
+		t.Errorf("doomed-grandchild RenderedNew = %q, want empty", grandchildDiff.RenderedNew)
+	}
+	gcSetDiff := grandchildDiff.DiffResult.(*diff.ManifestSetDiff)
+	if len(gcSetDiff.Removed) != 1 {
+		t.Errorf("doomed-grandchild diff removed %d resources, want 1", len(gcSetDiff.Removed))
+	}
+	if grandchildDiff.ParentAppName != "doomed-child" {
+		t.Errorf("doomed-grandchild ParentAppName = %q, want %q",
+			grandchildDiff.ParentAppName, "doomed-child")
+	}
+
+	if got := byName["parent"].ChildAppNames; len(got) != 1 || got[0] != "doomed-child" {
+		t.Errorf("parent ChildAppNames = %v, want [doomed-child]", got)
+	}
+	if got := childDiff.ChildAppNames; len(got) != 1 || got[0] != "doomed-grandchild" {
+		t.Errorf("doomed-child ChildAppNames = %v, want [doomed-grandchild]", got)
+	}
+}
+
+func slicesOfNames(diffs []*types.AppDiff) []string {
+	names := make([]string, 0, len(diffs))
+	for _, d := range diffs {
+		names = append(names, d.Name)
+	}
+	return names
+}
+
+// TestProcessApplicationsRemovedChildRespectsMaxDepth pins that removed
+// children are queued at Depth = parent+1: with maxDepth 2 the child (depth 1)
+// is processed but the removed grandchild (depth 2) is refused.
+func TestProcessApplicationsRemovedChildRespectsMaxDepth(t *testing.T) {
+	a, _ := newRemovedChildApp(t, 2)
+
+	parent := cluster.Application{Spec: dummyChartSpec("cluster")}
+	parent.Name = "parent"
+	parent.Namespace = "argocd"
+
+	diffs, err := a.processApplications(context.Background(), []cluster.Application{parent})
+	if err != nil {
+		t.Fatalf("processApplications() error: %v", err)
+	}
+	names := slicesOfNames(diffs)
+	if len(diffs) != 2 {
+		t.Fatalf("got results %v, want exactly parent + doomed-child", names)
+	}
+	for _, name := range names {
+		if name == "doomed-grandchild" {
+			t.Error("doomed-grandchild processed at depth == maxDepth; want refused")
+		}
+	}
+}
+
+// TestProcessOneAppRemovedSkipsTargetRender pins the IsRemoved render contract
+// at the processOneApp level: no target render call, empty RenderedNew, and a
+// fully-removed diff even though the renderer would happily produce target
+// manifests for the app.
+func TestProcessOneAppRemovedSkipsTargetRender(t *testing.T) {
+	a, fake := newRemovedChildApp(t, 5)
+
+	spec := dummyChartSpec("v1")
+	appDiff, err := a.processOneApp(context.Background(), &diff.QueuedApp{
+		Name:      "doomed-child",
+		Namespace: "argocd",
+		Depth:     1,
+		Spec:      &spec,
+		IsRemoved: true,
+	})
+	if err != nil {
+		t.Fatalf("processOneApp() error: %v", err)
+	}
+
+	fake.mu.Lock()
+	targetRenders := fake.targetRenders
+	fake.mu.Unlock()
+	if len(targetRenders) != 0 {
+		t.Errorf("target renders = %v, want none", targetRenders)
+	}
+
+	if appDiff.RenderedNew != "" {
+		t.Errorf("RenderedNew = %q, want empty", appDiff.RenderedNew)
+	}
+	setDiff := appDiff.DiffResult.(*diff.ManifestSetDiff)
+	if len(setDiff.Added) != 0 || len(setDiff.Removed) != 2 || len(setDiff.Modified) != 0 {
+		t.Errorf("diff = +%d -%d ~%d, want +0 -2 ~0",
+			len(setDiff.Added), len(setDiff.Removed), len(setDiff.Modified))
+	}
+	if appDiff.SourceType != types.SourceTypeHelm {
+		t.Errorf("SourceType = %q, want %q (from the base render)", appDiff.SourceType, types.SourceTypeHelm)
+	}
+}
+
+// TestProcessApplicationsRemovedChildRequeuesProcessed pins the wave
+// interaction: a directly-affected child renders prematurely in wave 0 (both
+// sides, cluster spec) before the parent's discovery reveals it was removed.
+// The child must be re-processed with IsRemoved — and because the cluster spec
+// equals the base-side git spec byte for byte, the requeue survives only
+// because IsRemoved is part of specSignature.
+func TestProcessApplicationsRemovedChildRequeuesProcessed(t *testing.T) {
+	a, fake := newRemovedChildApp(t, 5)
+
+	parent := cluster.Application{Spec: dummyChartSpec("cluster")}
+	parent.Name = "parent"
+	parent.Namespace = "argocd"
+
+	// The child's cluster spec, crafted to marshal identically to the spec
+	// parsed from the parent's rendered child CRD (verified below).
+	childSpec := cluster.ApplicationSpec{
+		Project:     "default",
+		Source:      dummyChartSpec("v1").Source,
+		Destination: cluster.ApplicationDestination{Server: "https://kubernetes.default.svc"},
+	}
+	child := cluster.Application{Spec: childSpec}
+	child.Name = "doomed-child"
+	child.Namespace = "argocd"
+
+	// Precondition: the crafted spec and the CRD-parsed spec have the same
+	// signature input, so this scenario exercises the IsRemoved-in-signature
+	// requeue guard rather than a spec difference.
+	parsed, err := a.discoverer.DiscoverApplications(appCRD("doomed-child", "v1"))
+	if err != nil || len(parsed) != 1 {
+		t.Fatalf("DiscoverApplications() = %v apps, err %v; want 1 app", len(parsed), err)
+	}
+	wantJSON, _ := json.Marshal(parsed[0].Spec)
+	gotJSON, _ := json.Marshal(childSpec)
+	if string(wantJSON) != string(gotJSON) {
+		t.Fatalf("crafted cluster spec differs from CRD-parsed spec:\n%s\n%s", gotJSON, wantJSON)
+	}
+
+	diffs, err := a.processApplications(context.Background(), []cluster.Application{parent, child})
+	if err != nil {
+		t.Fatalf("processApplications() error: %v", err)
+	}
+
+	byName := make(map[string]*types.AppDiff, len(diffs))
+	for _, d := range diffs {
+		byName[d.Name] = d
+	}
+	childDiff := byName["doomed-child"]
+	if childDiff == nil {
+		t.Fatalf("missing doomed-child result; got %v", slicesOfNames(diffs))
+	}
+
+	// The corrected (removed) result must overwrite the premature wave-0
+	// render that saw the child alive on both sides.
+	if childDiff.RenderedNew != "" {
+		t.Errorf("doomed-child RenderedNew = %q, want empty (stale both-sides result survived)",
+			childDiff.RenderedNew)
+	}
+	if childDiff.ParentAppName != "parent" {
+		t.Errorf("doomed-child ParentAppName = %q, want %q", childDiff.ParentAppName, "parent")
+	}
+
+	// Exactly one target render of the child: the premature wave-0 one.
+	fake.mu.Lock()
+	childTargetRenders := 0
+	for _, name := range fake.targetRenders {
+		if name == "doomed-child" {
+			childTargetRenders++
+		}
+	}
+	fake.mu.Unlock()
+	if childTargetRenders != 1 {
+		t.Errorf("doomed-child target renders = %d, want 1 (premature wave-0 render only)",
+			childTargetRenders)
+	}
+
+	// The corrected render's discovery still cascades to the grandchild.
+	if byName["doomed-grandchild"] == nil {
+		t.Errorf("doomed-grandchild not discovered from the re-processed child; got %v",
+			slicesOfNames(diffs))
 	}
 }
 

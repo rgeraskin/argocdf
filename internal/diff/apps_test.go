@@ -289,6 +289,148 @@ spec:
 	}
 }
 
+func TestFindRemovedApplications(t *testing.T) {
+	discoverer := NewAppDiscoverer()
+
+	tests := []struct {
+		name       string
+		oldContent string
+		newContent string
+		wantCount  int
+		wantNames  []string
+		wantErr    bool
+	}{
+		{
+			name: "one removed among several",
+			oldContent: `apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: surviving-app
+  namespace: argocd
+spec:
+  project: default
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: removed-app
+  namespace: argocd
+spec:
+  project: default
+`,
+			newContent: `apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: surviving-app
+  namespace: argocd
+spec:
+  project: default
+`,
+			wantCount: 1,
+			wantNames: []string{"removed-app"},
+		},
+		{
+			name: "no apps removed",
+			oldContent: `apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: existing-app
+  namespace: argocd
+spec:
+  project: default
+`,
+			newContent: `apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: existing-app
+  namespace: argocd
+spec:
+  project: default
+`,
+			wantCount: 0,
+			wantNames: nil,
+		},
+		{
+			// A removed parent's own target render is empty, so its removed
+			// children are found against empty newContent (removal recursion).
+			name: "empty new content - all old apps removed",
+			oldContent: `apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: app-a
+  namespace: argocd
+spec:
+  project: default
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: app-b
+  namespace: argocd
+spec:
+  project: default
+`,
+			newContent: "",
+			wantCount:  2,
+			wantNames:  []string{"app-a", "app-b"},
+		},
+		{
+			name:       "empty old content - nothing removed",
+			oldContent: "",
+			newContent: `apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: new-app
+  namespace: argocd
+spec:
+  project: default
+`,
+			wantCount: 0,
+			wantNames: nil,
+		},
+		{
+			name: "same name in another namespace does not mask removal",
+			oldContent: `apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: my-app
+  namespace: argocd
+spec:
+  project: default
+`,
+			newContent: `apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: my-app
+  namespace: other-namespace
+spec:
+  project: default
+`,
+			wantCount: 1,
+			wantNames: []string{"my-app"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			apps, err := discoverer.FindRemovedApplications(tt.oldContent, tt.newContent)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("FindRemovedApplications() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if len(apps) != tt.wantCount {
+				t.Errorf("FindRemovedApplications() got %d apps, want %d", len(apps), tt.wantCount)
+				return
+			}
+			for i, name := range tt.wantNames {
+				if apps[i].Name != name {
+					t.Errorf("FindRemovedApplications() app[%d].Name = %s, want %s", i, apps[i].Name, name)
+				}
+			}
+		})
+	}
+}
+
 func TestFindModifiedApplications(t *testing.T) {
 	discoverer := NewAppDiscoverer()
 
@@ -1019,6 +1161,91 @@ func TestAppDiffQueue(t *testing.T) {
 		}
 		if app.OldSpec == nil || app.OldSpec.Project != "git-old-spec" {
 			t.Error("OldSpec not updated alongside IsNew")
+		}
+	})
+
+	t.Run("IsRemoved survives the queue round-trip", func(t *testing.T) {
+		queue := NewAppDiffQueue(10)
+
+		queue.Add(QueuedApp{Name: "removed-app", Namespace: "ns1", Depth: 1, IsRemoved: true})
+
+		app := queue.Next()
+		if app == nil {
+			t.Fatal("Next() returned nil")
+		}
+		if !app.IsRemoved {
+			t.Error("IsRemoved = false after Next(), want true")
+		}
+	})
+
+	t.Run("UpdatePending overwrites IsRemoved", func(t *testing.T) {
+		queue := NewAppDiffQueue(10)
+
+		// Pending from the cluster listing (both sides assumed to exist).
+		queue.Add(QueuedApp{
+			Name:      "app1",
+			Namespace: "ns1",
+			Depth:     0,
+			Spec:      &cluster.ApplicationSpec{Project: "cluster-spec"},
+		})
+
+		// The parent's render reveals the child is gone on the target branch,
+		// so the pending render must skip the target side.
+		updated := queue.UpdatePending(QueuedApp{
+			Name:      "app1",
+			Namespace: "ns1",
+			Spec:      &cluster.ApplicationSpec{Project: "base-spec"},
+			IsRemoved: true,
+		})
+		if !updated {
+			t.Fatal("UpdatePending should return true for pending app")
+		}
+
+		app := queue.Next()
+		if !app.IsRemoved {
+			t.Error("IsRemoved = false after UpdatePending with IsRemoved=true, want true")
+		}
+		if app.Spec == nil || app.Spec.Project != "base-spec" {
+			t.Error("Spec not updated alongside IsRemoved")
+		}
+	})
+
+	t.Run("RequeueProcessed accepts identical spec when IsRemoved flips", func(t *testing.T) {
+		queue := NewAppDiffQueue(10)
+
+		// Processed prematurely with its cluster spec: both sides rendered.
+		spec := &cluster.ApplicationSpec{Project: "same"}
+		queue.Add(QueuedApp{Name: "app1", Namespace: "ns1", Depth: 0, Spec: spec})
+		queue.Next()
+
+		// The removal rediscovery carries the very same spec (cluster spec ==
+		// base spec); only IsRemoved differs. The signature must include the
+		// flag or this requeue would be refused and the stale alive-on-both-
+		// sides result would survive.
+		if !queue.RequeueProcessed(QueuedApp{
+			Name:      "app1",
+			Namespace: "ns1",
+			Depth:     1,
+			Spec:      spec,
+			IsRemoved: true,
+		}) {
+			t.Fatal("RequeueProcessed should accept an identical spec when IsRemoved flips")
+		}
+
+		app := queue.Next()
+		if !app.IsRemoved {
+			t.Error("IsRemoved = false after requeue, want true")
+		}
+
+		// A second identical removal rediscovery is the loop terminator.
+		if queue.RequeueProcessed(QueuedApp{
+			Name:      "app1",
+			Namespace: "ns1",
+			Depth:     1,
+			Spec:      spec,
+			IsRemoved: true,
+		}) {
+			t.Error("RequeueProcessed should refuse a second requeue with an identical signature")
 		}
 	})
 

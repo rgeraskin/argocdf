@@ -720,6 +720,64 @@ func (a *App) processApplications(ctx context.Context, apps []cluster.Applicatio
 					}
 				}
 			}
+
+			// Find removed child applications (present on base, absent on target).
+			// A removed child's target render must be skipped via the explicit
+			// IsRemoved flag: its source directory typically still exists on the
+			// target branch (only the parent's catalog entry was deleted), so a
+			// target render would succeed and wrongly diff the child as alive.
+			// Recursion is free: the removed child's own empty target render makes
+			// its FindRemovedApplications return every base-side grandchild.
+			removedApps, err := a.discoverer.FindRemovedApplications(appDiff.RenderedOld, appDiff.RenderedNew)
+			if err != nil {
+				a.logger.Warn("Error discovering removed child apps", "parent", queuedApp.Name, "error", err)
+			} else {
+				for _, removedApp := range removedApps {
+					childApp := diff.QueuedApp{
+						Name:            removedApp.Name,
+						Namespace:       removedApp.Namespace,
+						Depth:           queuedApp.Depth + 1,
+						ParentApp:       queuedApp.Name,
+						ParentNamespace: queuedApp.Namespace,
+						// The base-side spec is the only one that exists; with
+						// OldSpec nil, processOneApp renders the base side from it.
+						Spec:      &removedApp.Spec,
+						IsRemoved: true,
+					}
+
+					// All three modified-children cases apply to removed children:
+					// the child can still be pending (queued from the cluster
+					// before its parent revealed the removal — the pending render
+					// would diff it as alive) or already processed (that result
+					// rendered both sides — semantically wrong for the same
+					// reason). Requeues survive the specSignature guard because
+					// IsRemoved is part of the signature; the spec itself usually
+					// matches the earlier pass (cluster spec == base spec).
+
+					// Case 1: App is still pending - mark it removed
+					if queue.UpdatePending(childApp) {
+						a.logger.Debug("Updated pending child application as removed",
+							"parent", queuedApp.Name, "child", removedApp.Name)
+						appDiff.ChildAppNames = append(appDiff.ChildAppNames, removedApp.Name)
+						continue
+					}
+
+					// Case 2: App not in queue at all - add it (pure child discovery)
+					if queue.Add(childApp) {
+						a.logger.Debug("Discovered removed child application",
+							"parent", queuedApp.Name, "child", removedApp.Name)
+						appDiff.ChildAppNames = append(appDiff.ChildAppNames, removedApp.Name)
+						continue
+					}
+
+					// Case 3: App was already processed - requeue for re-processing
+					if queue.RequeueProcessed(childApp) {
+						a.logger.Info("Re-queuing already-processed child as removed",
+							"parent", queuedApp.Name, "child", removedApp.Name)
+						appDiff.ChildAppNames = append(appDiff.ChildAppNames, removedApp.Name)
+					}
+				}
+			}
 		}
 	}
 
@@ -847,12 +905,27 @@ func (a *App) processOneApp(ctx context.Context, queuedApp *diff.QueuedApp) (*ty
 	}
 
 	// Render from the target worktree (committed target tip) using new spec.
-	renderedNew, sourceTypeNew, err := a.renderBranch(ctx, appNew, a.targetWorktree, a.targetCommit, a.cfg.TargetBranch, "deleted app")
-	if err != nil {
-		return nil, fmt.Errorf("failed to render target branch: %w", err)
-	}
-	if appDiff.SourceType == "" {
-		appDiff.SourceType = sourceTypeNew
+	//
+	// Removed child apps (discovered only on the base branch) have no
+	// target-branch counterpart, so the target render is skipped and the empty
+	// target side makes the whole app diff as removed. The skip must key off
+	// the explicit flag, not a missing source path: removing a child usually
+	// deletes only the parent's catalog entry while the child's source
+	// directory still exists on the target branch, so sourcePathsExist cannot
+	// catch it and a target render would succeed with live manifests.
+	var renderedNew []byte
+	if queuedApp.IsRemoved {
+		a.logger.Debug("Skipping target render for removed application",
+			"app", queuedApp.Name, "branch", a.cfg.TargetBranch)
+	} else {
+		rendered, sourceTypeNew, err := a.renderBranch(ctx, appNew, a.targetWorktree, a.targetCommit, a.cfg.TargetBranch, "deleted app")
+		if err != nil {
+			return nil, fmt.Errorf("failed to render target branch: %w", err)
+		}
+		renderedNew = rendered
+		if appDiff.SourceType == "" {
+			appDiff.SourceType = sourceTypeNew
+		}
 	}
 
 	appDiff.RenderedOld = string(renderedOld)
