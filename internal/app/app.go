@@ -993,10 +993,20 @@ func (a *App) renderCacheKey(app *cluster.Application, commit string) (string, b
 
 // sourcePathsExist checks if all local source paths for an application exist on disk.
 // Remote chart sources (with Chart field set) are skipped since they don't need a local path.
+// Sources living in another repository are skipped too: their paths exist only in that
+// repo's checkout, cloned at render time (render/externalrepo.go). The external test must
+// mirror render.isExternalSource, keyed off the same cfg.RepoURL the factory feeds into
+// RenderOptions.RepoURL, so both layers agree on what "external" means; an unknown local
+// repo URL treats everything as local.
 func (a *App) sourcePathsExist(app *cluster.Application, repoPath string) bool {
+	localRepoURL := a.cfg.RepoURL
 	for _, source := range app.Spec.GetSources() {
 		// Remote charts don't need a local path
 		if source.Chart != "" {
+			continue
+		}
+		if localRepoURL != "" && source.RepoURL != "" &&
+			git.NormalizeRepoURL(source.RepoURL) != git.NormalizeRepoURL(localRepoURL) {
 			continue
 		}
 		if source.Path == "" {

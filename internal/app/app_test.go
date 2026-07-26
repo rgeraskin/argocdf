@@ -280,7 +280,7 @@ func TestFilterAffectedApps_RefValueFiles(t *testing.T) {
 func TestSourcePathsExist(t *testing.T) {
 	logger := log.New(nil)
 	logger.SetLevel(log.FatalLevel)
-	a := &App{logger: logger}
+	localURL := "https://example.com/org/repo.git"
 
 	// Create a temp directory with a subdirectory to simulate repo structure
 	tmpDir := t.TempDir()
@@ -291,11 +291,15 @@ func TestSourcePathsExist(t *testing.T) {
 
 	tests := []struct {
 		name string
-		app  *cluster.Application
-		want bool
+		// localRepoURL is the detected repo URL (cfg.RepoURL); empty simulates
+		// failed auto-detection, which must treat every source as local.
+		localRepoURL string
+		app          *cluster.Application
+		want         bool
 	}{
 		{
-			name: "path exists",
+			name:         "path exists",
+			localRepoURL: localURL,
 			app: &cluster.Application{
 				Spec: cluster.ApplicationSpec{
 					Source: &cluster.ApplicationSource{
@@ -306,7 +310,8 @@ func TestSourcePathsExist(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "path does not exist",
+			name:         "path does not exist",
+			localRepoURL: localURL,
 			app: &cluster.Application{
 				Spec: cluster.ApplicationSpec{
 					Source: &cluster.ApplicationSource{
@@ -317,7 +322,8 @@ func TestSourcePathsExist(t *testing.T) {
 			want: false,
 		},
 		{
-			name: "remote chart source - no local path needed",
+			name:         "remote chart source - no local path needed",
+			localRepoURL: localURL,
 			app: &cluster.Application{
 				Spec: cluster.ApplicationSpec{
 					Source: &cluster.ApplicationSource{
@@ -329,7 +335,8 @@ func TestSourcePathsExist(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "empty path",
+			name:         "empty path",
+			localRepoURL: localURL,
 			app: &cluster.Application{
 				Spec: cluster.ApplicationSpec{
 					Source: &cluster.ApplicationSource{
@@ -339,10 +346,55 @@ func TestSourcePathsExist(t *testing.T) {
 			},
 			want: true,
 		},
+		{
+			// The path lives in the external repo's checkout, not the local
+			// worktree; treating it as missing would short-circuit the render
+			// to empty on both sides.
+			name:         "external git source - path checked in its own repo",
+			localRepoURL: localURL,
+			app: &cluster.Application{
+				Spec: cluster.ApplicationSpec{
+					Source: &cluster.ApplicationSource{
+						RepoURL: "https://github.com/other/podinfo.git",
+						Path:    "kustomize",
+					},
+				},
+			},
+			want: true,
+		},
+		{
+			// URL normalization: a trailing-.git difference is still the local
+			// repo, so the missing path stays a real miss.
+			name:         "same repo modulo .git suffix - missing path",
+			localRepoURL: localURL,
+			app: &cluster.Application{
+				Spec: cluster.ApplicationSpec{
+					Source: &cluster.ApplicationSource{
+						RepoURL: "https://example.com/org/repo",
+						Path:    "charts/nonexistent",
+					},
+				},
+			},
+			want: false,
+		},
+		{
+			name:         "local repo URL unknown - external source treated local",
+			localRepoURL: "",
+			app: &cluster.Application{
+				Spec: cluster.ApplicationSpec{
+					Source: &cluster.ApplicationSource{
+						RepoURL: "https://github.com/other/podinfo.git",
+						Path:    "kustomize",
+					},
+				},
+			},
+			want: false,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			a := &App{cfg: &config.Config{RepoURL: tt.localRepoURL}, logger: logger}
 			if got := a.sourcePathsExist(tt.app, tmpDir); got != tt.want {
 				t.Errorf("sourcePathsExist() = %v, want %v", got, tt.want)
 			}
