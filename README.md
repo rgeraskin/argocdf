@@ -266,6 +266,28 @@ Each `--lint` command receives an application's rendered multi-doc YAML on stdin
 
 The exit code is the only health signal: stdout lines are always reported as warnings, and a spawn failure, timeout, or exit ≠ 0 adds one non-fatal `lint "<command>": ...` warning line. That warning echoes a truncated prefix of the command, so don't embed secrets in the command text — pass them via the environment or files instead. Tools like kyverno and conftest exit non-zero when policies fail (normal operation), so end the pipeline in an adapter — typically `jq`, which also normalizes any tool's output to line-per-finding.
 
+Lint commands inherit argocdf's environment plus two variables naming the cluster argocdf is diffing, so a cluster-aware adapter (`kyverno apply --cluster`, `kubectl apply --dry-run=server`) can validate against exactly that cluster instead of whatever the invoking shell happens to point at: **`ARGOCDF_CONTEXT`** is the resolved kube context (`--context` when given, otherwise the kubeconfig's `current-context` — no fallback logic needed in the adapter) and **`ARGOCDF_KUBECONFIG`** is the kubeconfig argocdf itself read (`--kubeconfig`, else `$KUBECONFIG`, else `~/.kube/config`; it may be a `:`-separated list, passed verbatim). Neither is ever exported empty: a value argocdf cannot resolve is simply absent.
+
+A cluster-aware adapter should **require** `ARGOCDF_CONTEXT` and fail when it is missing, not carry on without it. Continuing means the tool falls back to the ambient context and reports findings about a *different* cluster than the one under review — and in the report that is indistinguishable from a correct result, which is worse than no lint at all:
+
+```bash
+if [ -z "${ARGOCDF_CONTEXT:-}" ]; then
+  echo "ARGOCDF_CONTEXT not set: refusing to lint against an unknown cluster"
+  exit 1
+fi
+kubectl apply --dry-run=server -f - --context "$ARGOCDF_CONTEXT"
+```
+
+`ARGOCDF_KUBECONFIG` is a different matter and stays optional: absent means argocdf used the ambient kubeconfig, which the adapter already inherited. Offline linters (conftest, kubeconform against local schemas) need neither variable — the requirement belongs only to the steps that actually consult a cluster.
+
+Note that argocdf does **not** rewrite `KUBECONFIG` for lint commands: your own setting is left exactly as it is, and the resolved path is offered alongside it under `ARGOCDF_KUBECONFIG`. A tool that has no context flag can still be steered by writing a stub kubeconfig that sets only `current-context` and prepending it to `KUBECONFIG` — a kubeconfig merge takes `current-context` from the first file that sets one, while clusters, users and auth plugins keep coming from your real config:
+
+```bash
+stub=$(mktemp)
+printf 'apiVersion: v1\nkind: Config\ncurrent-context: %s\n' "$ARGOCDF_CONTEXT" >"$stub"
+export KUBECONFIG="$stub:${ARGOCDF_KUBECONFIG:-$HOME/.kube/config}"
+```
+
 Empty tool output is ambiguous, and getting it wrong is the most common way an adapter goes bad in both directions: **resolve it with the tool's exit code, never by making `jq` fail on empty input.** A clean run and a crashed run can both print nothing — kyverno prints nothing (exit 0) whenever no rendered resource matches a policy's `matchConstraints`, which for a report full of ConfigMaps or Application CRs is the normal case. An adapter that treats empty as failure (the `jq -rn 'input | ...'` idiom, which exits non-zero when no JSON arrives) then attaches a spurious lint-failure warning to every such application, drowning real findings; one that ignores exit codes entirely reports a crashed tool as "clean". Branch explicitly: output present → parse it; empty and exit 0 → say nothing; empty and exit ≠ 0 → print one self-identifying failure line (or just exit non-zero and let argocdf's own warning carry it).
 
 ```bash
@@ -308,23 +330,33 @@ emit() {
   fi
 }
 
+# kyverno consults the cluster (--cluster) to resolve the CRDs of any custom
+# resources in the input, so it must be argocdf's cluster: without the exported
+# context, findings would describe whatever cluster the shell points at.
+if [ -z "${ARGOCDF_CONTEXT:-}" ]; then
+  echo "ARGOCDF_CONTEXT not set: refusing to lint against an unknown cluster"
+  exit 1
+fi
+[ -n "${ARGOCDF_KUBECONFIG:-}" ] && export KUBECONFIG="$ARGOCDF_KUBECONFIG"
+
 # --continue-on-fail: rendered manifests routinely contain custom resources
 # whose CRDs kyverno cannot resolve (a PR that adds a CRD alongside its CRs, a
 # chart shipping CRs for another operator). Without it, ONE unmappable document
 # aborts the whole apply — and the violations it did find on ordinary workloads
 # in the same input are lost silently.
 out=$(kyverno apply policies/ --resource - --policy-report --output-format json \
-  --continue-on-fail 2>/dev/null <<<"$manifests")
+  --cluster --context "$ARGOCDF_CONTEXT" --continue-on-fail 2>/dev/null <<<"$manifests")
 emit "kyverno apply" "$out" "$?" '.results[]?
   | select(.result == "fail" or .result == "warn")
   | "[kyverno/\(.policy)] \(.resources[0].kind)/\(.resources[0].name): \(.message | gsub("\n"; " "))"'
 
+# conftest evaluates the manifests offline, so it needs neither variable.
 out=$(conftest test - --policy policy/ --output json 2>/dev/null <<<"$manifests")
 emit "conftest" "$out" "$?" '.[] | .failures[]?.msg, .warnings[]?.msg
   | select(. != null) | "[conftest] " + gsub("\n"; " ")'
 ```
 
-A working adapter under continuous test lives in the e2e suite: [`scripts/lint-kyverno.sh`](https://github.com/rgeraskin/argocdf-test-repo/blob/master/scripts/lint-kyverno.sh) in [argocdf-test-repo](https://github.com/rgeraskin/argocdf-test-repo) (this repository's `e2e/` submodule). Every argocdf release runs it against all 35 e2e cases, on both sides of each one, so its empty-output handling and exit-code contract are exercised continuously — including the deliberately-unmappable Application CRs that apps-of-apps parents render. Its header comment also documents why it stays offline instead of resolving CRDs from the cluster with `kyverno apply --cluster`.
+A working adapter under continuous test lives in the e2e suite: [`scripts/lint-kyverno.sh`](https://github.com/rgeraskin/argocdf-test-repo/blob/master/scripts/lint-kyverno.sh) in [argocdf-test-repo](https://github.com/rgeraskin/argocdf-test-repo) (this repository's `e2e/` submodule). Every argocdf release runs it against all 36 e2e cases, on both sides of each one, so its empty-output handling, exit-code contract and use of the exported cluster selectors are exercised continuously. One case exists specifically to prove the cluster reached is argocdf's: its pinned finding comes from a policy over Application CRs, which kyverno can only evaluate after resolving that CRD from the cluster.
 
 ### CI Flags
 

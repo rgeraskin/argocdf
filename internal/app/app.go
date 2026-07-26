@@ -322,7 +322,7 @@ func (a *App) initialize(ctx context.Context) error {
 	// Create differ and discoverer
 	a.differ = a.factory.CreateManifestDiffer()
 	a.discoverer = a.factory.CreateAppDiscoverer()
-	a.linter = a.factory.CreateLintRunner()
+	a.linter = a.createLintRunner()
 
 	// Create output writer
 	a.writer, err = a.factory.CreateOutputWriter()
@@ -331,6 +331,20 @@ func (a *App) initialize(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// createLintRunner builds the lint runner for this run, feeding it the context
+// the cluster client actually connected with so lint commands can target the
+// cluster being diffed. Extracted from initialize so the wiring from client to
+// runner is testable without a live cluster: passing the wrong thing here (or
+// nothing) is exactly how cluster-aware lint adapters would silently fall back
+// to the invoking shell's cluster. Returns nil when --lint is not configured.
+func (a *App) createLintRunner() *lint.Runner {
+	var kubeContext string
+	if a.kubeClient != nil {
+		kubeContext = a.kubeClient.ResolvedContext()
+	}
+	return a.factory.CreateLintRunner(kubeContext)
 }
 
 // resolveKubeVersion returns the Kubernetes version to render with. An

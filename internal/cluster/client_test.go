@@ -1,11 +1,106 @@
 package cluster
 
 import (
+	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
+
+func TestResolveContextName(t *testing.T) {
+	tests := []struct {
+		name     string
+		override string
+		raw      clientcmdapi.Config
+		rawErr   error
+		want     string
+	}{
+		{
+			name:     "explicit override wins over current-context",
+			override: "prod",
+			raw:      clientcmdapi.Config{CurrentContext: "dev"},
+			want:     "prod",
+		},
+		{
+			name: "no override falls back to current-context",
+			raw:  clientcmdapi.Config{CurrentContext: "dev"},
+			want: "dev",
+		},
+		{
+			// The override needs no kubeconfig to be meaningful.
+			name:     "override still wins when the raw config is unreadable",
+			override: "prod",
+			raw:      clientcmdapi.Config{},
+			rawErr:   errors.New("no such file"),
+			want:     "prod",
+		},
+		{
+			name:   "unreadable raw config without override resolves to unknown",
+			raw:    clientcmdapi.Config{CurrentContext: "ignored"},
+			rawErr: errors.New("no such file"),
+			want:   "",
+		},
+		{
+			name: "config without current-context resolves to unknown",
+			raw:  clientcmdapi.Config{},
+			want: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := resolveContextName(tt.override, tt.raw, tt.rawErr); got != tt.want {
+				t.Errorf("resolveContextName() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestNewClientResolvesContext pins that the resolved name is captured during
+// the connect that already happens (no live cluster needed: building the client
+// never dials).
+func TestNewClientResolvesContext(t *testing.T) {
+	kubeconfig := filepath.Join(t.TempDir(), "kubeconfig")
+	if err := os.WriteFile(kubeconfig, []byte(`apiVersion: v1
+kind: Config
+clusters:
+- cluster: {server: "https://127.0.0.1:1"}
+  name: offline
+contexts:
+- context: {cluster: offline}
+  name: from-file
+- context: {cluster: offline}
+  name: from-flag
+current-context: from-file
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name        string
+		contextName string
+		want        string
+	}{
+		{name: "no --context uses the kubeconfig current-context", want: "from-file"},
+		{name: "--context overrides current-context", contextName: "from-flag", want: "from-flag"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client, err := NewClient(kubeconfig, tt.contextName)
+			if err != nil {
+				t.Fatalf("NewClient() error = %v", err)
+			}
+			if got := client.ResolvedContext(); got != tt.want {
+				t.Errorf("ResolvedContext() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
 
 func TestAPIVersionsFromResourceLists(t *testing.T) {
 	tests := []struct {

@@ -13,12 +13,18 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
 
 // Client wraps Kubernetes client-go for cluster operations.
 type Client struct {
 	kubeconfig string
 	context    string
+
+	// resolvedContext is the context name the client actually connected with:
+	// the explicit override when set, otherwise the merged kubeconfig's
+	// current-context. It stays "" when the name cannot be determined.
+	resolvedContext string
 
 	restConfig    *rest.Config
 	clientset     *kubernetes.Clientset
@@ -50,6 +56,13 @@ func (c *Client) connect() error {
 
 	kubeConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, configOverrides)
 
+	// Resolve the context name once, here: the override is not reflected in
+	// RawConfig(), and the loaded config is only reachable from this local.
+	// Failure is not fatal — the name is informational (it is exported to lint
+	// subprocesses), so an unreadable raw config just leaves it unknown.
+	rawConfig, rawErr := kubeConfig.RawConfig()
+	c.resolvedContext = resolveContextName(c.context, rawConfig, rawErr)
+
 	config, err := kubeConfig.ClientConfig()
 	if err != nil {
 		return fmt.Errorf("failed to build config: %w", err)
@@ -72,6 +85,24 @@ func (c *Client) connect() error {
 	c.dynamicClient = dynamicClient
 
 	return nil
+}
+
+// resolveContextName returns the kube context a connection actually uses:
+// the explicit --context override when set, otherwise the merged kubeconfig's
+// current-context. It returns "" when the name is unknowable (the raw config
+// could not be loaded, or it declares no current-context and no override was
+// given); callers must treat that as "unknown" rather than as a real value.
+//
+// It is a pure function over the loaded config so the precedence is testable
+// without a live cluster.
+func resolveContextName(override string, raw clientcmdapi.Config, err error) string {
+	if override != "" {
+		return override
+	}
+	if err != nil {
+		return ""
+	}
+	return raw.CurrentContext
 }
 
 // GetKubeVersion returns the Kubernetes server version.
@@ -146,6 +177,14 @@ func (c *Client) RESTConfig() *rest.Config {
 // Context returns the kubernetes context being used.
 func (c *Client) Context() string {
 	return c.context
+}
+
+// ResolvedContext returns the name of the context the client connected with:
+// the configured one, or the kubeconfig's current-context when none was
+// configured. It is "" when the name could not be determined, so callers can
+// distinguish "unknown" from a real context name.
+func (c *Client) ResolvedContext() string {
+	return c.resolvedContext
 }
 
 // GVR is a helper type for GroupVersionResource.

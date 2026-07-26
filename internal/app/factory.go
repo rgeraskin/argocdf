@@ -149,15 +149,40 @@ func (f *Factory) CreateManifestDiffer() *diff.ManifestDiffer {
 	return diff.NewManifestDiffer()
 }
 
+// Environment variables exported to --lint commands: the EFFECTIVE values of
+// argocdf's two cluster-selecting flags, under the names argocdf's
+// ARGOCDF_<FLAG> convention already assigns them. A cluster-aware adapter
+// (`kyverno apply --cluster`, `kubectl --dry-run=server`) can then target the
+// cluster argocdf is diffing instead of whatever the invoking shell points at.
+const (
+	envLintContext    = "ARGOCDF_CONTEXT"
+	envLintKubeconfig = "ARGOCDF_KUBECONFIG"
+)
+
 // CreateLintRunner creates the rendered-manifest lint runner, or nil when no
-// --lint commands are configured.
-func (f *Factory) CreateLintRunner() *lint.Runner {
+// --lint commands are configured. kubeContext is the RESOLVED context name
+// (see cluster.Client.ResolvedContext), so adapters need no fallback logic;
+// when it is unknown nothing is exported for that variable — never an empty
+// value, which an adapter could not distinguish from a real one.
+func (f *Factory) CreateLintRunner(kubeContext string) *lint.Runner {
 	if len(f.config.Lint) == 0 {
 		return nil
 	}
+
+	env := make(map[string]string, 2)
+	if kubeContext != "" {
+		env[envLintContext] = kubeContext
+	}
+	// Passed verbatim: KubeconfigPath may be an os.PathListSeparator-joined
+	// list, exactly as KUBECONFIG carried it.
+	if f.config.KubeconfigPath != "" {
+		env[envLintKubeconfig] = f.config.KubeconfigPath
+	}
+
 	return &lint.Runner{
 		Commands: f.config.Lint,
 		Timeout:  f.config.LintTimeout,
+		Env:      env,
 	}
 }
 

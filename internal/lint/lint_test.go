@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -155,6 +156,133 @@ func TestLintMultipleCommandsRunInOrder(t *testing.T) {
 	got := r.Lint(context.Background(), "", "")
 	if len(got) != 2 || got[0] != "first" || got[1] != "second" {
 		t.Errorf("expected commands to run in order, got %v", got)
+	}
+}
+
+func TestChildEnv(t *testing.T) {
+	tests := []struct {
+		name   string
+		parent []string
+		extra  map[string]string
+		want   []string
+	}{
+		{
+			name:   "nil extra leaves the environment untouched",
+			parent: []string{"PATH=/bin", "HOME=/home/u"},
+			extra:  nil,
+			want:   nil,
+		},
+		{
+			name:   "empty extra leaves the environment untouched",
+			parent: []string{"PATH=/bin"},
+			extra:  map[string]string{},
+			want:   nil,
+		},
+		{
+			name:   "appends when the parent has no such key",
+			parent: []string{"PATH=/bin", "HOME=/home/u"},
+			extra:  map[string]string{"ARGOCDF_CONTEXT": "prod"},
+			want:   []string{"PATH=/bin", "HOME=/home/u", "ARGOCDF_CONTEXT=prod"},
+		},
+		{
+			name:   "replaces an inherited value and keeps unrelated vars",
+			parent: []string{"PATH=/bin", "ARGOCDF_CONTEXT=stale", "HOME=/home/u"},
+			extra:  map[string]string{"ARGOCDF_CONTEXT": "prod"},
+			want:   []string{"PATH=/bin", "HOME=/home/u", "ARGOCDF_CONTEXT=prod"},
+		},
+		{
+			name:   "removes every inherited occurrence of the key",
+			parent: []string{"ARGOCDF_CONTEXT=stale", "PATH=/bin", "ARGOCDF_CONTEXT=older"},
+			extra:  map[string]string{"ARGOCDF_CONTEXT": "prod"},
+			want:   []string{"PATH=/bin", "ARGOCDF_CONTEXT=prod"},
+		},
+		{
+			name:   "multiple keys are appended in sorted order",
+			parent: []string{"ARGOCDF_KUBECONFIG=/stale/config", "PATH=/bin"},
+			extra: map[string]string{
+				"ARGOCDF_KUBECONFIG": "/a/config:/b/config",
+				"ARGOCDF_CONTEXT":    "prod",
+			},
+			want: []string{"PATH=/bin", "ARGOCDF_CONTEXT=prod", "ARGOCDF_KUBECONFIG=/a/config:/b/config"},
+		},
+		{
+			name:   "an empty inherited value is replaced too",
+			parent: []string{"ARGOCDF_CONTEXT="},
+			extra:  map[string]string{"ARGOCDF_CONTEXT": "prod"},
+			want:   []string{"ARGOCDF_CONTEXT=prod"},
+		},
+		{
+			name:   "malformed parent entries are preserved",
+			parent: []string{"NO_EQUALS_SIGN", "PATH=/bin"},
+			extra:  map[string]string{"ARGOCDF_CONTEXT": "prod"},
+			want:   []string{"NO_EQUALS_SIGN", "PATH=/bin", "ARGOCDF_CONTEXT=prod"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := childEnv(tt.parent, tt.extra)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("childEnv() = %v, want %v", got, tt.want)
+			}
+			// A duplicated key resolves to its FIRST occurrence in the child,
+			// so argocdf's value only wins if it is the ONLY occurrence.
+			for name, value := range tt.extra {
+				var count int
+				for _, entry := range got {
+					if entry == name+"="+value {
+						count++
+					} else if strings.HasPrefix(entry, name+"=") {
+						t.Errorf("childEnv() kept a foreign entry for %s: %q", name, entry)
+					}
+				}
+				if count != 1 {
+					t.Errorf("childEnv() has %d entries for %s=%s, want exactly 1", count, name, value)
+				}
+			}
+		})
+	}
+}
+
+func TestLintExportsEnvToCommand(t *testing.T) {
+	// The parent already carries a conflicting value and an unrelated one: the
+	// first must lose to argocdf's, the second must survive.
+	t.Setenv("ARGOCDF_CONTEXT", "shell-context")
+	t.Setenv("LINT_UNRELATED", "kept")
+
+	r := &Runner{
+		Commands: []string{
+			`echo "context=$ARGOCDF_CONTEXT"; echo "kubeconfig=$ARGOCDF_KUBECONFIG";` +
+				` echo "unrelated=$LINT_UNRELATED"; echo "count=$(env | grep -c '^ARGOCDF_CONTEXT=')"`,
+		},
+		Timeout: 5 * time.Second,
+		Env: map[string]string{
+			"ARGOCDF_CONTEXT":    "argocdf-context",
+			"ARGOCDF_KUBECONFIG": "/a/config:/b/config",
+		},
+	}
+
+	got := r.Lint(context.Background(), "", "")
+	want := []string{
+		"context=argocdf-context",
+		"kubeconfig=/a/config:/b/config",
+		"unrelated=kept",
+		"count=1",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("lint command environment = %v, want %v", got, want)
+	}
+}
+
+func TestLintWithoutEnvInheritsParent(t *testing.T) {
+	// No Env configured: cmd.Env stays nil and the child inherits everything,
+	// exactly as before the variables were introduced.
+	t.Setenv("ARGOCDF_CONTEXT", "shell-context")
+
+	r := newRunner(`echo "context=$ARGOCDF_CONTEXT"`)
+	got := r.Lint(context.Background(), "", "")
+	if len(got) != 1 || got[0] != "context=shell-context" {
+		t.Errorf("expected the inherited value to reach the command, got %v", got)
 	}
 }
 
