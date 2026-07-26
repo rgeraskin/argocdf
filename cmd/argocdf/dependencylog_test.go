@@ -1,11 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/charmbracelet/log"
+	"github.com/sirupsen/logrus"
 )
 
 // captureHandler records the level of every record it receives.
@@ -92,6 +97,25 @@ func TestKlogHandler_LevelMapping(t *testing.T) {
 				t.Fatalf("Handle() forwarded levels %v, want [%v]", levels, tt.want)
 			}
 		})
+	}
+}
+
+// TestConfigureDependencyLoggingIdempotent pins that reconfiguration
+// replaces the logrus forwarder instead of stacking a second one — repeated
+// setup (tests, library-style reuse) must not duplicate every argocd line.
+func TestConfigureDependencyLoggingIdempotent(t *testing.T) {
+	// Pre-set the env vars the function would otherwise mutate process-wide.
+	t.Setenv("ARGOCD_LOG_FORMAT", "text")
+	t.Setenv("ARGOCD_LOG_LEVEL", "error")
+
+	var buf bytes.Buffer
+	logger := log.New(&buf)
+	configureDependencyLogging(logger, true)
+	configureDependencyLogging(logger, true)
+
+	logrus.Error("hook-dup-probe")
+	if got := strings.Count(buf.String(), "hook-dup-probe"); got != 1 {
+		t.Errorf("logrus record forwarded %d time(s), want exactly 1 (hooks stacked across reconfiguration)", got)
 	}
 }
 

@@ -1376,6 +1376,69 @@ func TestProcessApplicationsDeterministicOrder(t *testing.T) {
 	}
 }
 
+// childNamesRenderer renders a parent whose target side introduces two new
+// child Applications in reverse-alphabetical manifest order; children render
+// a plain ConfigMap.
+type childNamesRenderer struct{ targetWorktree string }
+
+func (r childNamesRenderer) RenderApplication(
+	_ context.Context, app *cluster.Application, repoPath string, _ string,
+) (*render.RenderResult, error) {
+	if app.Name == "parent" {
+		if repoPath == r.targetWorktree {
+			return &render.RenderResult{Manifests: []byte(appCRD("zz-child", "1.0.0") + "---\n" + appCRD("aa-child", "1.0.0"))}, nil
+		}
+		return &render.RenderResult{}, nil
+	}
+	return &render.RenderResult{Manifests: []byte(revConfigMap(app.Name, "1.0.0"))}, nil
+}
+
+// TestProcessApplicationsSortsChildAppNames pins that ChildAppNames come out
+// sorted, not in discovery (manifest) order, so any output surfacing them
+// stays deterministic.
+func TestProcessApplicationsSortsChildAppNames(t *testing.T) {
+	logger := log.New(nil)
+	logger.SetLevel(log.FatalLevel)
+	cfg := &config.Config{Concurrency: 2, MaxDepth: 5}
+
+	parent := cluster.Application{
+		Spec: cluster.ApplicationSpec{
+			Source: &cluster.ApplicationSource{
+				RepoURL:        "https://example.com/org/repo.git",
+				Chart:          "dummy",
+				TargetRevision: "1.0.0",
+			},
+		},
+	}
+	parent.Name = "parent"
+	parent.Namespace = "argocd"
+
+	a := &App{
+		factory:        NewFactory(cfg, logger),
+		cfg:            cfg,
+		logger:         logger,
+		renderer:       childNamesRenderer{targetWorktree: "/fake/target"},
+		differ:         diff.NewManifestDiffer(),
+		discoverer:     diff.NewAppDiscoverer(),
+		baseWorktree:   "/fake/base",
+		targetWorktree: "/fake/target",
+	}
+	diffs, err := a.processApplications(context.Background(), []cluster.Application{parent})
+	if err != nil {
+		t.Fatalf("processApplications() error: %v", err)
+	}
+	for _, d := range diffs {
+		if d.Name != "parent" {
+			continue
+		}
+		if got := strings.Join(d.ChildAppNames, ","); got != "aa-child,zz-child" {
+			t.Errorf("ChildAppNames = %q, want sorted \"aa-child,zz-child\" (manifest order was zz,aa)", got)
+		}
+		return
+	}
+	t.Fatal("parent diff not found in results")
+}
+
 // TestResolveKubeVersion pins the --kube-version precedence contract:
 // an explicit version wins WITHOUT consulting the cluster; detection is used
 // otherwise; detection failure falls back to the default (surfacing the error
