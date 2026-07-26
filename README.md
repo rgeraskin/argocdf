@@ -264,7 +264,9 @@ Each `--lint` command receives an application's rendered multi-doc YAML on stdin
 - `[target]`-only — this change **introduces** the violation
 - both sides — pre-existing, untouched by this change
 
-The exit code is the only health signal: stdout lines are always reported as warnings, and a spawn failure, timeout, or exit ≠ 0 adds one non-fatal `lint "<command>": ...` warning line. That warning echoes a truncated prefix of the command, so don't embed secrets in the command text — pass them via the environment or files instead. Tools like kyverno and conftest exit non-zero when policies fail (normal operation), so end the pipeline in an adapter — typically `jq`, which also normalizes any tool's output to line-per-finding. Use `jq -rn 'input | ...'` rather than plain `jq`: `input` demands at least one JSON document, so if the tool crashes and produces empty output the adapter exits non-zero instead of silently passing.
+The exit code is the only health signal: stdout lines are always reported as warnings, and a spawn failure, timeout, or exit ≠ 0 adds one non-fatal `lint "<command>": ...` warning line. That warning echoes a truncated prefix of the command, so don't embed secrets in the command text — pass them via the environment or files instead. Tools like kyverno and conftest exit non-zero when policies fail (normal operation), so end the pipeline in an adapter — typically `jq`, which also normalizes any tool's output to line-per-finding.
+
+Empty tool output is ambiguous, and getting it wrong is the most common way an adapter goes bad in both directions: **resolve it with the tool's exit code, never by making `jq` fail on empty input.** A clean run and a crashed run can both print nothing — kyverno prints nothing (exit 0) whenever no rendered resource matches a policy's `matchConstraints`, which for a report full of ConfigMaps or Application CRs is the normal case. An adapter that treats empty as failure (the `jq -rn 'input | ...'` idiom, which exits non-zero when no JSON arrives) then attaches a spurious lint-failure warning to every such application, drowning real findings; one that ignores exit codes entirely reports a crashed tool as "clean". Branch explicitly: output present → parse it; empty and exit 0 → say nothing; empty and exit ≠ 0 → print one self-identifying failure line (or just exit non-zero and let argocdf's own warning carry it).
 
 ```bash
 # kyverno (inline — see the script advice below)
@@ -288,22 +290,41 @@ argocdf --lint ./scripts/lint-manifests.sh
 #!/usr/bin/env bash
 # scripts/lint-manifests.sh — argocdf lint adapter.
 # Reads rendered manifests on stdin, prints one finding per line on stdout.
-# No pipefail: kyverno/conftest exit non-zero on findings (normal operation);
-# `jq -rn 'input ...'` still catches a crashed tool (empty output -> exit != 0).
-set -eu
+# No errexit/pipefail: kyverno and conftest exit non-zero on FINDINGS (normal
+# operation), and one tool's outcome must never skip the tools after it.
+set -u
 
 # Capture stdin once so several tools can each read the manifests.
 manifests=$(cat)
 
-kyverno apply policies/ --resource - --policy-report --output-format json 2>/dev/null <<<"$manifests" |
-  jq -rn 'input | .results[]?
-    | select(.result == "fail" or .result == "warn")
-    | "[kyverno/\(.policy)] \(.resources[0].kind)/\(.resources[0].name): \(.message | gsub("\n"; " "))"'
+# emit <label> <raw-output> <exit-code> <jq-filter>
+# Findings when the tool produced output; ONE failure line when it produced
+# nothing AND failed; silence when it produced nothing and succeeded.
+emit() {
+  if [ -n "$2" ]; then
+    printf '%s\n' "$2" | jq -r "$4"
+  elif [ "$3" -ne 0 ]; then
+    echo "$1 failed (exit $3)"
+  fi
+}
 
-conftest test - --policy policy/ --output json 2>/dev/null <<<"$manifests" |
-  jq -rn 'input | .[] | .failures[]?.msg, .warnings[]?.msg | select(. != null)
-    | "[conftest] " + gsub("\n"; " ")'
+# --continue-on-fail: rendered manifests routinely contain custom resources
+# whose CRDs kyverno cannot resolve (a PR that adds a CRD alongside its CRs, a
+# chart shipping CRs for another operator). Without it, ONE unmappable document
+# aborts the whole apply — and the violations it did find on ordinary workloads
+# in the same input are lost silently.
+out=$(kyverno apply policies/ --resource - --policy-report --output-format json \
+  --continue-on-fail 2>/dev/null <<<"$manifests")
+emit "kyverno apply" "$out" "$?" '.results[]?
+  | select(.result == "fail" or .result == "warn")
+  | "[kyverno/\(.policy)] \(.resources[0].kind)/\(.resources[0].name): \(.message | gsub("\n"; " "))"'
+
+out=$(conftest test - --policy policy/ --output json 2>/dev/null <<<"$manifests")
+emit "conftest" "$out" "$?" '.[] | .failures[]?.msg, .warnings[]?.msg
+  | select(. != null) | "[conftest] " + gsub("\n"; " ")'
 ```
+
+A working adapter under continuous test lives in the e2e suite: [`scripts/lint-kyverno.sh`](https://github.com/rgeraskin/argocdf-test-repo/blob/master/scripts/lint-kyverno.sh) in [argocdf-test-repo](https://github.com/rgeraskin/argocdf-test-repo) (this repository's `e2e/` submodule). Every argocdf release runs it against all 35 e2e cases, on both sides of each one, so its empty-output handling and exit-code contract are exercised continuously — including the deliberately-unmappable Application CRs that apps-of-apps parents render. Its header comment also documents why it stays offline instead of resolving CRDs from the cluster with `kyverno apply --cluster`.
 
 ### CI Flags
 
