@@ -62,6 +62,17 @@ type Runner struct {
 // parent deadline expiring first is not misreported as --lint-timeout.
 var errLintTimeout = errors.New("lint timeout")
 
+// waitDelay bounds how long cmd.Wait keeps waiting after the timeout has already
+// killed the command. Without it --lint-timeout does not bound wall-clock at all:
+// a command that FORKS (`tool | filter &`, or any `a; b` compound where the shell
+// does not exec) leaves a descendant holding the inherited stdout pipe, and Wait
+// blocks on that pipe until the descendant exits on its own — a `sleep 60` behind
+// a 10s timeout still costs 60s. WaitDelay closes the pipe and SIGKILLs the
+// process group shortly after cancellation, so the timeout means what it says.
+// Deliberately small: by the time it applies, the output is already truncated and
+// the run has been reported as timed out.
+const waitDelay = 2 * time.Second
+
 // Lint runs every command with content on stdin and dir as the working
 // directory (empty = inherit), and returns the collected warning lines. Lint
 // is never fatal: stdout lines are kept even when the command fails, and a
@@ -119,6 +130,7 @@ func (r *Runner) execTool(ctx context.Context, dir, label string, argv []string,
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	cmd.WaitDelay = waitDelay
 	cmd.Dir = dir
 	env := childEnv(os.Environ(), r.Env)
 	if r.Kubeconfig != "" {
@@ -204,6 +216,7 @@ func (r *Runner) runOne(ctx context.Context, command, dir, content string) []str
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	cmd.WaitDelay = waitDelay
 	cmd.Dir = dir
 	// nil (no Env configured) keeps the inherit-everything default.
 	cmd.Env = childEnv(os.Environ(), r.Env)
@@ -234,12 +247,19 @@ func (r *Runner) runOne(ctx context.Context, command, dir, content string) []str
 // entry naming one of extra's keys REMOVED, then extra appended (sorted, so
 // the result is deterministic).
 //
-// The removal is load-bearing, not tidiness: a duplicated key resolves to its
-// FIRST occurrence in Go child processes, so merely appending would let a
-// stale inherited value win — e.g. a user who configured ARGOCDF_CONTEXT in
-// the environment and then overrode it with --context on the command line
-// would see lint commands target the environment's cluster. This is the same
-// hazard the argocd renderer scrubs the HELM_* variables for.
+// The removal keeps the child's environment single-valued; it is NOT what makes
+// argocdf's value win. exec.Cmd deduplicates Env and keeps the LAST value for
+// each key, so appending alone would already override a stale inherited
+// ARGOCDF_CONTEXT (verified on go1.25 — an earlier version of this comment
+// claimed the opposite, and two code reviews filed a bug against the built-in
+// adapters' KUBECONFIG append on the strength of it). The scrub earns its place
+// by making the slice say exactly what the child will see, which is what the
+// tests below assert against.
+//
+// This is NOT the reason the argocd renderer scrubs HELM_*: there the inherited
+// values win because helm prefers its own HELM_* variables over the XDG_* ones
+// ArgoCD sets, and because ArgoCD never sets most of them (see
+// render.inheritedHelmEnvVars).
 //
 // An empty extra returns nil so callers can leave cmd.Env unset and keep the
 // inherit-everything behavior bit-for-bit.

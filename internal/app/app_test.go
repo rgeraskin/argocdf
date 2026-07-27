@@ -1841,3 +1841,129 @@ func TestResolveKubeVersion(t *testing.T) {
 		t.Errorf("fallback: got (%q, %v), want (%q, detection error)", v, err, config.DefaultKubeVersionFallback)
 	}
 }
+
+// newChildRequeueFakeRenderer simulates the case a bare Add cannot handle: the
+// PR adds a child to the parent's catalog, but the child's Application CR ALREADY
+// exists in the cluster (applied by hand, or synced ahead of the merge). The child
+// is therefore queued from the cluster listing without IsNew and may already have
+// been processed — rendering BOTH sides — before the parent reveals it is new.
+type newChildRequeueFakeRenderer struct {
+	baseWorktree   string
+	targetWorktree string
+
+	mu          sync.Mutex
+	baseRenders []string // app names rendered against the base worktree
+}
+
+func (f *newChildRequeueFakeRenderer) RenderApplication(
+	_ context.Context,
+	app *cluster.Application,
+	repoPath string,
+	_ string,
+) (*render.RenderResult, error) {
+	if repoPath == f.baseWorktree {
+		f.mu.Lock()
+		f.baseRenders = append(f.baseRenders, app.Name)
+		f.mu.Unlock()
+	}
+
+	var manifests string
+	switch app.Name {
+	case "parent":
+		// The PR ADDS the child through the parent: child CRD on target only.
+		manifests = revConfigMap("parent-cm", "v1")
+		if repoPath == f.targetWorktree {
+			manifests += "---\n" + appCRD("early-child", "v1")
+		}
+	case "early-child":
+		// Renders on both worktrees: its sources predate the catalog entry, so a
+		// base render succeeds and would wrongly diff the child as merely
+		// modified rather than added.
+		manifests = revConfigMap("early-child-cm", "v1")
+	}
+
+	return &render.RenderResult{
+		Manifests:  []byte(manifests),
+		SourceType: types.SourceTypeHelm,
+	}, nil
+}
+
+func TestProcessApplicationsNewChildRequeuesClusterQueued(t *testing.T) {
+	logger := log.New(nil)
+	logger.SetLevel(log.FatalLevel)
+
+	cfg := &config.Config{Concurrency: 4, MaxDepth: 5}
+	fake := &newChildRequeueFakeRenderer{baseWorktree: "/fake/base", targetWorktree: "/fake/target"}
+	a := &App{
+		factory:        NewFactory(cfg, logger),
+		cfg:            cfg,
+		logger:         logger,
+		renderer:       fake,
+		differ:         diff.NewManifestDiffer(),
+		discoverer:     diff.NewAppDiscoverer(),
+		baseWorktree:   fake.baseWorktree,
+		targetWorktree: fake.targetWorktree,
+	}
+
+	parent := cluster.Application{Spec: dummyChartSpec("cluster")}
+	parent.Name = "parent"
+	parent.Namespace = "argocd"
+
+	// The child's cluster spec, matching what the parent's rendered CRD parses to
+	// so the requeue is allowed by IsNew being in the signature rather than by a
+	// spec difference.
+	child := cluster.Application{Spec: cluster.ApplicationSpec{
+		Project:     "default",
+		Source:      dummyChartSpec("v1").Source,
+		Destination: cluster.ApplicationDestination{Server: "https://kubernetes.default.svc"},
+	}}
+	child.Name = "early-child"
+	child.Namespace = "argocd"
+
+	diffs, err := a.processApplications(context.Background(), []cluster.Application{parent, child})
+	if err != nil {
+		t.Fatalf("processApplications() error: %v", err)
+	}
+
+	byName := make(map[string]*types.AppDiff, len(diffs))
+	for _, d := range diffs {
+		byName[d.Name] = d
+	}
+	childDiff := byName["early-child"]
+	if childDiff == nil {
+		t.Fatalf("missing early-child result; got %v", slicesOfNames(diffs))
+	}
+
+	// The corrected (new) result must overwrite the premature wave-0 render that
+	// saw the child on both sides.
+	if childDiff.RenderedOld != "" {
+		t.Errorf("early-child RenderedOld = %q, want empty: a new child has no base-side counterpart",
+			childDiff.RenderedOld)
+	}
+	if childDiff.ParentAppName != "parent" {
+		t.Errorf("early-child ParentAppName = %q, want %q", childDiff.ParentAppName, "parent")
+	}
+
+	setDiff, ok := childDiff.DiffResult.(*diff.ManifestSetDiff)
+	if !ok {
+		t.Fatalf("early-child DiffResult is %T, want *diff.ManifestSetDiff", childDiff.DiffResult)
+	}
+	if len(setDiff.Added) != 1 || len(setDiff.Modified) != 0 || len(setDiff.Removed) != 0 {
+		t.Errorf("early-child diff = +%d -%d ~%d, want +1 -0 ~0 (added, not modified)",
+			len(setDiff.Added), len(setDiff.Removed), len(setDiff.Modified))
+	}
+
+	// Exactly one base render of the child: the premature wave-0 one. The
+	// corrected pass must skip the base side entirely.
+	fake.mu.Lock()
+	childBaseRenders := 0
+	for _, name := range fake.baseRenders {
+		if name == "early-child" {
+			childBaseRenders++
+		}
+	}
+	fake.mu.Unlock()
+	if childBaseRenders != 1 {
+		t.Errorf("early-child base renders = %d, want 1 (premature wave-0 render only)", childBaseRenders)
+	}
+}

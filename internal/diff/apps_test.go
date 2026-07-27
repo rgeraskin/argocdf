@@ -1505,3 +1505,77 @@ func TestNewAppTree(t *testing.T) {
 		}
 	})
 }
+
+// UpdatePending must refresh Depth, not only the specs. Depth is the recursion
+// bound consulted by Add and RequeueProcessed, and an app queued from the CLUSTER
+// enters at depth 0 regardless of where it really sits in the apps-of-apps tree —
+// it only learns its position when a parent discovers it. Keeping the stale 0
+// makes every level below it count from 0 too, so a chain routed through
+// cluster-listed apps runs deeper than --max-depth permits.
+func TestUpdatePendingRefreshesDepth(t *testing.T) {
+	q := NewAppDiffQueue(3)
+
+	spec := &cluster.ApplicationSpec{Project: "default"}
+	if !q.Add(QueuedApp{Name: "child", Namespace: "argocd", Depth: 0, Spec: spec}) {
+		t.Fatal("Add() = false, want the cluster-listed app queued at depth 0")
+	}
+
+	// A parent at depth 2 discovers it: its real position is depth 3.
+	if !q.UpdatePending(QueuedApp{Name: "child", Namespace: "argocd", Depth: 3, Spec: spec, ParentApp: "parent"}) {
+		t.Fatal("UpdatePending() = false, want the pending app updated")
+	}
+
+	next := q.Next()
+	if next == nil {
+		t.Fatal("Next() = nil, want the updated app")
+	}
+	if next.Depth != 3 {
+		t.Fatalf("Depth = %d, want 3 (the parent-derived depth, not the cluster-entry 0)", next.Depth)
+	}
+
+	// And the refreshed depth must actually bound the next level: at maxDepth 3,
+	// a child of a depth-3 app is refused. With the stale 0 it would have been
+	// queued at depth 1 and kept recursing.
+	if q.Add(QueuedApp{Name: "grandchild", Namespace: "argocd", Depth: next.Depth + 1, Spec: spec}) {
+		t.Error("Add() = true for depth 4 with maxDepth 3, want the refreshed depth to bound recursion")
+	}
+}
+
+// A child can be pending from the cluster listing when its parent reveals it is
+// NEW in git (the CR was applied by hand, or synced ahead of the merge). Marking
+// it must work the same way marking it removed does.
+func TestUpdatePendingSetsIsNew(t *testing.T) {
+	q := NewAppDiffQueue(5)
+	spec := &cluster.ApplicationSpec{Project: "default"}
+
+	q.Add(QueuedApp{Name: "child", Namespace: "argocd", Spec: spec})
+	if !q.UpdatePending(QueuedApp{Name: "child", Namespace: "argocd", Depth: 1, Spec: spec, IsNew: true}) {
+		t.Fatal("UpdatePending() = false, want the pending app updated")
+	}
+
+	next := q.Next()
+	if next == nil || !next.IsNew {
+		t.Fatalf("IsNew = %v, want true so the base render is skipped", next != nil && next.IsNew)
+	}
+}
+
+// The spec-identity guard must not block a requeue that only changes IsNew: the
+// already-processed result rendered a base side the parent did not manage, so it
+// has to be redone even though the spec is identical.
+func TestRequeueProcessedAcceptsIsNewChange(t *testing.T) {
+	q := NewAppDiffQueue(5)
+	spec := &cluster.ApplicationSpec{Project: "default"}
+
+	q.Add(QueuedApp{Name: "child", Namespace: "argocd", Spec: spec})
+	if q.Next() == nil {
+		t.Fatal("Next() = nil, want the queued app processed")
+	}
+
+	if !q.RequeueProcessed(QueuedApp{Name: "child", Namespace: "argocd", Depth: 1, Spec: spec, IsNew: true}) {
+		t.Fatal("RequeueProcessed() = false, want IsNew in the signature to allow the requeue")
+	}
+	// Identical signature the second time: refused, so the loop terminates.
+	if q.Next(); q.RequeueProcessed(QueuedApp{Name: "child", Namespace: "argocd", Depth: 1, Spec: spec, IsNew: true}) {
+		t.Error("RequeueProcessed() = true for an identical signature, want it refused")
+	}
+}

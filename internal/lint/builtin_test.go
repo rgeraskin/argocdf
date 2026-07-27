@@ -300,3 +300,42 @@ func TestConfigured(t *testing.T) {
 		})
 	}
 }
+
+// --lint-timeout must bound WALL-CLOCK, not just signal the child. A command that
+// forks leaves a descendant holding the inherited stdout pipe, and cmd.Wait blocks
+// on that pipe until the descendant exits on its own — so without WaitDelay a
+// `sleep 30` behind a 100ms timeout costs 30 seconds, and a suite of them costs
+// minutes. This is the shape the built-ins and the shell path share.
+func TestExecToolTimeoutBoundsWallClock(t *testing.T) {
+	r := &Runner{Timeout: 100 * time.Millisecond}
+
+	start := time.Now()
+	// No `exec`: sh forks, so killing sh leaves `sleep` holding the pipe.
+	out := r.execTool(context.Background(), "", "label",
+		[]string{"sh", "-c", `printf 'partial'; sleep 30`}, "")
+	elapsed := time.Since(start)
+
+	if !strings.Contains(out.warning, "timeout after 100ms") {
+		t.Errorf("warning = %q, want a timeout warning", out.warning)
+	}
+	// Generous bound: the point is "seconds, not the full sleep", so the assertion
+	// stays well clear of waitDelay without becoming flaky on a loaded machine.
+	if elapsed > 10*time.Second {
+		t.Errorf("took %s, want the timeout to bound wall-clock (WaitDelay = %s)", elapsed, waitDelay)
+	}
+}
+
+func TestRunOneTimeoutBoundsWallClock(t *testing.T) {
+	r := &Runner{Commands: []string{`printf 'partial\n'; sleep 30`}, Timeout: 100 * time.Millisecond}
+
+	start := time.Now()
+	warnings := r.Lint(context.Background(), "", "")
+	elapsed := time.Since(start)
+
+	if len(warnings) == 0 || !strings.Contains(warnings[len(warnings)-1], "timeout after 100ms") {
+		t.Errorf("warnings = %#v, want a trailing timeout warning", warnings)
+	}
+	if elapsed > 10*time.Second {
+		t.Errorf("took %s, want the timeout to bound wall-clock", elapsed)
+	}
+}

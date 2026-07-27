@@ -149,15 +149,28 @@ func (f *registryAuthFile) Remove() {
 }
 
 // inheritedHelmEnvVars are the helm environment variables scrubbed from
-// argocdf's own environment before ArgoCD's render code runs. ArgoCD
-// isolates its helm executions by APPENDING per-command temp-home variables
-// to os.Environ() (util/helm/cmd.go), but Go programs — helm included —
-// resolve the FIRST occurrence of a duplicated environment key, so any
-// inherited HELM_CONFIG_HOME silently defeats that isolation; and
-// HELM_REGISTRY_CONFIG / HELM_REPOSITORY_* are never appended at all, so an
-// inherited value redirects registry auth and repository state into the
-// user's files unconditionally. The Linux repo-server never has these set;
-// a developer machine or CI script often does.
+// argocdf's own environment before ArgoCD's render code runs, because ArgoCD's
+// isolation covers less than it appears to. Its helm invocations
+// (util/helm/cmd.go) set cmd.Env = os.Environ() and then append exactly four
+// variables — XDG_CACHE_HOME, XDG_CONFIG_HOME, XDG_DATA_HOME and
+// HELM_CONFIG_HOME — all pointing into a per-command temp home. Two gaps
+// follow, and neither is about duplicated environment keys (exec.Cmd
+// deduplicates Env keeping the LAST value, so ArgoCD's appended
+// HELM_CONFIG_HOME does override an inherited one — verified on go1.25):
+//
+//   - helm resolves its own HELM_* variables in PREFERENCE to the XDG_* ones.
+//     An inherited HELM_CACHE_HOME or HELM_DATA_HOME therefore wins over the
+//     XDG_* paths ArgoCD sets, and HELM_REPOSITORY_CACHE is derived from it —
+//     `HELM_CACHE_HOME=/a XDG_CACHE_HOME=/b helm env` reports /a.
+//   - HELM_REGISTRY_CONFIG, HELM_REPOSITORY_CONFIG, HELM_REPOSITORY_CACHE and
+//     HELM_PLUGINS are never set by ArgoCD at all, so an inherited value
+//     redirects registry auth, repository state and plugin loading into the
+//     user's files unconditionally.
+//
+// HELM_CONFIG_HOME is kept in the list even though ArgoCD overrides it: the
+// scrub costs nothing and stops the isolation depending on ArgoCD continuing to
+// append that one variable. The Linux repo-server never has any of these set; a
+// developer machine or CI script often does.
 //
 // XDG_* variables are deliberately left alone: helm's config resolution is
 // fully covered by the appended HELM_CONFIG_HOME once the HELM_* overrides

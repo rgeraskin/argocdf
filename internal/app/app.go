@@ -735,7 +735,7 @@ func (a *App) processApplications(ctx context.Context, apps []cluster.Applicatio
 				a.logger.Warn("Error discovering new child apps", "parent", queuedApp.Name, "error", err)
 			} else {
 				for _, newApp := range newApps {
-					added := queue.Add(diff.QueuedApp{
+					childApp := diff.QueuedApp{
 						Name:            newApp.Name,
 						Namespace:       newApp.Namespace,
 						Depth:           queuedApp.Depth + 1,
@@ -743,9 +743,40 @@ func (a *App) processApplications(ctx context.Context, apps []cluster.Applicatio
 						ParentNamespace: queuedApp.Namespace,
 						Spec:            &newApp.Spec,
 						IsNew:           true,
-					})
-					if added {
+					}
+
+					// All three queue states apply here for the same reason they do
+					// for modified and removed children. A new child is usually
+					// absent from the cluster, but not always: the Application CR
+					// can already exist (applied by hand, or synced ahead of the
+					// merge) while the PR is what adds it to the parent's catalog.
+					// It is then queued from the cluster listing WITHOUT IsNew, and
+					// a bare Add is refused — leaving the app to render BOTH sides
+					// from its cluster spec, so it diffs as modified (or fails
+					// rendering a base side whose files the PR adds) instead of
+					// added. Requeues survive the specSignature guard because IsNew
+					// is part of the signature.
+
+					// Case 1: still pending - mark it new before it renders
+					if queue.UpdatePending(childApp) {
+						a.logger.Debug("Updated pending child application as new",
+							"parent", queuedApp.Name, "child", newApp.Name)
+						appDiff.ChildAppNames = append(appDiff.ChildAppNames, newApp.Name)
+						continue
+					}
+
+					// Case 2: not in the queue at all - pure child discovery
+					if queue.Add(childApp) {
 						a.logger.Debug("Discovered new child application", "parent", queuedApp.Name, "child", newApp.Name)
+						appDiff.ChildAppNames = append(appDiff.ChildAppNames, newApp.Name)
+						continue
+					}
+
+					// Case 3: already processed with its cluster spec - that result
+					// rendered a base side the parent did not manage; redo it.
+					if queue.RequeueProcessed(childApp) {
+						a.logger.Info("Re-queuing already-processed child as new",
+							"parent", queuedApp.Name, "child", newApp.Name)
 						appDiff.ChildAppNames = append(appDiff.ChildAppNames, newApp.Name)
 					}
 				}

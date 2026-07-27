@@ -325,6 +325,14 @@ func (q *AppDiffQueue) UpdatePending(app QueuedApp) bool {
 			q.pending[i].ParentNamespace = app.ParentNamespace
 			q.pending[i].IsNew = app.IsNew
 			q.pending[i].IsRemoved = app.IsRemoved
+			// Depth too, and it is not bookkeeping: Depth is what bounds the
+			// recursion in Add and RequeueProcessed. An app queued from the
+			// CLUSTER enters at depth 0 and only learns its real position when a
+			// parent discovers it; keeping the stale 0 makes every level below it
+			// count from 0 as well, so a chain routed through cluster-listed apps
+			// could run deeper than --max-depth allows. Taking the parent-derived
+			// depth is what Add would have recorded had the parent got there first.
+			q.pending[i].Depth = app.Depth
 			return true
 		}
 	}

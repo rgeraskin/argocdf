@@ -225,8 +225,10 @@ func TestChildEnv(t *testing.T) {
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("childEnv() = %v, want %v", got, tt.want)
 			}
-			// A duplicated key resolves to its FIRST occurrence in the child,
-			// so argocdf's value only wins if it is the ONLY occurrence.
+			// Exactly one occurrence, so the slice states unambiguously what the
+			// child will see. Note this is not what makes argocdf's value win —
+			// exec.Cmd dedups Env keeping the LAST value — it is what makes the
+			// environment auditable and these assertions meaningful.
 			for name, value := range tt.extra {
 				var count int
 				for _, entry := range got {
