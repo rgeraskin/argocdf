@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/charmbracelet/log"
 
@@ -345,6 +346,21 @@ func (a *App) createLintRunner() *lint.Runner {
 		kubeContext = a.kubeClient.ResolvedContext()
 	}
 	return a.factory.CreateLintRunner(kubeContext)
+}
+
+// lintSide runs the lint commands for one side of one application and logs how
+// long they took at INFO. The duration is the diagnostic that a bare
+// "--lint-timeout" warning lacks: it distinguishes a genuinely slow or hung
+// adapter from contention between concurrent invocations, and shows the headroom
+// left when nothing timed out.
+func (a *App) lintSide(ctx context.Context, appName, side, worktree, rendered string) []string {
+	start := time.Now()
+	warnings := a.linter.Lint(ctx, worktree, rendered)
+	a.logger.Info("Linted rendered manifests",
+		"app", appName, "side", side,
+		"duration", time.Since(start).Round(time.Millisecond),
+		"findings", len(warnings))
+	return warnings
 }
 
 // resolveKubeVersion returns the Kubernetes version to render with. An
@@ -956,14 +972,19 @@ func (a *App) processOneApp(ctx context.Context, queuedApp *diff.QueuedApp) (*ty
 	// the change under review, [target]-only was introduced, both = pre-existing.
 	// Each side's command runs in that side's worktree, so repo-relative paths
 	// (e.g. a policy directory) resolve to the files as of that branch.
+	// Timing is logged per app and side: cluster-aware adapters (kyverno apply
+	// --cluster, kubectl --dry-run=server) pay for an API round trip per
+	// invocation, and --concurrency runs several at once, so a --lint-timeout
+	// warning is usually contention rather than a broken tool. Without this
+	// number the only signal is the timeout itself, which names no cause.
 	if a.linter != nil {
 		if appDiff.RenderedOld != "" {
 			diffResult.ParseWarnings = append(diffResult.ParseWarnings,
-				diff.LabelSide(diff.SideBase, a.linter.Lint(ctx, a.baseWorktree, appDiff.RenderedOld))...)
+				diff.LabelSide(diff.SideBase, a.lintSide(ctx, appDiff.Name, diff.SideBase, a.baseWorktree, appDiff.RenderedOld))...)
 		}
 		if appDiff.RenderedNew != "" {
 			diffResult.ParseWarnings = append(diffResult.ParseWarnings,
-				diff.LabelSide(diff.SideTarget, a.linter.Lint(ctx, a.targetWorktree, appDiff.RenderedNew))...)
+				diff.LabelSide(diff.SideTarget, a.lintSide(ctx, appDiff.Name, diff.SideTarget, a.targetWorktree, appDiff.RenderedNew))...)
 		}
 	}
 

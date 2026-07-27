@@ -34,10 +34,16 @@ const (
 	// marker/heading overhead would dominate the budget.
 	MinSplitMax = 1024
 
-	// DefaultLintTimeout bounds each --lint command invocation. Lint commands
-	// process a single app's already-rendered manifests, so they should finish
-	// in well under a second; 5s leaves room for slow policy engines.
-	DefaultLintTimeout = 5 * time.Second
+	// DefaultLintTimeout bounds each --lint command invocation. A lint command
+	// processes a single app's already-rendered manifests, so an offline policy
+	// engine finishes in well under a second. The budget is sized for the
+	// CLUSTER-AWARE adapters the README recommends instead (kyverno apply
+	// --cluster, kubectl --dry-run=server): those pay for an API discovery per
+	// invocation, and --concurrency runs several of them at once, so the tail is
+	// contention rather than tool speed. 5s was tight enough to fire on a
+	// healthy setup; the timeout only bounds a hung adapter, so headroom costs
+	// nothing. Each invocation's duration is logged at INFO.
+	DefaultLintTimeout = 10 * time.Second
 
 	// RendererNative renders with argocdf's own helm/kustomize pipeline.
 	RendererNative = "native"

@@ -256,7 +256,7 @@ The summary and footer land on the last part. Leftover part files from a previou
 | Flag             | Description                                                   | Default |
 |------------------|---------------------------------------------------------------|---------|
 | `--lint`         | Shell command that lints rendered manifests (can be repeated) | none    |
-| `--lint-timeout` | Timeout for each lint command invocation                      | `5s`    |
+| `--lint-timeout` | Timeout for each lint command invocation                      | `10s`   |
 
 Each `--lint` command receives an application's rendered multi-doc YAML on stdin (via `sh -c`) and emits findings as **one warning per stdout line**. Both sides are linted separately, and each side's command runs **with that side's checkout as its working directory** — a repo-relative policy path (like `policies/` below) resolves to the policy files as of that branch, so changing a policy in a PR is itself reflected in the lint results. Every finding lands in the report's warning block with the same side labels used for parse warnings:
 
