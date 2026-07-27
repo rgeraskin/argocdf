@@ -300,21 +300,18 @@ export KUBECONFIG="$stub:${ARGOCDF_KUBECONFIG:-$HOME/.kube/config}"
 
 Empty tool output is ambiguous, and getting it wrong is the most common way an adapter goes bad in both directions: **resolve it with the tool's exit code, never by making `jq` fail on empty input.** A clean run and a crashed run can both print nothing — kyverno prints nothing (exit 0) whenever no rendered resource matches a policy's `matchConstraints`, which for a report full of ConfigMaps or Application CRs is the normal case. An adapter that treats empty as failure (the `jq -rn 'input | ...'` idiom, which exits non-zero when no JSON arrives) then attaches a spurious lint-failure warning to every such application, drowning real findings; one that ignores exit codes entirely reports a crashed tool as "clean". Branch explicitly: output present → parse it; empty and exit 0 → say nothing; empty and exit ≠ 0 → print one self-identifying failure line (or just exit non-zero and let argocdf's own warning carry it).
 
-```bash
-# kyverno (inline — see the script advice below)
-argocdf --lint 'kyverno apply policies/ --resource - --policy-report --output-format json 2>/dev/null \
-  | jq -rn '\''input | .results[]? | select(.result == "fail" or .result == "warn")
-      | "[kyverno/\(.policy)] \(.resources[0].kind)/\(.resources[0].name): \(.message | gsub("\n"; " "))"'\'''
+A worked example with a tool that has no built-in flag — "will the cluster even accept these manifests?", via a server-side dry run (schema, admission, missing CRDs):
 
-# conftest (repeat --lint to run several linters per app)
-argocdf --lint 'conftest test - --policy policy/ --output json 2>/dev/null \
-  | jq -rn '\''input | .[] | .failures[]?.msg, .warnings[]?.msg | select(. != null)
-      | "[conftest] " + gsub("\n"; " ")'\'''
+```bash
+argocdf --lint ': "${ARGOCDF_CONTEXT:?}"; err=$(kubectl apply --dry-run=server \
+  --context "$ARGOCDF_CONTEXT" -f - 2>&1 >/dev/null) || printf "%s\n" "$err"'
 ```
 
-Keep non-policy files out of the path you hand `kyverno apply`: a `kyverno-test.yaml` beside a policy makes it emit NOTHING — exit 0, empty stdout, empty stderr — which any correct adapter can only read as "no findings", so the policy silently stops being enforced with nothing anywhere to signal it. `apply` recurses to any depth and skips dot-files and dot-dirs, so `policies/.tests/` is a safe home for test manifests (a `kyverno-test.yaml` there can reference `../<policy>.yaml`); conftest is not affected, since its own `*_test.rego` unit tests define `test_*` rules rather than `deny` rules.
+Three details in that one-liner are the contract in miniature. Success prints one `… (server dry run)` line **per resource on stdout**, and every stdout line becomes a finding — so stdout is discarded and only stderr, where kubectl puts the errors, is reported. `printf` on the failure branch exits 0, because findings are not a tool failure. And the context check is hoisted into its own `: "${ARGOCDF_CONTEXT:?}"` rather than written inline as `--context "${ARGOCDF_CONTEXT:?}"`: inline, the unset variable kills only the command substitution, leaving `err` empty, so `|| printf` emits a blank line and the adapter exits **0 with no findings** — the linter never ran, yet every application is reported clean. Hoisted, the shell exits non-zero before kubectl starts and argocdf attaches its own failure warning.
 
-These inline commands are only meant to show the contract — the shell quoting gets cryptic fast. For real use, put the tool + jq pipeline into a small script committed to your repo and pass that to `--lint`. Reference implementations: [`lint-kyverno.sh`](https://github.com/rgeraskin/argocdf-test-repo/blob/master/scripts/lint-kyverno.sh) and [`lint-conftest.sh`](https://github.com/rgeraskin/argocdf-test-repo/blob/master/scripts/lint-conftest.sh). Because each side's command runs in that side's worktree, the script — like the policies it references — is picked up in each branch's own version:
+Whether you use `--lint-kyverno` or your own adapter, keep non-policy files out of the directory kyverno is pointed at: a `kyverno-test.yaml` beside a policy makes it emit NOTHING — exit 0, empty stdout, empty stderr — which any correct adapter can only read as "no findings", so the policy silently stops being enforced with nothing anywhere to signal it. `apply` recurses to any depth and skips dot-files and dot-dirs, so `policies/.tests/` is a safe home for test manifests (a `kyverno-test.yaml` there can reference `../<policy>.yaml`); conftest is not affected, since its own `*_test.rego` unit tests define `test_*` rules rather than `deny` rules.
+
+That one-liner is only meant to show the contract — the shell quoting gets cryptic fast. For real use, put the tool and its output handling into a small script committed to your repo and pass that to `--lint`. Reference implementations: [`lint-kyverno.sh`](https://github.com/rgeraskin/argocdf-test-repo/blob/master/scripts/lint-kyverno.sh) and [`lint-conftest.sh`](https://github.com/rgeraskin/argocdf-test-repo/blob/master/scripts/lint-conftest.sh). Because each side's command runs in that side's worktree, the script — like the policies it references — is picked up in each branch's own version:
 
 ```bash
 argocdf --lint ./scripts/lint-manifests.sh
