@@ -366,12 +366,23 @@ func (a *App) warnMissingPolicyDirs() {
 			if !filepath.IsAbs(path) {
 				path = filepath.Join(a.cfg.RepoPath, dir)
 			}
-			if info, err := os.Stat(path); err != nil || !info.IsDir() {
-				a.logger.Warn("Lint policy directory not found in the working tree; "+
-					"this linter will report NOTHING for any application unless the "+
-					"directory exists in the branches being compared",
-					"flag", flag, "dir", dir, "resolved", path)
+			// EMPTY counts as absent, because the adapters skip it for the same
+			// reason they skip a missing one — both tools treat an empty policy set
+			// as fatal. Checking only Stat would leave `mkdir -p policies/kyverno`
+			// with nothing in it looking exactly like "policies ran and passed",
+			// which is the hazard this warning exists to close.
+			entries, err := os.ReadDir(path)
+			if err == nil && len(entries) > 0 {
+				continue
 			}
+			reason := "not found in"
+			if err == nil {
+				reason = "empty in"
+			}
+			a.logger.Warn("Lint policy directory "+reason+" the working tree; "+
+				"this linter will report NOTHING for any application unless the "+
+				"directory has policies in the branches being compared",
+				"flag", flag, "dir", dir, "resolved", path)
 		}
 	}
 	check("--lint-kyverno", a.cfg.LintKyverno)

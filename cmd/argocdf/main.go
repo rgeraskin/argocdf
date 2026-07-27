@@ -244,11 +244,13 @@ Examples:
 	rootCmd.Flags().StringArrayVar(&lintKyverno, "lint-kyverno", nil,
 		"Lint rendered manifests with the kyverno policies in `DIR` (can be repeated): runs kyverno "+
 			"apply against the cluster being diffed and reports its findings, no shell pipeline or jq "+
-			"needed. DIR is repo-relative, so each side lints with its own version of the policies")
+			"needed. A relative DIR resolves per side, so each side lints with its own version of "+
+			"the policies; an absolute DIR points both sides at one tree")
 	rootCmd.Flags().StringArrayVar(&lintConftest, "lint-conftest", nil,
 		"Lint rendered manifests with the rego policies in `DIR` (can be repeated): runs conftest test "+
-			"and reports its findings, no shell pipeline or jq needed. DIR is repo-relative, so each "+
-			"side lints with its own version of the policies")
+			"and reports its findings, no shell pipeline or jq needed. A relative DIR resolves per "+
+			"side, so each side lints with its own version of the policies; an absolute DIR points "+
+			"both sides at one tree")
 	rootCmd.Flags().DurationVar(&lintTimeout, "lint-timeout", config.DefaultLintTimeout,
 		"Timeout for each lint invocation (--lint, --lint-kyverno, --lint-conftest)")
 

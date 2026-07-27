@@ -236,6 +236,51 @@ func TestExecToolTimeout(t *testing.T) {
 	}
 }
 
+// A timeout must surface even when the tool already wrote something, and the
+// partial output must be kept. Suppressing the warning because stdout is
+// non-empty is how a truncated report becomes "silently fewer findings" — the
+// report looks cleaner than reality with nothing to indicate the run was cut off.
+func TestExecToolTimeoutWithPartialOutput(t *testing.T) {
+	r := &Runner{Timeout: 100 * time.Millisecond}
+	// `exec sleep` so the timeout's kill actually ends the process tree: a FORKED
+	// descendant inherits the stdout pipe and cmd.Wait blocks on it until that
+	// child exits, so `printf; sleep 5` would take the full 5s despite the 100ms
+	// timeout. Worth knowing beyond this test — a lint command that backgrounds
+	// something can outlive --lint-timeout the same way.
+	out := r.execTool(context.Background(), "", "label",
+		[]string{"sh", "-c", `printf '{"results":[]}'; exec sleep 5`}, "")
+
+	if !strings.Contains(out.warning, "timeout after 100ms") {
+		t.Errorf("warning = %q, want a timeout warning despite the partial output", out.warning)
+	}
+	if out.stdout != `{"results":[]}` {
+		t.Errorf("stdout = %q, want the partial output preserved", out.stdout)
+	}
+}
+
+// The built-in adapters point the tool at argocdf's kubeconfig by APPENDING
+// KUBECONFIG, without the scrub childEnv does for ARGOCDF_*. That reads like the
+// first-wins hazard scrubbed elsewhere, so the actual behavior is pinned:
+// exec.Cmd deduplicates Env keeping the LAST value, so the child sees argocdf's
+// path and never the inherited one.
+func TestExecToolKubeconfigOverridesInherited(t *testing.T) {
+	t.Setenv("KUBECONFIG", "/inherited/should/lose")
+
+	r := &Runner{
+		Kubeconfig: "/argocdf/should/win",
+		Timeout:    10 * time.Second,
+		// Non-empty so childEnv returns a built slice rather than nil, covering
+		// the branch where the append lands on top of scrubbed entries.
+		Env: map[string]string{"ARGOCDF_CONTEXT": "ctx"},
+	}
+	out := r.execTool(context.Background(), "", "label",
+		[]string{"sh", "-c", `printf '%s' "$KUBECONFIG"`}, "")
+
+	if out.stdout != "/argocdf/should/win" {
+		t.Errorf("child KUBECONFIG = %q, want argocdf's value to win over the inherited one", out.stdout)
+	}
+}
+
 func TestConfigured(t *testing.T) {
 	tests := []struct {
 		name string

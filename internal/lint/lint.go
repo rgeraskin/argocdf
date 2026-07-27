@@ -124,6 +124,14 @@ func (r *Runner) execTool(ctx context.Context, dir, label string, argv []string,
 	if r.Kubeconfig != "" {
 		// Through KUBECONFIG rather than a flag: the value may be an
 		// os.PathListSeparator-joined LIST, which single-file flags reject.
+		//
+		// Appending is enough to OVERRIDE an inherited KUBECONFIG, and does not
+		// need the scrub childEnv does: exec.Cmd deduplicates Env and keeps the
+		// LAST value for each key ("If Env contains duplicate environment keys,
+		// only the last value in the slice for each duplicate key is used"), so
+		// the child receives exactly one KUBECONFIG — this one. Verified on
+		// go1.25. Two independent reviews read this as a wrong-cluster bug, so
+		// the reasoning is written down rather than left to be re-derived.
 		if env == nil {
 			env = os.Environ()
 		}
@@ -137,14 +145,26 @@ func (r *Runner) execTool(ctx context.Context, dir, label string, argv []string,
 
 	err := cmd.Run()
 	out := toolOutput{stdout: strings.TrimSpace(stdout.String())}
-	if err == nil || out.stdout != "" {
+	if err == nil {
 		return out
 	}
 
+	// A TIMEOUT surfaces even when stdout has content, which is the one case
+	// where output is not enough to call the run healthy: a truncated report
+	// either fails to parse or — worse — parses into silently FEWER findings,
+	// which reads as "cleaner than reality". The shell path appends the same line
+	// while keeping its stdout; this keeps the two contracts aligned.
 	if errors.Is(context.Cause(ctx), errLintTimeout) {
 		out.warning = fmt.Sprintf("%s: timeout after %s", label, r.Timeout)
 		return out
 	}
+
+	// A non-zero exit WITH a report is normal, not a failure: both tools exit
+	// non-zero precisely because they found something.
+	if out.stdout != "" {
+		return out
+	}
+
 	out.warning = fmt.Sprintf("%s: %v with no report output", label, err)
 	if first := firstLine(stderr.String()); first != "" {
 		out.warning += ": " + first
@@ -157,6 +177,13 @@ func (r *Runner) execTool(ctx context.Context, dir, label string, argv []string,
 // the base side of a PR that adds the first policy there is legitimately nothing
 // to apply, and both tools treat an empty policy set as a hard error, which would
 // otherwise attach a spurious lint failure to every application.
+//
+// A RELATIVE path resolves against the side's worktree, which is what makes each
+// side lint with its own version of the policies. An ABSOLUTE path is used as
+// given and therefore points both sides at the same tree — deliberate (a policy
+// set shared outside the repo is a real setup) but it forfeits per-side
+// resolution, so a PR that changes such a policy shows no difference between
+// sides.
 func resolvePolicyDir(worktree, policyDir string) (string, bool) {
 	dir := policyDir
 	if !filepath.IsAbs(dir) {
