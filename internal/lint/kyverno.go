@@ -37,10 +37,15 @@ type kyvernoReport struct {
 //     correct result. Without a resolved context this refuses to run.
 //   - --continue-on-fail, because a diff tool renders manifests that are not in
 //     the cluster YET (a PR adding a CRD alongside its CRs, a chart shipping CRs
-//     for an operator this cluster lacks). Those kinds fail discovery in cluster
-//     mode, and without the flag ONE unmappable document hard-fails the whole
-//     apply, discarding the findings kyverno already made on ordinary workloads
-//     in the same input.
+//     for an operator this cluster lacks). Measured against kyverno 1.18 with one
+//     unmappable document beside one violating Deployment: WITHOUT the flag,
+//     exit 1, ZERO bytes of report and `failed to map gvk to gvr` on stderr — the
+//     Deployment's finding is destroyed by the unrelated document. WITH it, the
+//     finding survives and the unmappable kind is skipped SILENTLY: no result at
+//     all, not even an `error` one. That silence is a hazard of its own — a policy
+//     over such a kind simply does not run and the report still reads clean — so
+//     the README tells users to apply CRDs first, and case/lint-unmappable-kind
+//     pins both halves.
 func (r *Runner) runKyverno(ctx context.Context, worktree, policyDir, content string) []string {
 	label := "lint-kyverno " + policyDir
 
@@ -93,18 +98,41 @@ func parseKyvernoReport(label, stdout string) []string {
 
 	var warnings []string
 	for _, result := range report.Results {
-		// pass/skip/error are not findings: a report is mostly passes, and
-		// `error` is kyverno's own trouble with a resource, which --continue-on-fail
-		// exists to tolerate.
-		if result.Result != "fail" && result.Result != "warn" {
+		var marker string
+		switch result.Result {
+		case "fail", "warn":
+		case "error":
+			// An `error` is kyverno failing to EVALUATE, not a resource failing a
+			// check — a broken CEL expression reports
+			// "expression '...' resulted in error: no such key: x" with no
+			// resources attached. Dropping those was hiding the one failure a
+			// policy author cannot otherwise notice: with checks split across many
+			// small policies (which kyverno's fail-fast within a policy forces),
+			// one broken expression just stops producing findings. The marker keeps
+			// it distinguishable — a violation is about the manifests, an error is
+			// about the setup.
+			marker = "ERROR "
+		default:
+			// pass and skip are not findings; a report is mostly passes.
 			continue
 		}
-		subject := ""
-		if len(result.Resources) > 0 {
-			subject = result.Resources[0].Kind + "/" + result.Resources[0].Name + ": "
+
+		msg := singleLine(result.Message)
+		if len(result.Resources) == 0 {
+			warnings = append(warnings, fmt.Sprintf("[kyverno/%s] %s%s", result.Policy, marker, msg))
+			continue
 		}
-		warnings = append(warnings, fmt.Sprintf("[kyverno/%s] %s%s",
-			result.Policy, subject, singleLine(result.Message)))
+		// One line PER resource. kyverno 1.18 happens to emit a single resource per
+		// result for both ValidatingAdmissionPolicy and ClusterPolicy (verified),
+		// but `resources` is a LIST in the openreports.io PolicyReport schema, so
+		// naming only the first would silently drop subjects the moment any
+		// producer — a future kyverno, or another tool writing the same schema —
+		// groups them. Per-resource lines also match how every other finding in the
+		// report reads: one resource, one line, greppable by Kind/name.
+		for _, res := range result.Resources {
+			warnings = append(warnings, fmt.Sprintf("[kyverno/%s] %s%s/%s: %s",
+				result.Policy, marker, res.Kind, res.Name, msg))
+		}
 	}
 	return warnings
 }

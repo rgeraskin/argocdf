@@ -54,9 +54,35 @@ func TestParseKyvernoReportLineShape(t *testing.T) {
 			want:   []string{"[kyverno/p] Pod/x: m"},
 		},
 		{
-			name:   "skip and error are not findings",
-			report: `{"results":[{"policy":"p","result":"skip","message":"m"},{"policy":"p","result":"error","message":"m"}]}`,
+			name:   "pass and skip are not findings",
+			report: `{"results":[{"policy":"p","result":"pass","message":"m"},{"policy":"p","result":"skip","message":"m"}]}`,
 			want:   nil,
+		},
+		{
+			// An error is kyverno failing to EVALUATE, not a resource failing a
+			// check. Dropping these hid broken policies: with checks split across
+			// many small policies (kyverno stops at the first failing validation
+			// within one, so authors are pushed to split them), a broken CEL
+			// expression simply stops producing findings.
+			name:   "an error IS reported, marked to distinguish setup from manifests",
+			report: `{"results":[{"policy":"p","result":"error","message":"expression 'x' resulted in error: no such key: y"}]}`,
+			want:   []string{"[kyverno/p] ERROR expression 'x' resulted in error: no such key: y"},
+		},
+		{
+			name:   "an error WITH a resource still names it",
+			report: `{"results":[{"policy":"p","result":"error","resources":[{"kind":"Pod","name":"x"}],"message":"boom"}]}`,
+			want:   []string{"[kyverno/p] ERROR Pod/x: boom"},
+		},
+		{
+			// SYNTHETIC: kyverno 1.18 emits one resource per result for both
+			// ValidatingAdmissionPolicy and ClusterPolicy (verified against the
+			// real CLI), so this shape cannot be captured from it today. It is
+			// pinned anyway because `resources` is a LIST in the openreports.io
+			// schema — naming only the first would silently drop subjects the
+			// moment any producer groups them.
+			name:   "every resource gets its own line, not just the first",
+			report: `{"results":[{"policy":"p","result":"fail","resources":[{"kind":"Deployment","name":"a"},{"kind":"StatefulSet","name":"b"}],"message":"m"}]}`,
+			want:   []string{"[kyverno/p] Deployment/a: m", "[kyverno/p] StatefulSet/b: m"},
 		},
 		{
 			name:   "multi-line message folds onto one line, since one line = one warning",
