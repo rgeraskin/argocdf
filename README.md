@@ -302,6 +302,8 @@ argocdf --lint 'conftest test - --policy policy/ --output json 2>/dev/null \
       | "[conftest] " + gsub("\n"; " ")'\'''
 ```
 
+Keep non-policy files out of the path you hand `kyverno apply`: a `kyverno-test.yaml` beside a policy makes it emit NOTHING — exit 0, empty stdout, empty stderr — which any correct adapter can only read as "no findings", so the policy silently stops being enforced with nothing anywhere to signal it. `apply` recurses to any depth and skips dot-files and dot-dirs, so `policies/.tests/` is a safe home for test manifests (a `kyverno-test.yaml` there can reference `../<policy>.yaml`); conftest is not affected, since its own `*_test.rego` unit tests define `test_*` rules rather than `deny` rules.
+
 These inline commands are only meant to show the contract — the shell quoting gets cryptic fast. For real use, put the tool + jq pipeline into a small script committed to your repo and pass that to `--lint`. Because each side's command runs in that side's worktree, the script — like the policies it references — is picked up in each branch's own version:
 
 ```bash
