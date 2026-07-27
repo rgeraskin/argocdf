@@ -1,12 +1,16 @@
-// Package lint pipes rendered manifests through user-supplied shell commands
-// and turns their stdout lines into report warnings.
+// Package lint pipes rendered manifests through policy tools and turns their
+// findings into report warnings.
 //
-// The contract is tool-agnostic: each command receives an application's
-// rendered multi-doc YAML on stdin and emits one finding per stdout line.
-// The process outcome is the only health signal — stdout content plays no
-// role in error detection. Tools like kyverno or conftest exit non-zero on
-// findings during normal operation, so commands are expected to end in an
-// adapter (typically jq) that exits 0 when the pipeline worked.
+// Two shapes share one contract. A user-supplied SHELL command (--lint) receives
+// an application's rendered multi-doc YAML on stdin and emits one finding per
+// stdout line; the process outcome is the only health signal, so a command is
+// expected to end in an adapter (typically jq) that exits 0 when the pipeline
+// worked, because kyverno and conftest both exit non-zero on findings during
+// normal operation. The BUILT-IN adapters (--lint-kyverno, --lint-conftest) run
+// the same tools against a policy directory and parse their JSON here instead,
+// which removes the jq dependency, the shell quoting, and the two ways an adapter
+// is usually written wrong: mistaking empty output for failure, and mistaking a
+// findings exit for a crash.
 package lint
 
 import (
@@ -16,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -25,6 +30,21 @@ import (
 type Runner struct {
 	// Commands are shell commands run in order via `sh -c`.
 	Commands []string
+
+	// Kyverno and Conftest are policy directories for the BUILT-IN adapters,
+	// which exec the tool themselves and parse its JSON instead of relying on a
+	// user-written shell pipeline. Paths are relative to the side's worktree, so
+	// a PR that changes a policy lints each side with its own version — the same
+	// property the shell commands get from their working directory.
+	Kyverno  []string
+	Conftest []string
+
+	// KubeContext and Kubeconfig target the cluster argocdf is diffing, for the
+	// built-in adapters that consult it. Shell commands get the same values
+	// through Env instead: the environment variables are the SHELL contract, so
+	// the built-ins take them as data rather than round-tripping through it.
+	KubeContext string
+	Kubeconfig  string
 
 	// Timeout bounds each command invocation.
 	Timeout time.Duration
@@ -51,12 +71,102 @@ var errLintTimeout = errors.New("lint timeout")
 // dir is the side's ephemeral worktree, so repo-relative paths in the command
 // (e.g. a policy directory) resolve to that side's version of the files.
 // Commands see argocdf's own environment with Env layered on top.
+//
+// Linters run in a FIXED order — shell commands first, then kyverno, then
+// conftest, each in the order given — because that order is visible in the
+// report and therefore part of what expectations pin. pflag cannot preserve the
+// interleaving of different flags on the command line, so an order has to be
+// chosen rather than inferred.
 func (r *Runner) Lint(ctx context.Context, dir, content string) []string {
 	var warnings []string
 	for _, command := range r.Commands {
 		warnings = append(warnings, r.runOne(ctx, command, dir, content)...)
 	}
+	for _, policyDir := range r.Kyverno {
+		warnings = append(warnings, r.runKyverno(ctx, dir, policyDir, content)...)
+	}
+	for _, policyDir := range r.Conftest {
+		warnings = append(warnings, r.runConftest(ctx, dir, policyDir, content)...)
+	}
 	return warnings
+}
+
+// Configured reports whether the runner has any linter to run.
+func (r *Runner) Configured() bool {
+	return len(r.Commands)+len(r.Kyverno)+len(r.Conftest) > 0
+}
+
+// toolOutput carries a built-in adapter's raw stdout, or the single warning line
+// that replaces it when the invocation itself failed.
+type toolOutput struct {
+	stdout  string
+	warning string
+}
+
+// execTool runs a built-in adapter's argv with content on stdin, applying the
+// same health contract as the shell commands: the process OUTCOME is the only
+// signal, and empty output is resolved by the EXIT CODE rather than by failing
+// to parse it. Exit 0 with nothing on stdout means "no findings" — both tools do
+// that routinely when no rendered resource matches a policy — while a non-zero
+// exit with no report is a real failure and must surface. A non-zero exit WITH a
+// report is normal: both tools exit non-zero precisely because they found
+// something.
+func (r *Runner) execTool(ctx context.Context, dir, label string, argv []string, content string) toolOutput {
+	cancel := func() {}
+	if r.Timeout > 0 {
+		ctx, cancel = context.WithTimeoutCause(ctx, r.Timeout, errLintTimeout)
+	}
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	cmd.Dir = dir
+	env := childEnv(os.Environ(), r.Env)
+	if r.Kubeconfig != "" {
+		// Through KUBECONFIG rather than a flag: the value may be an
+		// os.PathListSeparator-joined LIST, which single-file flags reject.
+		if env == nil {
+			env = os.Environ()
+		}
+		env = append(env, "KUBECONFIG="+r.Kubeconfig)
+	}
+	cmd.Env = env
+	cmd.Stdin = strings.NewReader(content)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	out := toolOutput{stdout: strings.TrimSpace(stdout.String())}
+	if err == nil || out.stdout != "" {
+		return out
+	}
+
+	if errors.Is(context.Cause(ctx), errLintTimeout) {
+		out.warning = fmt.Sprintf("%s: timeout after %s", label, r.Timeout)
+		return out
+	}
+	out.warning = fmt.Sprintf("%s: %v with no report output", label, err)
+	if first := firstLine(stderr.String()); first != "" {
+		out.warning += ": " + first
+	}
+	return out
+}
+
+// resolvePolicyDir returns the absolute policy directory and whether it holds
+// anything. A missing or EMPTY directory reports false rather than an error: on
+// the base side of a PR that adds the first policy there is legitimately nothing
+// to apply, and both tools treat an empty policy set as a hard error, which would
+// otherwise attach a spurious lint failure to every application.
+func resolvePolicyDir(worktree, policyDir string) (string, bool) {
+	dir := policyDir
+	if !filepath.IsAbs(dir) {
+		dir = filepath.Join(worktree, policyDir)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) == 0 {
+		return "", false
+	}
+	return dir, true
 }
 
 func (r *Runner) runOne(ctx context.Context, command, dir, content string) []string {

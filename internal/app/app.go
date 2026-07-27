@@ -324,6 +324,7 @@ func (a *App) initialize(ctx context.Context) error {
 	a.differ = a.factory.CreateManifestDiffer()
 	a.discoverer = a.factory.CreateAppDiscoverer()
 	a.linter = a.createLintRunner()
+	a.warnMissingPolicyDirs()
 
 	// Create output writer
 	a.writer, err = a.factory.CreateOutputWriter()
@@ -346,6 +347,34 @@ func (a *App) createLintRunner() *lint.Runner {
 		kubeContext = a.kubeClient.ResolvedContext()
 	}
 	return a.factory.CreateLintRunner(kubeContext)
+}
+
+// warnMissingPolicyDirs warns once per configured policy directory that does not
+// exist in the working tree.
+//
+// Absence is deliberately NOT fatal at render time: on the base side of a PR that
+// adds the first policy there is legitimately nothing to apply, and both tools
+// treat an empty policy set as a hard error, so the adapters skip a missing
+// directory instead of attaching a spurious lint failure to every application.
+// The cost of that tolerance is that a TYPO reads exactly like "no findings".
+// Checking the working tree closes it: the path a user typed should exist in the
+// checkout they typed it from, whichever branch pairs get rendered later.
+func (a *App) warnMissingPolicyDirs() {
+	check := func(flag string, dirs []string) {
+		for _, dir := range dirs {
+			path := dir
+			if !filepath.IsAbs(path) {
+				path = filepath.Join(a.cfg.RepoPath, dir)
+			}
+			if info, err := os.Stat(path); err != nil || !info.IsDir() {
+				a.logger.Warn("Lint policy directory not found in the working tree; "+
+					"that side will be linted with no policies at all",
+					"flag", flag, "dir", dir, "resolved", path)
+			}
+		}
+	}
+	check("--lint-kyverno", a.cfg.LintKyverno)
+	check("--lint-conftest", a.cfg.LintConftest)
 }
 
 // lintSide runs the lint commands for one side of one application and logs how

@@ -81,6 +81,8 @@ var (
 
 	// Lint options
 	lintCommands []string
+	lintKyverno  []string
+	lintConftest []string
 	lintTimeout  time.Duration
 )
 
@@ -239,8 +241,16 @@ Examples:
 		"Shell command that lints rendered manifests (can be repeated): receives an app's rendered "+
 			"multi-doc YAML on stdin, each stdout line becomes a report warning; exit != 0 is reported "+
 			"as a lint execution error")
+	rootCmd.Flags().StringArrayVar(&lintKyverno, "lint-kyverno", nil,
+		"Lint rendered manifests with the kyverno policies in `DIR` (can be repeated): runs kyverno "+
+			"apply against the cluster being diffed and reports its findings, no shell pipeline or jq "+
+			"needed. DIR is repo-relative, so each side lints with its own version of the policies")
+	rootCmd.Flags().StringArrayVar(&lintConftest, "lint-conftest", nil,
+		"Lint rendered manifests with the rego policies in `DIR` (can be repeated): runs conftest test "+
+			"and reports its findings, no shell pipeline or jq needed. DIR is repo-relative, so each "+
+			"side lints with its own version of the policies")
 	rootCmd.Flags().DurationVar(&lintTimeout, "lint-timeout", config.DefaultLintTimeout,
-		"Timeout for each --lint command invocation")
+		"Timeout for each lint invocation (--lint, --lint-kyverno, --lint-conftest)")
 
 	// CI flags
 	rootCmd.Flags().BoolVar(&exitCode, "exit-code", false,
@@ -568,6 +578,8 @@ func runMain(cmd *cobra.Command, args []string) error {
 		ExitCode:                exitCode,
 		Marker:                  marker,
 		Lint:                    lintCommands,
+		LintKyverno:             lintKyverno,
+		LintConftest:            lintConftest,
 		LintTimeout:             lintTimeout,
 		Version:                 bareVersion(),
 	}

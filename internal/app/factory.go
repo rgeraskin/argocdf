@@ -165,7 +165,7 @@ const (
 // when it is unknown nothing is exported for that variable — never an empty
 // value, which an adapter could not distinguish from a real one.
 func (f *Factory) CreateLintRunner(kubeContext string) *lint.Runner {
-	if len(f.config.Lint) == 0 {
+	if len(f.config.Lint)+len(f.config.LintKyverno)+len(f.config.LintConftest) == 0 {
 		return nil
 	}
 
@@ -181,8 +181,15 @@ func (f *Factory) CreateLintRunner(kubeContext string) *lint.Runner {
 
 	return &lint.Runner{
 		Commands: f.config.Lint,
-		Timeout:  f.config.LintTimeout,
-		Env:      env,
+		Kyverno:  f.config.LintKyverno,
+		Conftest: f.config.LintConftest,
+		// The built-in adapters take these as data instead of reading them back
+		// out of Env: the environment variables exist for SHELL commands, which
+		// have no other way to learn them.
+		KubeContext: kubeContext,
+		Kubeconfig:  f.config.KubeconfigPath,
+		Timeout:     f.config.LintTimeout,
+		Env:         env,
 	}
 }
 

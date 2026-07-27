@@ -51,10 +51,27 @@ func TestCreateLintRunner(t *testing.T) {
 		wantEnv     map[string]string
 	}{
 		{
-			name:        "no --lint commands means no runner",
+			name:        "no linter of any kind means no runner",
 			cfg:         &config.Config{KubeconfigPath: "/home/u/.kube/config"},
 			kubeContext: "prod",
 			wantNil:     true,
+		},
+		{
+			// The built-in adapters must construct a runner on their own: gating
+			// only on Lint would make --lint-kyverno silently do nothing.
+			name:        "a built-in adapter alone still builds a runner",
+			cfg:         &config.Config{LintKyverno: []string{"policies/kyverno"}, KubeconfigPath: "/home/u/.kube/config"},
+			kubeContext: "prod",
+			wantEnv: map[string]string{
+				"ARGOCDF_CONTEXT":    "prod",
+				"ARGOCDF_KUBECONFIG": "/home/u/.kube/config",
+			},
+		},
+		{
+			name:        "conftest alone also builds a runner",
+			cfg:         &config.Config{LintConftest: []string{"policies/conftest"}},
+			kubeContext: "prod",
+			wantEnv:     map[string]string{"ARGOCDF_CONTEXT": "prod"},
 		},
 		{
 			name:        "both selectors are exported",
@@ -114,6 +131,21 @@ func TestCreateLintRunner(t *testing.T) {
 			}
 			if !reflect.DeepEqual(r.Env, tt.wantEnv) {
 				t.Errorf("Env = %v, want %v", r.Env, tt.wantEnv)
+			}
+			if !reflect.DeepEqual(r.Kyverno, tt.cfg.LintKyverno) {
+				t.Errorf("Kyverno = %v, want %v", r.Kyverno, tt.cfg.LintKyverno)
+			}
+			if !reflect.DeepEqual(r.Conftest, tt.cfg.LintConftest) {
+				t.Errorf("Conftest = %v, want %v", r.Conftest, tt.cfg.LintConftest)
+			}
+			// The built-in adapters read these fields, not Env: a call site that
+			// wired only the environment would leave them linting the ambient
+			// cluster while every Env assertion above still passed.
+			if r.KubeContext != tt.kubeContext {
+				t.Errorf("KubeContext = %q, want %q", r.KubeContext, tt.kubeContext)
+			}
+			if r.Kubeconfig != tt.cfg.KubeconfigPath {
+				t.Errorf("Kubeconfig = %q, want %q", r.Kubeconfig, tt.cfg.KubeconfigPath)
 			}
 		})
 	}

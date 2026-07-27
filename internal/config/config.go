@@ -166,8 +166,15 @@ type Config struct {
 
 	// Lint options. Each Lint entry is a shell command that receives an app's
 	// rendered manifests on stdin and emits one warning per stdout line.
-	Lint        []string
-	LintTimeout time.Duration // Per-invocation timeout (0 = DefaultLintTimeout)
+	// LintKyverno and LintConftest are policy DIRECTORIES for the built-in
+	// adapters, which run the tool and parse its report themselves — the same
+	// work a hand-written shell pipeline does, without the jq stage that is the
+	// usual source of adapter bugs. Paths are relative to the repo, so each side
+	// lints with its own version of the policies.
+	Lint         []string
+	LintKyverno  []string
+	LintConftest []string
+	LintTimeout  time.Duration // Per-invocation timeout (0 = DefaultLintTimeout)
 
 	// Version is the argocdf version stamped into report footers (provenance).
 	// Set programmatically by the CLI entry point, not a flag; empty omits the
