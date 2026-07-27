@@ -368,7 +368,8 @@ func (a *App) warnMissingPolicyDirs() {
 			}
 			if info, err := os.Stat(path); err != nil || !info.IsDir() {
 				a.logger.Warn("Lint policy directory not found in the working tree; "+
-					"that side will be linted with no policies at all",
+					"this linter will report NOTHING for any application unless the "+
+					"directory exists in the branches being compared",
 					"flag", flag, "dir", dir, "resolved", path)
 			}
 		}
