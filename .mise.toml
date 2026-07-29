@@ -6,8 +6,18 @@ kubectl = "1.31.1"
 yq = "4.44.3"
 helm = "3.19.4"
 kustomize = "5.8.1"
+# e2e lint adapter dependencies (scripts/lint-*.sh in the e2e submodule)
+kyverno = "1.18.2"
+conftest = "0.68.2"
+jq = "1.8.2"
 
 [env]
+# e2e kind node image (k8s version + digest): part of the e2e expected-output
+# contract - bumping it requires regenerating e2e expectations (see e2e/README.md)
+E2E_KIND_NODE_IMAGE = "kindest/node:v1.34.8@sha256:02722c2dedddcfc00febf5d27fbeb9b7b2c14294c82109ff4a85d89ac9ba3256"
+# ArgoCD version installed in the e2e cluster - keep in sync with the
+# github.com/argoproj/argo-cd version in go.mod
+E2E_ARGOCD_VERSION = "v3.3.11"
 BINARY_NAME = "argocdf"
 
 [tasks.build]
@@ -90,18 +100,44 @@ description = "Run all checks (vet, lint, test)"
 depends = ["vet", "lint", "test"]
 
 [tasks."e2e:bootstrap"]
-description = "Bootstrap e2e test environment"
+description = "Bootstrap the e2e cluster with the REAL ArgoCD controller (the baseline: production-shaped). Requires e2e master pushed, because the controller syncs the remote at targetRevision HEAD. Waits until every Application is Synced+Healthy (E2E_SYNC_TIMEOUT bounds it)"
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
 
-git submodule update --init --recursive
-kind create cluster -n argocdf
-kubectl kustomize e2e/argocd | \
-    yq 'select(.kind == "CustomResourceDefinition")' | \
-    kubectl --context kind-argocdf apply -f -
-kubectl --context kind-argocdf apply -k e2e/argocd
+# init only when missing: `submodule update` on an initialized submodule would
+# RESET its checkout to the recorded gitlink, clobbering local e2e work
+[ -e e2e/.git ] || git submodule update --init --recursive
+scripts/e2e/bootstrap.sh
 """
+
+[tasks."e2e:bootstrap-static"]
+description = "e2e cluster WITHOUT a controller: same Application set, applied once by rendering the charts. Needs no push and no sync wait - the fast loop for fixtures and regeneration (output is identical to the baseline)"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+
+[ -e e2e/.git ] || git submodule update --init --recursive
+scripts/e2e/bootstrap.sh --static
+"""
+
+[tasks."e2e:run"]
+description = "Run the e2e suite: every case branch diffed against expected outputs (the e2e:review hollow-pin gate runs automatically after a full run). Against the controller-backed baseline, push e2e master first (e2e:push) and let it sync"
+depends = ["build"]
+run = "scripts/e2e/run.sh"
+
+[tasks."e2e:regenerate"]
+description = "Regenerate e2e expected outputs from the current binary (review the diff before committing! the e2e:review hollow-pin gate runs automatically on the result). Use the e2e:bootstrap-static cluster: no push needed and the output is identical"
+depends = ["build"]
+run = "scripts/e2e/run.sh --regenerate"
+
+[tasks."e2e:review"]
+description = "Hollow-pin guard: mechanically review e2e/expected/ against each case's authored checks (expected/<case>/checks.grep) and global never-pin rules"
+run = "scripts/e2e/review-expected.sh"
+
+[tasks."e2e:push"]
+description = "Publish the e2e artifact: rebase all case/* branches onto master, push master, force-push branches, prune orphaned remote case branches. Run it as: E2E_PUSH_YES=1 mise run e2e:push - mise gives the task no TTY, so the confirmation prompt only appears when scripts/e2e/push.sh is invoked directly"
+run = "scripts/e2e/push.sh"
 
 [tasks."e2e:clean"]
 description = "Destroy e2e test environment"

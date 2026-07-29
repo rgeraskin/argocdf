@@ -1,0 +1,11 @@
+# kind cluster config for the e2e suite. The port mapping is the HOST half of
+# the private-registry URL (127.0.0.1.nip.io:5317 - see e2e/bootstrap/
+# registry.yaml): host port 5317 -> the registry Service's NodePort.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - listenAddress: 127.0.0.1
+        hostPort: 5317
+        containerPort: 30517
