@@ -196,7 +196,7 @@ func (m *MarkdownWriter) writeAppDiffGitHub(appDiff *types.AppDiff, _ int) error
 
 	// Error message
 	if appDiff.Error != nil {
-		m.write(fmt.Sprintf("> ⚠️ %s\n\n", html.EscapeString(appDiff.Error.Error())))
+		m.write(prefixLines("⚠️ "+html.EscapeString(appDiff.Error.Error()), "> ") + "\n\n")
 	} else if !ok || result == nil {
 		m.write("_No diff available_\n\n")
 	} else {
@@ -290,7 +290,7 @@ func (m *MarkdownWriter) writeAppDiffAtlantis(appDiff *types.AppDiff, _ int) err
 
 	// Error message
 	if appDiff.Error != nil {
-		m.write(fmt.Sprintf("> ⚠️ %s\n\n", html.EscapeString(appDiff.Error.Error())))
+		m.write(prefixLines("⚠️ "+html.EscapeString(appDiff.Error.Error()), "> ") + "\n\n")
 	} else if !ok || result == nil {
 		m.write("_No diff available_\n\n")
 	} else {
@@ -392,7 +392,7 @@ func (m *MarkdownWriter) detailedDiffBlocksGitHub(result *diff.ManifestSetDiff) 
 func (m *MarkdownWriter) detailedDiffBlocksAtlantis(result *diff.ManifestSetDiff) []string {
 	diffs, err := GenerateManifestUnifiedDiffs(result, m.contextLines)
 	if err != nil {
-		return []string{fmt.Sprintf("> Error generating diff: %s\n\n", err.Error())}
+		return []string{prefixLines("Error generating diff: "+err.Error(), "> ") + "\n\n"}
 	}
 
 	var blocks []string

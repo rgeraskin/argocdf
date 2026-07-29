@@ -48,6 +48,26 @@ func shortSHA(sha string) string {
 	return sha
 }
 
+// prefixLines prefixes EVERY line of s, so multi-line text stays inside the
+// format's comment or quote syntax. Render errors are the case that matters:
+// helm reports schema violations and template parse errors across several lines,
+// and prefixing only the first one leaves the rest as raw lines in a file that
+// claims to be a patch (a continuation starting with "- " is then
+// indistinguishable from a deletion) or as text escaping a markdown blockquote.
+// A blank line still gets the prefix - an unprefixed one would end a blockquote -
+// but trimmed of its trailing space, so reports carry no trailing whitespace.
+func prefixLines(s, prefix string) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	for i, line := range lines {
+		if line == "" {
+			lines[i] = strings.TrimRight(prefix, " ")
+			continue
+		}
+		lines[i] = prefix + line
+	}
+	return strings.Join(lines, "\n")
+}
+
 // Writer defines the interface for writing diff output.
 type Writer interface {
 	// WriteHeader writes the output header.

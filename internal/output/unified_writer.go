@@ -49,7 +49,7 @@ func (u *UnifiedWriter) WriteAppDiff(appDiff *types.AppDiff, _ int) error {
 
 	// Handle error
 	if appDiff.Error != nil {
-		u.write(fmt.Sprintf("# Error: %s\n\n", appDiff.Error.Error()))
+		u.write(prefixLines("Error: "+appDiff.Error.Error(), "# ") + "\n\n")
 		return nil
 	}
 
@@ -90,7 +90,7 @@ func (u *UnifiedWriter) WriteAppDiff(appDiff *types.AppDiff, _ int) error {
 	// Generate unified diffs for all manifests
 	diffs, err := GenerateManifestUnifiedDiffs(result, u.contextLines)
 	if err != nil {
-		u.write(fmt.Sprintf("# Error generating diff: %s\n\n", err.Error()))
+		u.write(prefixLines("Error generating diff: "+err.Error(), "# ") + "\n\n")
 		return nil
 	}
 

@@ -197,7 +197,10 @@ func (t *TerminalWriter) writeAppDiffUnified(appDiff *types.AppDiff) error {
 
 	// Handle error
 	if appDiff.Error != nil {
-		_, _ = fmt.Fprintf(t.out, "# %s\n\n", errorStyle.Render("Error: "+appDiff.Error.Error()))
+		// Every line commented: this mode's output is meant to be patch-compatible,
+		// so a multi-line render error must not leak raw lines into it.
+		_, _ = fmt.Fprintf(t.out, "%s\n\n",
+			prefixLines(errorStyle.Render("Error: "+appDiff.Error.Error()), "# "))
 		return nil
 	}
 
@@ -249,7 +252,8 @@ func (t *TerminalWriter) writeAppDiffUnified(appDiff *types.AppDiff) error {
 	// Generate unified diffs for all manifests
 	diffs, err := GenerateManifestUnifiedDiffs(result, t.contextLines)
 	if err != nil {
-		_, _ = fmt.Fprintf(t.out, "# %s\n\n", errorStyle.Render("Error generating diff: "+err.Error()))
+		_, _ = fmt.Fprintf(t.out, "%s\n\n",
+			prefixLines(errorStyle.Render("Error generating diff: "+err.Error()), "# "))
 		return nil
 	}
 
