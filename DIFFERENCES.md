@@ -323,9 +323,35 @@ The `exec.Command` approach for Helm/Kustomize is:
 
 The deviation is deliberate: argocd-server always has RBAC over its own namespace, while argocdf runs under the *user's* RBAC, which may not include the ArgoCD namespace at all.
 
+## 16. Which Applications a Change Affects
+
+This is the one question argocdf must answer that ArgoCD never asks. ArgoCD reconciles a *named* application on request or on a timer; argocdf starts from a git diff and has to decide which applications that diff could possibly change.
+
+| Aspect                                | ArgoCD                                                                                                   | argocdf                                                                                        |
+|---------------------------------------|----------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------|
+| **Default when a commit lands**       | refresh/re-render EVERY application in the repository — a new commit invalidates the whole manifest cache | only applications whose `source.path` contains a changed file (plus `$ref` value files)         |
+| **`manifest-generate-paths`**         | narrows the default: declared paths gate webhook refresh and manifest-cache reuse                        | ✅ widens the default: declared paths are the only way to reach a dependency it cannot infer     |
+| **Resolution of the annotation**      | `util/app/path.GetSourceRefreshPaths` + `AppFilesHaveChanged`                                             | ✅ the same functions, called through `internal/cluster`                                         |
+| **Present-but-empty annotation**      | declares nothing, so the default (refresh everything) applies                                            | treated as absent: falls back to path matching, NOT to "always affected"                       |
+| **Git-provider dependence**           | webhook support for the annotation is limited to GitHub, GitLab and Gogs                                 | none — argocdf computes the changed-file list itself with git                                   |
+| **`$values` files once declared**     | not covered by the declaration either — the docs note external values files miss out                     | ✅ same: the declaration replaces argocdf's `$ref` value-file matching, so declare those paths   |
+| **Declaration nothing can resolve**   | n/a (ArgoCD renders on request regardless)                                                               | app can never be reported affected — argocdf WARNS rather than vanishing silently               |
+
+The defaults are opposites, and that is the whole asymmetry: ArgoCD's default is safe-but-expensive (render everything, then let the annotation trim it), while argocdf's is cheap-but-partial (render what the paths match). So a dependency outside an application's source path — a kustomize overlay whose base is `../shared`, a helm chart including a sibling file, a values file elsewhere in the repo — is invisible to argocdf until it is declared:
+
+```yaml
+metadata:
+  annotations:
+    # the base AND this app's own path; the annotation REPLACES the default
+    argocd.argoproj.io/manifest-generate-paths: ../kustomize-base;.
+```
+
+Semantics (ArgoCD's, verified against v3.3.11's resolver and a live controller): entries are `;`-separated, a leading `/` is repo-root-relative, everything else is joined to that *source's* path, and globs go through `filepath.Match` — which does not cross `/`. Omitting `.` silently stops the application from reacting to its own directory. `e2e/case/kustomize-relative-base` pins the behavior end to end.
+
 ## References
 
 - [ArgoCD Diff Customization](https://argo-cd.readthedocs.io/en/stable/user-guide/diffing/)
+- [ArgoCD manifest-paths annotation](https://argo-cd.readthedocs.io/en/stable/operator-manual/high_availability/#manifest-paths-annotation)
 - [ArgoCD Diff Strategies](https://argo-cd.readthedocs.io/en/stable/user-guide/diff-strategies/)
 - [gitops-engine diff package](https://pkg.go.dev/github.com/argoproj/gitops-engine/pkg/diff)
 - [ArgoCD High Availability](https://argo-cd.readthedocs.io/en/stable/operator-manual/high_availability/)

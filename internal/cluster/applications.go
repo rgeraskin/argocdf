@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	argoapp "github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
+	apppath "github.com/argoproj/argo-cd/v3/util/app/path"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -41,7 +43,64 @@ type (
 	KustomizeImage    = argoapp.KustomizeImage
 	KustomizeImages   = argoapp.KustomizeImages
 	KustomizeSelector = argoapp.KustomizeSelector
+
+	// Source hydrator (dry source -> hydrated sync source). Aliased so tests can
+	// build such an app without importing argo-cd types directly: selection
+	// inherits an upstream special case for these apps, see
+	// TestManifestGeneratePathsSourceHydratorFollowsUpstream.
+	SourceHydrator = argoapp.SourceHydrator
+	DrySource      = argoapp.DrySource
+	SyncSource     = argoapp.SyncSource
 )
+
+// The three helpers below wrap ArgoCD's own manifest-generate-paths resolution.
+// They exist so the annotation is interpreted by ArgoCD's code rather than
+// reimplemented (its rules are specific: `;` separates entries, a leading `/` is
+// repo-root-relative, everything else is joined to the SOURCE's path and cleaned),
+// and so the argo-cd import stays inside this package like the type aliases above.
+
+// AnnotationKeyManifestGeneratePaths is ArgoCD's declaration of which repository
+// paths generate an application's manifests.
+const AnnotationKeyManifestGeneratePaths = argoapp.AnnotationKeyManifestGeneratePaths
+
+// HasManifestGeneratePaths reports whether an Application declares the paths that
+// generate its manifests. A present-but-empty annotation counts as absent: it
+// declares nothing, and callers then keep their own matching rather than treating
+// the app as always affected.
+func HasManifestGeneratePaths(app *Application) bool {
+	return strings.TrimSpace(app.Annotations[argoapp.AnnotationKeyManifestGeneratePaths]) != ""
+}
+
+// ManifestGeneratePaths resolves the declared paths for ONE source, repo-relative.
+// ArgoCD resolves per source because relative entries (`.`, `../base`) are joined
+// to that source's own path, so a multi-source app can declare one annotation and
+// have it mean the right thing for each source.
+func ManifestGeneratePaths(app *Application, source ApplicationSource) []string {
+	return apppath.GetSourceRefreshPaths(app, source)
+}
+
+// ChangedUnderDeclaredPaths reports whether any changed file lies under the
+// declared paths.
+//
+// One DELIBERATE deviation from ArgoCD, and it is the whole reason this wrapper
+// guards instead of delegating outright: upstream returns true for an EMPTY change
+// list, because a webhook payload that omitted the file list means "unknown, so
+// refresh to be safe". argocdf's list never means that - it comes from a git diff
+// it computed itself, so empty means there are no changes, and nothing can be
+// affected by them. Delegating that case turned `--base X --target X` into "every
+// annotated app changed", rendering them all.
+//
+// Empty declaredPaths are still upstream's problem to answer (it treats them as
+// "always refresh"); callers must not reach here with them, which is why
+// manifestGeneratePathsAffected skips a source whose declaration resolves to
+// nothing.
+func ChangedUnderDeclaredPaths(declaredPaths, changedFiles []string) bool {
+	if len(changedFiles) == 0 {
+		return false
+	}
+
+	return apppath.AppFilesHaveChanged(declaredPaths, changedFiles)
+}
 
 // ApplicationService provides operations on ArgoCD Applications.
 type ApplicationService struct {

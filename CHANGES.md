@@ -16,6 +16,9 @@ All notable changes to this project will be documented in this file.
 - New `--lint-kyverno DIR` and `--lint-conftest DIR` built-in adapters
   argocdf execs the tool and parses its report itself, so the shell pipeline and its `jq` stage disappear — along with the two ways an adapter is usually written wrong: treating empty output as failure, and treating a findings exit as a crash. Findings are reported one line per offending resource, and kyverno's `error` results (a broken CEL expression, which otherwise just stops producing findings) surface marked `ERROR`.
 
+- Honor ArgoCD's `manifest-generate-paths` annotation when selecting apps
+  A dependency outside an app's `source.path` - a kustomize overlay whose base is `../shared`, a values file elsewhere in the repo - is invisible to path matching, so the app was reported unaffected. Declaring `argocd.argoproj.io/manifest-generate-paths` now includes it, resolved by ArgoCD's own code so both tools select the same applications. The declaration REPLACES the default rather than extending it, exactly as in ArgoCD, and that has two edges worth knowing: `../base` alone stops the app reacting to its own directory (write `../base;.`), and it also replaces argocdf's helm file matching - `$values/...`, escaping (`../shared/vals.yaml`) and repo-root-absolute entries, and `fileParameters` alike - so a helm app must name those paths too. A declaration no source can resolve is warned about rather than silently making the app unreportable.
+
 - `--lint` commands learn which cluster argocdf is diffing
   Every command gets `ARGOCDF_CONTEXT` (the resolved context) and `ARGOCDF_KUBECONFIG`, so cluster-aware adapters (`kyverno apply --cluster`, `kubectl apply --dry-run=server`) validate against the cluster under review instead of whatever the invoking shell pointed at.
 

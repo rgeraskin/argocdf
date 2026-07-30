@@ -585,6 +585,15 @@ func (a *App) filterAffectedApps(apps []cluster.Application, changed *git.Change
 	for _, app := range apps {
 		sources := app.Spec.GetSources()
 
+		// An app that DECLARES its generating paths is matched by that
+		// declaration alone (see manifestGeneratePathsAffected).
+		if declared, affectedByDeclaration := a.manifestGeneratePathsAffected(app, repoURL, changedPaths); declared {
+			if affectedByDeclaration {
+				affected = append(affected, app)
+			}
+			continue
+		}
+
 		// Build a lookup of ref name -> ref source so we can resolve
 		// $<ref>/... value file references (which may be declared on a
 		// different source than the ref source itself).
@@ -631,6 +640,89 @@ func (a *App) filterAffectedApps(apps []cluster.Application, changed *git.Change
 	}
 
 	return affected
+}
+
+// manifestGeneratePathsAffected applies ArgoCD's
+// argocd.argoproj.io/manifest-generate-paths annotation, using ArgoCD's own
+// resolver so the two tools select the same applications. It reports whether the
+// app DECLARES its generating paths, and if so whether the change touched them.
+//
+// The annotation exists because path matching cannot see a source's build graph:
+// a kustomize overlay whose base sits in `../shared`, a helm chart including a
+// file from a sibling directory, and a values file outside the source path are all
+// invisible to it. ArgoCD faces the same question in its webhook refresh filter
+// and answers it the same way - and there the DEFAULT is to refresh every app, so
+// the annotation is what narrows it. argocdf's default is the opposite (only apps
+// whose source path changed), so the annotation WIDENS: a declaration is the only
+// way to tell argocdf about a dependency it cannot infer.
+//
+// Because it is a declaration of what generates the manifests, it REPLACES
+// argocdf's own matching for that app rather than adding to it - matching
+// ArgoCD, where the annotation likewise replaces the default. Declaring
+// `../base` alone therefore stops the app's OWN path from matching; declare
+// `../base;.` to keep it. An annotation present but empty is treated as absent,
+// so a typo degrades to argocdf's default rather than to "always affected".
+func (a *App) manifestGeneratePathsAffected(
+	app cluster.Application,
+	repoURL string,
+	changedPaths []string,
+) (declared, affected bool) {
+	if !cluster.HasManifestGeneratePaths(&app) {
+		return false, false
+	}
+
+	resolvable := false
+	inRepoSource := false
+	for _, source := range app.Spec.GetSources() {
+		// Paths are repo-relative, so only sources in the repo being diffed can
+		// resolve them (ArgoCD's webhook applies the same per-source URL check).
+		if git.NormalizeRepoURL(source.RepoURL) != repoURL {
+			continue
+		}
+		inRepoSource = true
+		refreshPaths := cluster.ManifestGeneratePaths(&app, source)
+		if len(refreshPaths) == 0 {
+			continue
+		}
+		resolvable = true
+		if cluster.ChangedUnderDeclaredPaths(refreshPaths, changedPaths) {
+			a.logger.Debug("App affected via manifest-generate-paths",
+				"app", app.Name, "refreshPaths", refreshPaths)
+			return true, true
+		}
+		a.logger.Debug("App not affected: declared manifest-generate-paths untouched",
+			"app", app.Name, "refreshPaths", refreshPaths)
+	}
+
+	if !resolvable {
+		// A source IS in this repo, yet the declaration produced no path for it: the
+		// annotation is separators only (";", ";;"), because ArgoCD skips empty
+		// entries when splitting. That is a typo, not an intent, and it gets the same
+		// treatment as a present-but-EMPTY annotation - fall back to argocdf's own
+		// matching instead of making the app permanently unreportable. Both readings
+		// are defensible; this one is chosen for consistency, so that no way of
+		// writing an unusable annotation silently deletes an app from every report.
+		if inRepoSource {
+			a.logger.Warn("App declares manifest-generate-paths with no usable path; "+
+				"ignoring the declaration and matching by source path instead",
+				"app", app.Name,
+				"annotation", app.Annotations[cluster.AnnotationKeyManifestGeneratePaths])
+
+			return false, false
+		}
+
+		// No source in this repo at all (a remote-chart-only app). Nothing to fall
+		// back to - path matching cannot reach it either - so the app is genuinely
+		// unreachable: it will never be reported affected, for any change. That is
+		// silent by nature, so say it out loud once.
+		a.logger.Warn("App declares manifest-generate-paths but no source resolves them; "+
+			"it can never be reported as affected",
+			"app", app.Name,
+			"annotation", app.Annotations[cluster.AnnotationKeyManifestGeneratePaths],
+			"diffedRepo", repoURL)
+	}
+
+	return true, false
 }
 
 // helmValueFilesAffected reports whether any of a helm source's value files

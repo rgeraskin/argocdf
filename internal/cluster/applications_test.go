@@ -444,3 +444,26 @@ func TestListNamespaces(t *testing.T) {
 		t.Errorf("ListNamespaces() namespaces = %v, want exactly team-a and team-b", got)
 	}
 }
+
+// TestChangedUnderDeclaredPathsEmptyChangeList pins the deviation at the wrapper,
+// where it is enforced for every caller: upstream's AppFilesHaveChanged answers
+// "true" for an empty change list (an incomplete webhook payload means refresh),
+// which is the opposite of what a computed git diff means.
+func TestChangedUnderDeclaredPathsEmptyChangeList(t *testing.T) {
+	declared := []string{"/apps/overlay", "/apps/base"}
+
+	if ChangedUnderDeclaredPaths(declared, nil) {
+		t.Error("ChangedUnderDeclaredPaths(declared, nil) = true, want false: an empty diff changes nothing")
+	}
+	if ChangedUnderDeclaredPaths(declared, []string{}) {
+		t.Error("ChangedUnderDeclaredPaths(declared, []) = true, want false")
+	}
+	// The non-empty path still delegates to ArgoCD, so the deviation is scoped to
+	// the empty case and nothing else moved.
+	if !ChangedUnderDeclaredPaths(declared, []string{"apps/base/kustomization.yaml"}) {
+		t.Error("a file under a declared path was not matched")
+	}
+	if ChangedUnderDeclaredPaths(declared, []string{"apps/elsewhere/cm.yaml"}) {
+		t.Error("a file outside every declared path was matched")
+	}
+}
