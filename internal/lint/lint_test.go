@@ -79,11 +79,18 @@ func TestLintCommandNotFound(t *testing.T) {
 }
 
 func TestLintTimeout(t *testing.T) {
-	r := &Runner{Commands: []string{`sleep 5`}, Timeout: 100 * time.Millisecond}
+	r := &Runner{Commands: []string{`sleep 30`}, Timeout: 100 * time.Millisecond}
 	start := time.Now()
 	got := r.Lint(context.Background(), "", "")
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Errorf("lint did not honor timeout, took %s", elapsed)
+	// The guaranteed bound is Timeout + waitDelay, not Timeout: cancellation
+	// SIGKILLs only sh, and whether that also kills the `sleep` holding the
+	// stdout pipe depends on the shell — bash execs a single simple command
+	// (macOS /bin/sh), dash forks it (Ubuntu /bin/sh) and the full waitDelay is
+	// spent. A bound below Timeout+waitDelay passes only on the exec-optimizing
+	// shell; the sleep is long enough that 10s still proves the timeout bounds
+	// wall-clock. Same reasoning as the *BoundsWallClock tests in builtin_test.go.
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Errorf("lint did not honor timeout, took %s (WaitDelay = %s)", elapsed, waitDelay)
 	}
 	if len(got) != 1 || !strings.Contains(got[0], "timeout after 100ms") {
 		t.Errorf("expected timeout warning, got %v", got)
@@ -112,11 +119,13 @@ func TestLintParentContextCancellation(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 		cancel()
 	}()
-	r := newRunner(`sleep 5`)
+	r := newRunner(`sleep 30`)
 	start := time.Now()
 	got := r.Lint(ctx, "", "")
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Errorf("lint did not honor parent cancellation, took %s", elapsed)
+	// Bounded by cancellation + waitDelay, for the shell-dependent reason spelled
+	// out in TestLintTimeout.
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Errorf("lint did not honor parent cancellation, took %s (WaitDelay = %s)", elapsed, waitDelay)
 	}
 	// Cancellation is not a timeout: it surfaces through the generic error
 	// branch as a lint error line rather than being silently dropped.
