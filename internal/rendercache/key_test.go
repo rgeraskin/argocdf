@@ -1,6 +1,7 @@
 package rendercache
 
 import (
+	"path"
 	"testing"
 
 	"github.com/rgeraskin/argocdf/internal/cluster"
@@ -419,5 +420,106 @@ func TestComputeKeyMixedLockAndUnlockedSources(t *testing.T) {
 	}
 	if _, ok := ComputeKey(build(ranged)); ok {
 		t.Error("locked chart + unlocked range chart: expected bypass for the whole app")
+	}
+}
+
+// pathRecordingResolver returns a fixed hash for every path and records which
+// paths were asked for, so a test can assert what the key actually hashed.
+func pathRecordingResolver(asked *[]string, hashes map[string]string) func(commit, path string) (string, bool) {
+	return func(_, p string) (string, bool) {
+		*asked = append(*asked, p)
+		if h, ok := hashes[p]; ok {
+			return h, true
+		}
+		return "treehash-1", true
+	}
+}
+
+func askedFor(asked []string, want string) bool {
+	for _, p := range asked {
+		if p == want {
+			return true
+		}
+	}
+	return false
+}
+
+// TestComputeKeyAbsoluteValueFileIsRepoRootRelative: an absolute helm value-file
+// entry is repo-ROOT-relative in ArgoCD, not filesystem-absolute. The key used to
+// bypass on the leading "/", which made every app with a /config/prod.yaml
+// permanently uncacheable while SELECTION matched that same file happily - the two
+// layers disagreeing about which files an app reads.
+func TestComputeKeyAbsoluteValueFileIsRepoRootRelative(t *testing.T) {
+	var asked []string
+	in := baseInput()
+	in.SameRepo = allRepo
+	in.ReadFile = fixedReader("")
+	in.Spec.Source.Helm = &cluster.ApplicationSourceHelm{ValueFiles: []string{"/config/prod.yaml"}}
+	in.ResolveTree = pathRecordingResolver(&asked, nil)
+
+	if _, ok := ComputeKey(in); !ok {
+		t.Fatal("ComputeKey bypassed an absolute value file; ArgoCD resolves it from the repository root")
+	}
+	if !askedFor(asked, "config/prod.yaml") {
+		t.Errorf("key did not hash the repo-root-relative path; asked for %v", asked)
+	}
+}
+
+// ...and its content must actually move the key, or "cacheable" would just mean
+// "silently ignores that file".
+func TestComputeKeyAbsoluteValueFileContentParticipates(t *testing.T) {
+	keyWith := func(hash string) string {
+		var asked []string
+		in := baseInput()
+		in.SameRepo = allRepo
+		in.ReadFile = fixedReader("")
+		in.Spec.Source.Helm = &cluster.ApplicationSourceHelm{ValueFiles: []string{"/config/prod.yaml"}}
+		in.ResolveTree = pathRecordingResolver(&asked, map[string]string{"config/prod.yaml": hash})
+		return mustKey(t, in)
+	}
+
+	if keyWith("blob-a") == keyWith("blob-b") {
+		t.Error("editing an absolute value file did not change the cache key")
+	}
+}
+
+// TestComputeKeyRemoteValueFileBypasses: a remote (http/https) value file has no
+// repository content to hash, and it can change under a FIXED commit - so it must
+// bypass. The previous code joined the URL onto the chart path, failed to resolve
+// that nonsense path, and recorded it as "absent", producing a cacheable key for a
+// render whose inputs live outside git.
+func TestComputeKeyRemoteValueFileBypasses(t *testing.T) {
+	for _, url := range []string{"https://example.test/v.yaml", "http://example.test/v.yaml"} {
+		in := baseInput()
+		in.SameRepo = allRepo
+		in.ReadFile = fixedReader("")
+		in.Spec.Source.Helm = &cluster.ApplicationSourceHelm{ValueFiles: []string{url}}
+		in.ResolveTree = fixedResolver("treehash-1")
+
+		if _, ok := ComputeKey(in); ok {
+			t.Errorf("ComputeKey cached a render reading %s; its content is not in the repository", url)
+		}
+	}
+}
+
+// TestComputeKeyRelativeValueFilesUnchanged pins that delegating to ArgoCD's
+// resolver did NOT move the keys of the shapes that already worked - which is why
+// SchemaVersion does not need another bump.
+func TestComputeKeyRelativeValueFilesUnchanged(t *testing.T) {
+	for _, entry := range []string{"values.yaml", "../shared/vals.yaml", "nested/dir/vals.yaml"} {
+		var asked []string
+		in := baseInput()
+		in.SameRepo = allRepo
+		in.ReadFile = fixedReader("")
+		in.Spec.Source.Helm = &cluster.ApplicationSourceHelm{ValueFiles: []string{entry}}
+		in.ResolveTree = pathRecordingResolver(&asked, nil)
+
+		if _, ok := ComputeKey(in); !ok {
+			t.Fatalf("entry %q became uncacheable", entry)
+		}
+		want := path.Clean(path.Join("apps/foo", entry))
+		if !askedFor(asked, want) {
+			t.Errorf("entry %q hashed something other than %q; asked for %v", entry, want, asked)
+		}
 	}
 }

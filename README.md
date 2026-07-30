@@ -58,7 +58,9 @@ Two guards bound the recursion: `--max-depth`, and a spec-identity check that re
 
 ### Dependencies outside an app's source path
 
-argocdf selects applications by matching changed files against each app's `source.path`, which cannot see a source's build graph: a kustomize overlay whose base is `../shared`, a helm chart that includes a file from a sibling directory, a values file elsewhere in the repo. A change to one of those is real but invisible, and the app is reported as unaffected.
+argocdf selects applications by matching changed files against each app's `source.path`, which cannot see a source's build graph: a kustomize overlay whose base is `../shared`, or a chart whose `dependencies:` pull a sibling directory with `file://../lib`. A change to one of those is real but invisible, and the app is reported as unaffected.
+
+Helm `valueFiles` and `fileParameters` do not need this: argocdf resolves them with ArgoCD's own resolver, so an entry outside the source path (`../shared/vals.yaml`) or one relative to the repository root (`/config/prod.yaml`) attributes the change on its own.
 
 ArgoCD has the same blind spot in its webhook refresh filter, and solves it with an annotation - which argocdf honors, resolved by ArgoCD's own code so both tools select the same apps:
 

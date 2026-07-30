@@ -360,6 +360,18 @@ func TestFilterAffectedApps_RefValueFiles(t *testing.T) {
 			want:         true,
 		},
 		{
+			// Upstream blanks the $ref segment, so the remainder is repo-root
+			// ABSOLUTE: this used to be compared verbatim as "/config/prod.yaml"
+			// against repo-relative changed files, and never matched.
+			name: "absolute $ref remainder is repo-root-relative - affected",
+			app: testutil.TestAppMultiSource("my-app", "argocd", []cluster.ApplicationSource{
+				helmSource("$values//config/prod.yaml"),
+				refSource(""),
+			}),
+			changedFiles: testutil.TestChangedFiles(nil, []string{"config/prod.yaml"}, nil),
+			want:         true,
+		},
+		{
 			// fileParameters are resolved by ArgoCD through the SAME two branches
 			// as value files, so a $ref --set-file must select the app too. This
 			// case fails if the matcher iterates only ValueFiles.

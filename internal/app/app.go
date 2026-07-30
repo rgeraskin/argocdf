@@ -608,7 +608,7 @@ func (a *App) filterAffectedApps(apps []cluster.Application, changed *git.Change
 			// another (ref) source via $<ref>/path. This is independent of this
 			// source's own repo URL (the helm chart often lives in a different
 			// repo).
-			if a.helmValueFilesAffected(source, refSources, repoURL, changedPaths) {
+			if a.helmRefFilesAffected(source, refSources, repoURL, changedPaths) {
 				a.logger.Debug("App affected via ref file", "app", app.Name)
 				affected = append(affected, app)
 				break
@@ -631,11 +631,24 @@ func (a *App) filterAffectedApps(apps []cluster.Application, changed *git.Change
 					"path", source.Path)
 				affected = append(affected, app)
 				break
-			} else {
-				a.logger.Debug("Skipping source - no changes in path",
+			}
+
+			// A value file or fileParameter may point OUTSIDE the source path
+			// (../shared/values.yaml) or at the repository root
+			// (/config/prod.yaml). ArgoCD renders both, so both must select the
+			// app; the containment check above cannot see either. Runs second
+			// because containment is the cheaper answer for the common case.
+			if a.helmLocalFilesAffected(source, changedPaths) {
+				a.logger.Debug("App affected via helm file outside the source path",
 					"app", app.Name,
 					"path", source.Path)
+				affected = append(affected, app)
+				break
 			}
+
+			a.logger.Debug("Skipping source - no changes in path",
+				"app", app.Name,
+				"path", source.Path)
 		}
 	}
 
@@ -648,9 +661,10 @@ func (a *App) filterAffectedApps(apps []cluster.Application, changed *git.Change
 // app DECLARES its generating paths, and if so whether the change touched them.
 //
 // The annotation exists because path matching cannot see a source's build graph:
-// a kustomize overlay whose base sits in `../shared`, a helm chart including a
-// file from a sibling directory, and a values file outside the source path are all
-// invisible to it. ArgoCD faces the same question in its webhook refresh filter
+// a kustomize overlay whose base sits in `../shared`, or a chart whose
+// `dependencies:` pull `file://../lib`, are invisible to it. (A value file outside
+// the source path is NOT in that set - it is a declared field, resolved by
+// helmLocalFilesAffected.) ArgoCD faces the same question in its webhook refresh filter
 // and answers it the same way - and there the DEFAULT is to refresh every app, so
 // the annotation is what narrows it. argocdf's default is the opposite (only apps
 // whose source path changed), so the annotation WIDENS: a declaration is the only
@@ -725,18 +739,34 @@ func (a *App) manifestGeneratePathsAffected(
 	return true, false
 }
 
-// helmValueFilesAffected reports whether any of a helm source's value files or
+// helmFileEntries returns every repository file a helm source reads: its value
+// files and its fileParameter (--set-file) paths, as declared.
+//
+// They are one list because ArgoCD resolves them through the IDENTICAL two
+// branches - getReferencedSource then getResolvedRefValueFile, else
+// ResolveValueFilePathOrUrl (getResolvedValueFiles and the FileParameters loop in
+// reposerver/repository/repository.go) - and rendercache/key.go hashes them
+// together for the same reason. Matching only one list is how a $ref
+// fileParameter app went missing from reports.
+func helmFileEntries(helm *cluster.ApplicationSourceHelm) []string {
+	entries := make([]string, 0, len(helm.ValueFiles)+len(helm.FileParameters))
+	entries = append(entries, helm.ValueFiles...)
+	for _, fp := range helm.FileParameters {
+		entries = append(entries, fp.Path)
+	}
+
+	return entries
+}
+
+// helmRefFilesAffected reports whether any of a helm source's value files or
 // fileParameters reference a $<ref>/... path in the local repo that was changed.
 // It resolves the ref name against the app's ref sources, and only matches when
 // the ref source points at the local repo being diffed.
 //
-// Both lists are matched because ArgoCD resolves them through the IDENTICAL two
-// branches - getReferencedSource then getResolvedRefValueFile, else
-// ResolveValueFilePathOrUrl (getResolvedValueFiles and the FileParameters loop in
-// reposerver/repository/repository.go) - and the render-cache key hashes both. An
-// app whose only reference to a changed file is a $ref fileParameter (--set-file
-// reading a file from a ref repo, the release-rollout shape) would otherwise be
-// silently missing from every report.
+// Both lists are matched (see helmFileEntries): an app whose only reference to a
+// changed file is a $ref fileParameter - --set-file reading a file from a values
+// repo, the release-rollout shape - would otherwise be silently missing from
+// every report.
 //
 // Resolution is against the ref repository ROOT, not the ref source's Path,
 // because that is what ArgoCD does: getResolvedRefValueFile drops the $ref
@@ -745,7 +775,7 @@ func (a *App) manifestGeneratePathsAffected(
 // instead - the native engine's old behavior - makes this matcher look for a file
 // that does not exist, so a values change goes unreported. The same mistake lived
 // in the render-cache key until rendercache-v3.
-func (a *App) helmValueFilesAffected(
+func (a *App) helmRefFilesAffected(
 	source cluster.ApplicationSource,
 	refSources map[string]cluster.ApplicationSource,
 	repoURL string,
@@ -755,37 +785,78 @@ func (a *App) helmValueFilesAffected(
 		return false
 	}
 
-	refFiles := make([]string, 0, len(source.Helm.ValueFiles)+len(source.Helm.FileParameters))
-	refFiles = append(refFiles, source.Helm.ValueFiles...)
-	for _, fp := range source.Helm.FileParameters {
-		refFiles = append(refFiles, fp.Path)
-	}
-
-	for _, vf := range refFiles {
-		if !strings.HasPrefix(vf, "$") {
-			continue
-		}
-
-		// Split "$values/env/prod.yaml" into ref name ("values") and the
-		// remaining path within the ref source ("env/prod.yaml").
-		refName, remainder, ok := strings.Cut(strings.TrimPrefix(vf, "$"), "/")
+	for _, entry := range helmFileEntries(source.Helm) {
+		refSource, relPath, ok := cluster.ResolveRefFilePath(
+			entry, refSources, render.DefaultValuesFileSchemes)
 		if !ok {
 			continue
 		}
 
-		refSource, ok := refSources[refName]
-		if !ok {
-			continue
-		}
-
-		// Only local-repo ref sources map to changed files in this repo.
+		// Only local-repo ref sources map to changed files in this repo. This is
+		// the caller's half of the resolution: the render cache asks the same
+		// question through its own SameRepo closure.
 		if git.NormalizeRepoURL(refSource.RepoURL) != repoURL {
 			continue
 		}
 
-		// Repo-relative path of the referenced value file: root-relative within
-		// the ref repository, ignoring refSource.Path (see the doc comment).
-		relPath := path.Clean(remainder)
+		for _, cp := range changedPaths {
+			if path.Clean(cp) == relPath {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// helmLocalFilesAffected reports whether a helm value file or fileParameter
+// declared by a source in the repo being diffed points at a changed file that
+// source-path containment cannot see: an entry escaping the source path
+// (../shared/values.yaml) or an absolute one, which ArgoCD reads relative to the
+// repository ROOT (/config/prod.yaml). Both are ordinary ArgoCD usage - the
+// resolver refuses only entries escaping the REPOSITORY - so both must select the
+// app, or a PR touching a shared values file reports nothing.
+//
+// The resolution rule is not reimplemented here: cluster.ResolveHelmFilePath calls
+// the same ArgoCD function the renderer resolves with, which is what keeps
+// selection, rendering and the render-cache key from drifting apart (see its doc
+// comment for how it runs before any worktree exists).
+//
+// Two exclusions. $<ref>/... entries belong to helmRefFilesAffected, which
+// resolves them against the REF repository instead. A remote-chart source
+// (Chart != "") is skipped entirely: its relative value files resolve inside the
+// extracted chart, so they are not repository files at all - and with the empty
+// Path such a source carries, "values.yaml" would otherwise resolve to the repo
+// root and match an unrelated file there.
+func (a *App) helmLocalFilesAffected(source cluster.ApplicationSource, changedPaths []string) bool {
+	if source.Helm == nil || source.Chart != "" {
+		return false
+	}
+
+	for _, entry := range helmFileEntries(source.Helm) {
+		// $<ref>/... belongs to helmRefFilesAffected. This states that intent
+		// rather than pinning behavior: resolving one here would produce
+		// "<sourcePath>/$values/..." and match nothing, so no test can tell the
+		// skip from its absence.
+		if strings.HasPrefix(entry, "$") {
+			continue
+		}
+
+		relPath, remote, err := cluster.ResolveHelmFilePath(
+			source.Path, entry, render.DefaultValuesFileSchemes)
+		if err != nil {
+			// ArgoCD refuses this entry too, so the app cannot render at all;
+			// there is nothing for a changed file to match.
+			a.logger.Debug("Skipping unresolvable helm file entry",
+				"entry", entry,
+				"path", source.Path,
+				"error", err)
+			continue
+		}
+		if remote {
+			continue
+		}
+
 		for _, cp := range changedPaths {
 			if path.Clean(cp) == relPath {
 				return true

@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/rgeraskin/argocdf/internal/cluster"
+	"github.com/rgeraskin/argocdf/internal/render"
 	"sigs.k8s.io/yaml"
 )
 
@@ -235,35 +236,47 @@ func resolveKeyValueFilePath(
 	refSources map[string]cluster.ApplicationSource,
 	sameRepo func(repoURL string) bool,
 ) (relPath string, bypass bool) {
+	// A $<ref>/... entry resolves against the REF repository's root, through the
+	// same helper selection uses - so the key and the matcher cannot disagree about
+	// which file an entry names. A $-prefixed entry the helper refuses (unknown ref
+	// name, no path segment, traversal, remote URL) has no local content to hash, so
+	// it bypasses rather than falling through to local resolution, which would treat
+	// "$values/x" as a relative path.
 	if strings.HasPrefix(ref, "$") {
-		refName, rest, ok := strings.Cut(strings.TrimPrefix(ref, "$"), "/")
-		if !ok || refName == "" {
-			return "", true
-		}
-		refSource, found := refSources[refName]
-		if !found {
+		refSource, rel, ok := cluster.ResolveRefFilePath(
+			ref, refSources, render.DefaultValuesFileSchemes)
+		if !ok {
 			return "", true
 		}
 		// Only same-repo ref sources have content available locally.
 		if sameRepo == nil || !sameRepo(refSource.RepoURL) {
 			return "", true
 		}
-		p := path.Clean(rest)
-		if pathEscapesRepo(p) {
-			return "", true
-		}
-		return p, false
+		return rel, false
 	}
 
-	// Relative path: resolved against the chart directory (ArgoCD behavior).
-	if path.IsAbs(ref) {
+	// Everything else goes through ArgoCD's own resolver - the same call SELECTION
+	// makes (cluster.ResolveHelmFilePath) - so the key cannot hold a different idea
+	// of which files an app reads than the matcher does. Three copies of this rule
+	// is how the $ref join stayed wrong in two of them.
+	//
+	// Two shapes this gets right that the previous hand-rolled version did not.
+	// An ABSOLUTE entry is repo-ROOT-relative in ArgoCD, not filesystem-absolute,
+	// so bypassing on a leading "/" made every app with a /config/prod.yaml
+	// permanently uncacheable while selection matched it happily. A REMOTE entry
+	// (http/https, per the allowed schemes) must bypass instead: its content lives
+	// outside the repository, no tree hash describes it, and the old code silently
+	// joined it onto chartPath, failed to resolve that nonsense path, and recorded
+	// it as "absent" - a cacheable key for a render that can change under a fixed
+	// commit whenever the remote file does.
+	rel, remote, err := cluster.ResolveHelmFilePath(chartPath, ref, render.DefaultValuesFileSchemes)
+	if err != nil || remote {
 		return "", true
 	}
-	p := path.Clean(path.Join(chartPath, ref))
-	if pathEscapesRepo(p) {
+	if pathEscapesRepo(rel) {
 		return "", true
 	}
-	return p, false
+	return rel, false
 }
 
 // pathEscapesRepo reports whether a cleaned, repo-relative path leaves the

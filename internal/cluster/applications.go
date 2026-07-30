@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	argoapp "github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
 	apppath "github.com/argoproj/argo-cd/v3/util/app/path"
+	pathutil "github.com/argoproj/argo-cd/v3/util/io/path"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -100,6 +102,113 @@ func ChangedUnderDeclaredPaths(declaredPaths, changedFiles []string) bool {
 	}
 
 	return apppath.AppFilesHaveChanged(declaredPaths, changedFiles)
+}
+
+// resolveSyntheticRoot is a repository root that INTENTIONALLY does not exist on
+// disk. See ResolveHelmFilePath for why that is the point.
+const resolveSyntheticRoot = "/__argocdf_repo_root__"
+
+// ResolveHelmFilePath resolves one helm value-file or fileParameter entry,
+// declared by a source whose Path is sourcePath, to a path relative to the
+// repository root - so a changed-file list can be matched against it.
+//
+// The rule is ArgoCD's, and so is the code: relative entries resolve against the
+// SOURCE's path, absolute entries against the repository ROOT, entries escaping
+// the repository are refused, an entry resolving exactly to the root is refused,
+// and a URL is reported as remote when its scheme is allowed. Reimplementing that
+// is how argocdf ended up with two divergent copies of the $ref rule, so this
+// calls pathutil.ResolveValueFilePathOrUrl - the very function
+// reposerver/repository uses while rendering - and derives the repo-relative path
+// from its answer.
+//
+// The resolver takes real paths, but app SELECTION runs before any worktree
+// exists (App.Run filters apps, then sets up worktrees). Passing a nonexistent
+// root is what bridges that: the resolver's only filesystem call is os.Readlink,
+// and a missing path returns a *os.PathError which it treats as "not a symlink",
+// so resolution against resolveSyntheticRoot is a pure function of the strings.
+// That is an incidental property of upstream, not a contract - if an argo-cd bump
+// adds an existence check here, every entry would fail to resolve and this
+// matcher would silently stop matching, so TestResolveHelmFilePathParity pins it
+// by comparing these answers against a REAL tree.
+//
+// One consequence of the synthetic root: symlinked value files are not followed
+// (there is nothing to readlink). For matching a changed-file list that is the
+// right level anyway - git reports the path as it is in the tree, not its target.
+func ResolveHelmFilePath(
+	sourcePath, entry string,
+	allowedURLSchemes []string,
+) (relPath string, remote bool, err error) {
+	resolved, remote, err := pathutil.ResolveValueFilePathOrUrl(
+		filepath.Join(resolveSyntheticRoot, sourcePath),
+		resolveSyntheticRoot,
+		entry,
+		allowedURLSchemes,
+	)
+	if err != nil || remote {
+		return "", remote, err
+	}
+
+	rel, err := filepath.Rel(resolveSyntheticRoot, string(resolved))
+	if err != nil {
+		return "", false, err
+	}
+
+	return filepath.ToSlash(rel), false, nil
+}
+
+// ResolveRefFilePath resolves a `$<ref>/path` helm entry - a value file or
+// fileParameter living in another SOURCE of the same app - to the ref source it
+// names and a path relative to THAT repository's root.
+//
+// The root-relative part is the whole point, and it is what argocdf got wrong twice:
+// ArgoCD's getResolvedRefValueFile splits the entry on "/", BLANKS the first
+// segment, and hands the remainder to pathutil.ResolveValueFilePathOrUrl with the
+// ref repository's checkout as BOTH appPath and repoRoot
+// (reposerver/repository/repository.go:1416-1425). RefTarget carries no path at
+// all, so the ref source's own Path never participates. Joining it - the native
+// engine's old behavior - makes a caller look for a file that does not exist, which
+// cost a silent stale cache (fixed in rendercache-v3) and a silently unreported app
+// (fixed in selection).
+//
+// Because appPath and repoRoot are the same directory upstream, resolving the
+// remainder against an EMPTY source path is exactly equivalent - so the path half
+// delegates to ResolveHelmFilePath and therefore to ArgoCD's own resolver, which
+// brings the traversal refusal, the resolve-to-root refusal and the URL-scheme
+// handling with it instead of reimplementing them per caller.
+//
+// The caller still decides whether the ref source is usable to it: selection
+// compares the ref source's repo URL with the repo being diffed, the render cache
+// asks its SameRepo closure, and only that check differs between them. ok=false
+// means the entry is not a resolvable $ref reference at all: not $-prefixed, no
+// path segment after the name (`$values`, which upstream resolves to the repo root
+// and refuses), an unknown ref name, a traversal out of the ref repository, or a
+// remote URL.
+func ResolveRefFilePath(
+	entry string,
+	refSources map[string]ApplicationSource,
+	allowedURLSchemes []string,
+) (refSource ApplicationSource, relPath string, ok bool) {
+	if !strings.HasPrefix(entry, "$") {
+		return ApplicationSource{}, "", false
+	}
+
+	// "$values/env/prod.yaml" -> ref name "values", remainder "env/prod.yaml".
+	refName, remainder, found := strings.Cut(strings.TrimPrefix(entry, "$"), "/")
+	if !found || refName == "" {
+		return ApplicationSource{}, "", false
+	}
+
+	source, found := refSources[refName]
+	if !found {
+		return ApplicationSource{}, "", false
+	}
+
+	rel, remote, err := ResolveHelmFilePath("", remainder, allowedURLSchemes)
+	if err != nil || remote {
+		return ApplicationSource{}, "", false
+	}
+
+	return source, rel, true
 }
 
 // ApplicationService provides operations on ArgoCD Applications.

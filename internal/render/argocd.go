@@ -45,9 +45,11 @@ import (
 // non-zero: a zero quantity makes GenerateManifests reject every file.
 var maxCombinedDirectoryManifestsSize = resource.MustParse("10M")
 
-// defaultValuesFileSchemes mirrors ArgoCD's default helm.valuesFileSchemes
+// DefaultValuesFileSchemes mirrors ArgoCD's default helm.valuesFileSchemes
 // setting (util/settings): value files may be fetched over these URL schemes.
-var defaultValuesFileSchemes = []string{"https", "http"}
+// Exported because app SELECTION must classify a value file as remote exactly as
+// the render does - a second copy of the list would be a drift of its own.
+var DefaultValuesFileSchemes = []string{"https", "http"}
 
 // KustomizationNames contains the known kustomization file names.
 var KustomizationNames = []string{"kustomization.yaml", "kustomization.yml", "Kustomization"}
@@ -384,7 +386,7 @@ func (r *ArgoCDRenderer) buildManifestRequest(
 		KubeVersion:        r.opts.KubeVersion, // parseKubeVersion handles vendor suffixes (-gke.*)
 		ApiVersions:        r.opts.APIVersions,
 		KustomizeOptions:   r.kustomizeOptions(),
-		HelmOptions:        &argoappv1.HelmOptions{ValuesFileSchemes: defaultValuesFileSchemes},
+		HelmOptions:        &argoappv1.HelmOptions{ValuesFileSchemes: DefaultValuesFileSchemes},
 		RefSources:         refSources,
 		HasMultipleSources: len(app.Spec.GetSources()) > 1,
 		// ProjectName feeds the ARGOCD_APP_PROJECT_NAME build-env variable.
