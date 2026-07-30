@@ -10,6 +10,9 @@
 #                          "Running"). Blocks until every Application exists and
 #                          is Synced+Healthy, so the suite never sees a half-built
 #                          app set; E2E_SYNC_TIMEOUT bounds the wait (900s).
+#                          REFUSES a cluster that is already alive: rebuild it
+#                          deliberately (mise run e2e:clean) rather than
+#                          reinstalling over a running controller.
 #   bootstrap.sh --static  no controller: the pinned upstream Application CRD,
 #                          control-plane stubs, and every Application a synced
 #                          controller would leave behind, applied once by
@@ -48,6 +51,35 @@ STATIC=false
 # Generous: the repo-server has to come up, clone the remote, render every child,
 # and the depth-2 apps only appear after their parent has synced.
 SYNC_TIMEOUT="${E2E_SYNC_TIMEOUT:-900}"
+
+# The baseline has TWO sources of truth for the app set and they must agree: the
+# controller builds it from the REMOTE repo at targetRevision HEAD, while
+# expected_apps derives it from this working tree. When master is not published
+# yet, the wait below cannot succeed - and it burns the whole SYNC_TIMEOUT before
+# reporting the app the controller "never created", which describes the symptom
+# and hides the cause. Check it before anything is built.
+#
+# Advisory when the remote cannot be reached: an offline run should not be blocked
+# by a check it cannot perform, and the convergence wait is still the backstop.
+if [ "$STATIC" = false ]; then
+  local_head="$(git rev-parse HEAD)"
+  remote_head="$(git ls-remote origin master 2>/dev/null | awk '{print $1}' | head -1)"
+  dirty="$(git status --porcelain)"
+
+  if [ -z "$remote_head" ]; then
+    echo "WARNING: could not read origin/master (offline?); skipping the published-master check" >&2
+  elif [ "$local_head" != "$remote_head" ] || [ -n "$dirty" ]; then
+    echo "ERROR: this e2e working tree is not what the remote serves, so the controller cannot" >&2
+    echo "       build the app set the suite expects" >&2
+    echo "         working tree:  ${local_head:0:12}$([ -n "$dirty" ] && echo ' + uncommitted changes')" >&2
+    echo "         origin/master: ${remote_head:0:12}" >&2
+    echo "       the baseline controller syncs the REMOTE repo at targetRevision HEAD, so an" >&2
+    echo "       unpublished fixture or case never appears and bootstrap waits ${SYNC_TIMEOUT}s for it" >&2
+    echo "       publish first:                  mise run e2e:push" >&2
+    echo "       or author without a controller: mise run e2e:bootstrap-static" >&2
+    exit 1
+  fi
+fi
 
 # expected_apps lists the Applications the cluster must end up holding, derived
 # from the SAME renders the static path applies - so both modes are held to one
@@ -106,10 +138,57 @@ wait_for_controller() {
   exit 1
 }
 
+# controller_present reports whether the cluster holds a REAL ArgoCD control plane,
+# i.e. was built by the baseline. It is what tells the two cluster modes apart
+# after the fact: the Application sets are identical by construction, so the
+# controller is the only difference that matters.
+controller_present() {
+  kubectl --context "$CTX" -n argocd get statefulset argocd-application-controller >/dev/null 2>&1
+}
+
 if ! kind get clusters 2>/dev/null | grep -qx argocdf; then
   # The config carries the host port mapping for the private registry.
   kind create cluster -n argocdf --image "$NODE_IMAGE" --config "$SCRIPT_DIR/kind-config.yaml"
 else
+  # NEITHER mode reuses a cluster built by the other, and both refusals are about
+  # the controller.
+  #
+  # Baseline over anything alive: re-installing ArgoCD reapplies the control plane
+  # while a controller reconciles, and what goes wrong (a half-applied upgrade, a
+  # repo-server still serving old manifests) surfaces later as case failures that
+  # blame the fixtures.
+  #
+  # --static over a BASELINE cluster: root-app is syncPolicy.automated, so the
+  # controller OWNS the child Applications and renders them from the REMOTE repo at
+  # targetRevision HEAD. Applying the local app set on top is drift. It survives at
+  # first only because `automated: {}` sets neither selfHeal nor prune - and it is
+  # reverted the moment the remote revision changes, which is exactly what
+  # e2e:push does. So the expectations would be regenerated against one app set and
+  # verified against another, with nothing announcing the switch. --static is
+  # idempotent on a --static cluster, where nothing reconciles behind it; that is
+  # the property the authoring loop relies on, and it does not extend to a cluster
+  # with a live controller.
+  if [ "$STATIC" = false ]; then
+    echo "ERROR: kind cluster 'argocdf' is already running" >&2
+    if controller_present; then
+      echo "       it already runs the baseline control plane - rebuild it deliberately:" >&2
+      echo "         mise run e2e:clean && mise run e2e:bootstrap" >&2
+    else
+      echo "       it is a --static cluster; re-apply the app set in place with" >&2
+      echo "         mise run e2e:bootstrap-static" >&2
+      echo "       or rebuild the baseline: mise run e2e:clean && mise run e2e:bootstrap" >&2
+    fi
+    exit 1
+  fi
+  if controller_present; then
+    echo "ERROR: kind cluster 'argocdf' runs the REAL ArgoCD controller (baseline mode)" >&2
+    echo "       --static would apply the app set under a controller that owns root-app and" >&2
+    echo "       syncs it from the REMOTE repo, so the children revert as soon as the remote" >&2
+    echo "       revision changes (e2e:push) - silently, mid-run" >&2
+    echo "       for the fast authoring loop, rebuild without the controller:" >&2
+    echo "         mise run e2e:clean && mise run e2e:bootstrap-static" >&2
+    exit 1
+  fi
   # An existing cluster on a different node image would silently render
   # against the wrong API surface (the pin is part of the expected-output
   # contract) - fail loudly instead of reusing it. Best-effort: skipped when

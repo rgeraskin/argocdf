@@ -100,7 +100,7 @@ description = "Run all checks (vet, lint, test)"
 depends = ["vet", "lint", "test"]
 
 [tasks."e2e:bootstrap"]
-description = "Bootstrap the e2e cluster with the REAL ArgoCD controller (the baseline: production-shaped). Requires e2e master pushed, because the controller syncs the remote at targetRevision HEAD. Waits until every Application is Synced+Healthy (E2E_SYNC_TIMEOUT bounds it)"
+description = "Bootstrap the e2e cluster with the REAL ArgoCD controller (the baseline: production-shaped). Requires e2e master pushed, because the controller syncs the remote at targetRevision HEAD. Waits until every Application is Synced+Healthy (E2E_SYNC_TIMEOUT bounds it). REFUSES to run when the cluster is already alive - reuse it with e2e:bootstrap-static, or e2e:clean first"
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
@@ -112,7 +112,7 @@ scripts/e2e/bootstrap.sh
 """
 
 [tasks."e2e:bootstrap-static"]
-description = "e2e cluster WITHOUT a controller: same Application set, applied once by rendering the charts. Needs no push and no sync wait - the fast loop for fixtures and regeneration (output is identical to the baseline)"
+description = "e2e cluster WITHOUT a controller: same Application set, applied once by rendering the charts. Needs no push and no sync wait - the fast loop for fixtures and regeneration (output is identical to the baseline). REFUSES a controller-backed cluster: it would not uninstall the controller, which then reverts the applied app set on the next remote revision"
 run = """
 #!/usr/bin/env bash
 set -euo pipefail

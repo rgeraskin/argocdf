@@ -11,11 +11,13 @@ The e2e suite lives in the `e2e/` submodule: `case/<name>` git branches are the 
 
 ```bash
 mise run build                  # fresh ./argocdf binary
-mise run e2e:bootstrap-static   # kind cluster, no controller (idempotent; picks up mise [env] pins)
+mise run e2e:bootstrap-static   # kind cluster, no controller (idempotent on a static cluster; picks up mise [env] pins)
 git -C e2e checkout master && git -C e2e status --short   # clean, on master
 ```
 
 Use the **static** cluster for authoring: `mise run e2e:bootstrap` is the baseline and installs a real ArgoCD whose controller syncs the REMOTE repo at `targetRevision: HEAD`, so it would not see a fixture until it is pushed — and you cannot push before the review gate passes. The static cluster applies the same Application set directly and produces byte-identical output, so pins made on it are valid for both. Verify on the baseline after publishing.
+
+The modes are not interchangeable on an EXISTING cluster, and both bootstraps refuse rather than let you find out later: `--static` over a controller-backed cluster would apply the app set under a controller that owns root-app (`syncPolicy.automated`) and renders the children from the REMOTE repo, so the local set reverts as soon as the remote revision changes - i.e. when you publish - and expectations regenerated against one app set would be verified against another. `mise run e2e:clean` first when switching.
 
 ## 1. Choose the case type
 
