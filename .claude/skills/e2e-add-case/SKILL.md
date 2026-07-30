@@ -81,7 +81,7 @@ Exit code lives in `expected/<name>/reports/meta.yaml`: 0 = no changes, 1 = fata
 
 ## 6. Determinism check
 
-The runner is `--no-cache` (every run renders fresh), so run the case twice:
+Each `run.sh` invocation already runs the case THREE times - one fresh `--no-cache` render compared against the pins, then a cache-population pass and a MEASURED cached pass compared against the same pins (which must also report hits, and may not miss more renders than it has render errors). So a single invocation catches within-run nondeterminism; run it a second time for cross-invocation flakes (time-dependent values, network-dependent content):
 
 ```bash
 ARGOCDF_BIN=./argocdf scripts/e2e/run.sh case/<name>

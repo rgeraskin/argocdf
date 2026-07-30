@@ -122,7 +122,7 @@ scripts/e2e/bootstrap.sh --static
 """
 
 [tasks."e2e:run"]
-description = "Run the e2e suite: every case branch diffed against expected outputs (the e2e:review hollow-pin gate runs automatically after a full run). Against the controller-backed baseline, push e2e master first (e2e:push) and let it sync"
+description = "Run the e2e suite: every case branch diffed against expected outputs, twice - once with fresh renders and once through the render/chart caches, which must produce the same bytes (the e2e:review hollow-pin gate runs after a full run). Against the controller-backed baseline, push e2e master first (e2e:push) and let it sync"
 depends = ["build"]
 run = "scripts/e2e/run.sh"
 

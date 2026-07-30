@@ -1089,6 +1089,9 @@ func (a *App) processApplications(ctx context.Context, apps []cluster.Applicatio
 	}
 
 	if a.cache != nil {
+		// The e2e suite's cached pass GREPS this line ("Render cache ... hits=N") to
+		// prove the run was actually served from cache; rewording it fails all cached
+		// passes at once, with a message blaming the cache instead of the rename.
 		a.logger.Info("Render cache", "hits", a.cacheHits.Load(), "misses", a.cacheMisses.Load())
 	}
 

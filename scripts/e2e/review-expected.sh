@@ -33,8 +33,17 @@ directive per line, applied to expected/<case>/reports/unified.diff:
   # comment          ignored, as are blank lines
   must:<ERE>         pattern must match the case's reports/unified.diff
   must-not:<ERE>     pattern must NOT match it
+  must-log:<ERE>     pattern must match the case's fresh-run LOG - checked by
+                     run.sh at run time (this gate validates the pinned tree
+                     offline, and a log is not a pin), for facts a report
+                     cannot carry: "this linter was actually invoked"
   expect:affected=N changed=M [resources=+a,-r,~m] [errors=E]
                      the report's summary block must say EXACTLY this
+
+A case may also have expected/<case>/same-report-as naming another case: every
+report file of the two must then be byte-identical after each case's own name
+is normalized out. That is what makes "these two cases differ only in the flag
+that selects the implementation" a checked claim instead of a review-time one.
 
 must:/must-not: assert what is present or absent; expect: is what makes a
 report EXHAUSTIVE. Without it an extra application section or an extra
@@ -175,6 +184,10 @@ for dir in expected/*/; do
           fail "$name" "must-not: pattern present in unified.diff: $pat"
         fi
         ;;
+      must-log:*)
+        # Runtime assertion against the fresh run's log; enforced by run.sh,
+        # not here - the gate validates the pinned tree offline and has no log.
+        ;;
       *)
         fail "$name" "$checks:$lineno: unrecognized directive (want must:<ERE>, must-not:<ERE>, expect:<summary> or # comment): $line"
         ;;
@@ -192,6 +205,39 @@ done
 # to live in its own tree where it could outlive its case, but it now sits INSIDE
 # expected/<case>/, so "the case is gone" and "the checks file is gone" are the
 # same event. run.sh still fails a case directory with no branch behind it.
+
+# ---- Cross-case equivalence: expected/<case>/same-report-as ---------------
+# The built-in lint adapters are pinned as EQUIVALENT to the shell adapters by
+# carrying identical fixtures, so their reports must differ only where the case
+# NAME appears (titles, headers, footers). Checked mechanically: normalize each
+# case's own name out of both trees and require byte equality, so a divergence
+# - one adapter losing a finding, a format drifting - fails here instead of
+# surviving as two independently-plausible pins.
+for dir in expected/*/; do
+  [ -d "$dir" ] || continue
+  name=$(basename "$dir")
+  peer_file="${dir}same-report-as"
+  [ -f "$peer_file" ] || continue
+  while IFS= read -r peer || [ -n "$peer" ]; do
+    case "$peer" in ''|\#*) continue ;; esac
+    if [ ! -d "expected/$peer/reports" ]; then
+      fail "$name" "same-report-as names '$peer', which has no expected/$peer/reports"
+      continue
+    fi
+    for f in "${REPORTS[@]}" meta.yaml; do
+      a="${dir}reports/$f"
+      b="expected/$peer/reports/$f"
+      [ -f "$a" ] || [ -f "$b" ] || continue
+      if [ ! -f "$a" ] || [ ! -f "$b" ]; then
+        fail "$name" "same-report-as $peer: $f exists on one side only"
+        continue
+      fi
+      if ! diff -q <(sed "s/$name/CASE/g" "$a") <(sed "s/$peer/CASE/g" "$b") >/dev/null 2>&1; then
+        fail "$name" "same-report-as $peer: $f differs beyond the case name (the equivalence claim broke)"
+      fi
+    done
+  done < "$peer_file"
+done
 
 # ---- Rule B: global rules over every case --------------------------------
 reviewed=0

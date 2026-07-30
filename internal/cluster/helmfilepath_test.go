@@ -289,6 +289,15 @@ func TestResolveRefFilePath(t *testing.T) {
 		{name: "not a $ref entry", entry: "values.yaml"},
 		{name: "escaping relative entry is not a $ref entry", entry: "../shared/vals.yaml"},
 		{name: "no path segment after the ref name", entry: "$values"},
+		{
+			// "$values/" cuts to an EMPTY remainder, which upstream's resolver
+			// refuses outright ("path resolved to repository root, which is not
+			// allowed") - so the refusal is ArgoCD's own, not a lucky
+			// never-matching path. Pinned because a review guessed it resolved
+			// to "." and matched nothing; the actual mechanism is stronger.
+			name:  "trailing slash with empty remainder is refused (resolves to root)",
+			entry: "$values/",
+		},
 		{name: "empty ref name", entry: "$/env/prod.yaml"},
 		{name: "unknown ref name", entry: "$nope/env/prod.yaml"},
 		{name: "traversal out of the ref repository", entry: "$values/../../etc/passwd"},

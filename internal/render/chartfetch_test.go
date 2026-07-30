@@ -303,6 +303,74 @@ func TestFetchRemoteChart_CachePublishAndHit(t *testing.T) {
 	}
 }
 
+// TestFetchRemoteChart_CredentialScopedDirsDoNotShare is the unit-level gate for the
+// per-credential-source chart-cache scope (Factory.chartCacheDir appends
+// charts/<mode>): a chart downloaded under one --repo-creds source must NOT satisfy a
+// run whose whole purpose is checking that another source can fetch it. Render with
+// `local`, re-run with `cluster` to see whether ArgoCD's own credentials work, and a
+// shared directory would answer from the first download without contacting the
+// registry - success reported for a registry ArgoCD cannot reach.
+//
+// The path difference alone is pinned in app.TestChartCacheDirScopedByCredentialSource;
+// what this adds is the CONSEQUENCE, which is the part that actually protects the
+// user: the fetch really is re-attempted. It lives here rather than only in e2e
+// because the e2e tripwire (case/private-chart-unauth) needs a sibling case to have
+// filled charts/cluster first, so it is order-dependent and rides a live registry;
+// this is deterministic, needs no network, and cannot be disarmed by a rename.
+func TestFetchRemoteChart_CredentialScopedDirsDoNotShare(t *testing.T) {
+	base := t.TempDir()
+	fake := &fakeChartClient{extractedDir: chartFixture(t, "mychart")}
+	stubNewChartClient(t, fake, nil, nil)
+
+	source := chartSource("1.2.3")
+	// The two directories Factory.chartCacheDir produces for two credential sources.
+	clusterOpts := RenderOptions{ChartCacheDir: filepath.Join(base, "charts", "cluster")}
+	localOpts := RenderOptions{ChartCacheDir: filepath.Join(base, "charts", "local")}
+
+	// Fetched and published under the CLUSTER scope, then the SAME chart and version
+	// requested under the LOCAL one. Neither fetch is allowed to fail, but nothing
+	// else is asserted until both have run: the load-bearing check is the CALL COUNT,
+	// and it should be what speaks when this breaks.
+	dir, cached, cleanup, err := fetchRemoteChart(context.Background(), &clusterOpts, chartTestApp(), source)
+	if err != nil {
+		t.Fatalf("cluster-scope fetch: %v", err)
+	}
+	cleanup()
+	dir2, cached2, cleanup2, err := fetchRemoteChart(context.Background(), &localOpts, chartTestApp(), source)
+	if err != nil {
+		t.Fatalf("local-scope fetch: %v", err)
+	}
+	cleanup2()
+
+	// THE property: the second source had to fetch for itself. Sharing one directory
+	// across scopes (the pre-scope layout, or a later "why keep N identical copies"
+	// dedupe) makes the second call a HIT and leaves this at 1 - and a --repo-creds
+	// switch would then verify nothing.
+	if len(fake.calls) != 2 {
+		t.Errorf("ExtractChart called %d times, want 2: the chart downloaded under one credential source satisfied the other", len(fake.calls))
+	}
+	if dir2 == dir {
+		t.Errorf("both credential sources served the same chart dir %q", dir2)
+	}
+	// Each fetch must be served from the directory it was GIVEN (the caller owns the
+	// layout - Factory.chartCacheDir builds charts/<mode>, pinned in its own test).
+	for _, tc := range []struct {
+		mode, dir, base string
+		cached          bool
+	}{
+		{"cluster", dir, clusterOpts.ChartCacheDir, cached},
+		{"local", dir2, localOpts.ChartCacheDir, cached2},
+	} {
+		if !tc.cached || !strings.HasPrefix(tc.dir, tc.base+string(filepath.Separator)) {
+			t.Errorf("%s-scope fetch = (%q, cached=%v), want a chart dir under %q", tc.mode, tc.dir, tc.cached, tc.base)
+		}
+		// Each scope keeps its own copy, so a later run in either mode is still served.
+		if _, err := os.Stat(filepath.Join(tc.dir, "Chart.yaml")); err != nil {
+			t.Errorf("%s-scope chart content missing under %q: %v", tc.mode, tc.dir, err)
+		}
+	}
+}
+
 func TestFetchRemoteChart_UnpinnedSkipsCache(t *testing.T) {
 	cacheBase := t.TempDir()
 	fake := &fakeChartClient{extractedDir: chartFixture(t, "mychart")}

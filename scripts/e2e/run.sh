@@ -25,6 +25,32 @@
 # chart values, ordering bugs) surfaces immediately instead of hiding behind
 # render-cache hits.
 #
+# Every case then runs a SECOND time with the caches ENABLED, against a suite-wide
+# cache directory, and that run is compared against the same pins. The cache layer
+# would otherwise be untestable end to end: a key too coarse to tell two sets of
+# inputs apart can serve the wrong manifests, and no --no-cache run would ever
+# notice. Both passes must match the same expectations, so every pin doubles as a
+# cache-soundness oracle without authoring a single extra case.
+#
+# The cached pass runs TWICE: the first invocation populates (each case's target
+# side is unique to it, so nothing earlier can have cached it), the second is
+# measured and compared. It must report HITS - a bypass and a correct hit produce
+# identical reports, so without that check a silently uncached suite would pass
+# while testing nothing - and its MISSES may not exceed its render ERRORS: a failed
+# render is never cached and legitimately misses again, but any miss beyond that is
+# a warm key that failed to reproduce, which byte comparison cannot see (a
+# from-scratch render produces the right bytes). The cache is shared across cases
+# (master-side renders are identical between them, so they legitimately reuse each
+# other).
+#
+# --regenerate records from the fresh pass only: a pin taken from a cached render
+# would let a stale render become the expectation.
+#
+# Because the cache is shared, a case can depend on ANOTHER case having populated it:
+# expected/<case>/requires-case declares that dependency (resolved into the run order,
+# and pulled into a single-case run), while expected/<case>/cache-precondition asserts
+# the state actually arrived. Only private-chart-unauth needs either today.
+#
 # Expectations are MODE-AGNOSTIC: verified identical against both the
 # controller-backed cluster (e2e:bootstrap) and the controller-less one
 # (e2e:bootstrap-static). The Application set matches by construction and argocdf
@@ -83,7 +109,9 @@ DEFAULT_ARGS=(--quiet --repo-dir . --repo-url "$REPO_URL"
 #   - REPEATABLE flags ACCUMULATE instead of replacing: --lint, -f/--file and
 #     --application-namespaces add to the defaults. A default --lint command
 #     cannot be removed per case, only added to.
-#   - booleans are switched off with the =false form: --no-cache=false
+#   - booleans are switched off with the =false form: --kustomize-enable-helm=false
+#     (--no-cache is not a boolean any more: it takes a layer, and the cached
+#     pass below re-enables both with --no-cache=false)
 # Each case still has exactly ONE expectation dir, so changing a case's flags
 # means regenerating it. Keys are validated against the case/* branches below:
 # renaming a branch must not silently drop its flags.
@@ -120,7 +148,25 @@ CASE_ARGS=(
   # broken policy in policies/kyverno would stop every other lint case from
   # producing the findings it pins.
   "lint-broken-policy:--lint-kyverno policies/kyverno-broken"
-  # "helm-values:--repo-creds none"
+  # The ONLY case that renders without credentials, carrying the identical fixture to
+  # private-chart-bump so the two differ in exactly one flag. It is the end-to-end
+  # tripwire for the per-mode chart-cache scope: an anonymous run that SUCCEEDS means
+  # a chart fetched under CLUSTER credentials satisfied it.
+  #
+  # It therefore depends on private-chart-bump's cached pass having run FIRST - it is
+  # the only case that fetches this chart, so nothing else fills charts/cluster. Cases
+  # run in sort order and "bump" < "unauth", which is why the name ends in -unauth
+  # rather than -anon (which sorted first and made the gate hollow: it passed with the
+  # scope removed). The ordering is not trusted, it is checked -
+  # expected/private-chart-unauth/cache-precondition fails the case if the entry is
+  # missing.
+  #
+  # What it proves is that the pull was ATTEMPTED, not that auth was enforced -
+  # anonymous pulls never reach auth here, because the cluster's repository Secret
+  # carries insecure: "true" for the registry's self-signed cert and without
+  # credentials the pull fails TLS verification first. That message is
+  # platform-specific, so normalize.sh collapses its tail (see the rule there).
+  "private-chart-unauth:--repo-creds none"
 )
 
 # Echo the override flags for one case, empty when it has none.
@@ -151,6 +197,63 @@ if [ ${#cases[@]} -eq 0 ]; then
     | sed 's#^origin/##' | sed 's#^case/##' | sort -u))
 fi
 [ ${#cases[@]} -gt 0 ] || { echo "no cases found (no case/* branches)"; exit 1; }
+
+# ---- requires-case: dependencies, resolved into the run ORDER -----------------
+# A case whose cached pass needs another case to have run first declares it in
+# expected/<case>/requires-case (one case name per line). This is the SATISFIER;
+# expected/<case>/cache-precondition is the ASSERTION, and the split is deliberate:
+# the declaration says how the state gets there, the glob verifies it actually did,
+# so a wrong or missing declaration still fails loudly instead of silently.
+#
+# Applied to every run, not just single-case ones. A full run happens to be correct
+# today because sort order puts private-chart-bump before private-chart-unauth - that
+# is incidental, and one rename away from being wrong. Resolving here makes the order
+# a declared property. For a single-case run it also pulls the dependency in, so
+# `run.sh private-chart-unauth` works instead of failing by construction.
+#
+# ONE level, no transitive chains: a requirement that itself declares one is not
+# followed. Deliberate - the precondition glob is the backstop, so an unmet
+# transitive need fails as an unmet precondition rather than hiding.
+in_list() { local needle="$1"; shift; local e; for e in "$@"; do [ "$e" = "$needle" ] && return 0; done; return 1; }
+resolved=()
+for name in "${cases[@]}"; do
+  req_file="expected/$name/requires-case"
+  if [ -f "$req_file" ]; then
+    while IFS= read -r req || [ -n "$req" ]; do
+      case "$req" in ''|\#*) continue ;; esac
+      req=${req#case/}
+      in_list "$req" ${resolved[@]+"${resolved[@]}"} && continue
+      git rev-parse --verify -q "case/$req" >/dev/null || git rev-parse --verify -q "origin/case/$req" >/dev/null \
+        || { echo "requires-case: $req_file names '$req', which has no case/$req branch"; exit 1; }
+      [ "$req" = "$name" ] && { echo "requires-case: $req_file names its own case"; exit 1; }
+      in_list "$req" "${cases[@]}" || echo "note: running $req first - required by $name ($req_file)"
+      resolved+=("$req")
+    done < "$req_file"
+  fi
+  in_list "$name" ${resolved[@]+"${resolved[@]}"} || resolved+=("$name")
+done
+cases=(${resolved[@]+"${resolved[@]}"})
+
+# ONE run at a time: concurrent invocations share out/ and the suite cache, and the
+# race is silent - one run's per-case rm -rf lands under the other's compare, and the
+# survivor reports a failure that belongs to neither run. The lock is an atomic
+# mkdir; a crashed run can leave it behind, so the message names it rather than
+# guessing at liveness.
+LOCK_DIR="$PWD/out/.run.lock"
+mkdir -p out
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  echo "another run.sh appears to be running (lock: $LOCK_DIR)"
+  echo "concurrent runs share out/ and the suite cache and corrupt each other's results;"
+  echo "if no other run is alive, remove the stale lock: rmdir $LOCK_DIR"
+  exit 1
+fi
+trap 'rmdir "$LOCK_DIR" 2>/dev/null' EXIT
+trap 'exit 130' INT TERM
+
+# An isolated cache directory, wiped per suite run: the user's real cache would make
+# hit counts depend on whatever they rendered earlier, and the suite must start cold.
+CACHE_DIR="$PWD/out/.rendercache"
+rm -rf "$CACHE_DIR"
 
 command -v "$ARGOCDF_BIN" >/dev/null 2>&1 || [ -x "$ARGOCDF_BIN" ] \
   || { echo "argocdf binary not found: $ARGOCDF_BIN (build it: mise run build)"; exit 1; }
@@ -251,6 +354,117 @@ for name in "${cases[@]}"; do
       diff -u "$exp" "$got" | head -40 > "$out/$f.expected-diff" 2>/dev/null
     fi
   done
+
+  # must-log: runtime assertions from checks.grep against the FRESH run's log, for
+  # facts a report cannot carry - "this linter was actually invoked" being the
+  # motivating one (an adapter that never ran and one that ran finding nothing leave
+  # IDENTICAL reports by contract). review-expected.sh ignores these lines: they
+  # assert against a live run, not against the pinned tree.
+  if [ -f "expected/$name/checks.grep" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        must-log:*)
+          pat=${line#must-log:}
+          grep -Eq -- "$pat" "$out/run.log" \
+            || result="FAIL (must-log pattern not found in run.log: $pat)"
+          ;;
+      esac
+    done < "expected/$name/checks.grep"
+  fi
+  # ---- cached pass -----------------------------------------------------------
+  # Same case, caches ENABLED, compared against the same expectations. Runs only
+  # when the fresh pass matched: after a real failure its output is the diagnosis,
+  # and a second failure line would just be noise.
+  if [ "$result" = PASS ]; then
+    cached_args=("${DEFAULT_ARGS[@]}" --base master --target "$ref")
+    for f in "${FORMATS[@]}"; do
+      cached_args+=(-f "$f:$out/cached/report.$(ext "$f")_$f")
+    done
+    # The cache flags go LAST, so they beat anything in CASE_ARGS: a case that set
+    # its own --no-cache would otherwise silently defeat this pass. If a case ever
+    # NEEDS its own cache flags, it has to be exempted from the cached pass instead.
+    cached_args+=(${case_extra[@]+"${case_extra[@]}"}
+                  --no-cache=false --cache-dir "$CACHE_DIR")
+    mkdir -p "$out/cached"
+    printf '%s\n' "${cached_args[@]}" > "$out/cached/args"
+
+    # A case may DECLARE what the suite cache must already hold for its cached pass to
+    # mean anything (see expected/*/cache-precondition). Checked rather than assumed,
+    # so an ordering dependency cannot be broken silently. A line is a glob, optionally
+    # prefixed "min=N " to require at least N matches - the difference between "some
+    # chart is cached" and "BOTH versions of THIS chart are cached", which is what
+    # keeps the precondition from being satisfied by an unrelated earlier case.
+    pre="expected/$name/cache-precondition"
+    if [ -f "$pre" ]; then
+      while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in ''|\#*) continue ;; esac
+        want=1 glob="$line"
+        case "$line" in
+          min=*) want=${line%% *}; want=${want#min=}; glob=${line#* } ;;
+        esac
+        got=$(compgen -G "$CACHE_DIR/$glob" 2>/dev/null | wc -l | tr -d ' ')
+        if [ "$got" -lt "$want" ]; then
+          result="FAIL (cache precondition unmet: $got match(es) for $glob, want >= $want - case order changed, the cache layout did, or this run did not include the case that fills it; see expected/$name/cache-precondition)"
+        fi
+      done < "$pre"
+    fi
+  fi
+
+  if [ "$result" = PASS ]; then
+    # Two invocations, by design rather than by retry. The FIRST populates: whatever
+    # this case renders that no earlier case shared - always its target side, since
+    # every case branch is unique - gets written to the cache. The SECOND is what is
+    # MEASURED and compared. Without the split, a case whose base side hit (warm from
+    # earlier cases) was accepted on invocation one, so its target-side entries were
+    # written but never re-read - the suite proved base-side cache soundness fifty
+    # times and target-side soundness almost never. A case that renders NOTHING
+    # would fail the hits check below - none exists today (even no-changes renders
+    # root-app), but a future selection-only case pinning affected=0 would need an
+    # exemption here.
+    for attempt in 1 2; do
+      "$ARGOCDF_BIN" "${cached_args[@]}" > "$out/cached/run.log.$attempt" 2>&1
+      cached_rc=$?
+    done
+    command cp -f "$out/cached/run.log.2" "$out/cached/run.log"
+
+    for f in "${FORMATS[@]}"; do
+      src="$out/cached/report.$(ext "$f")_$f"
+      dst="$out/cached/$f.$(ext "$f")"
+      [ -f "$src" ] && command mv -f "$src" "$dst" && "$SCRIPT_DIR/normalize.sh" "$dst"
+    done
+
+    # The measured invocation's cache stats, and the errors that legitimately
+    # explain a miss: a FAILED render is never cached (a failure must be
+    # re-attempted, which is what makes the private-chart-unauth tripwire work),
+    # so each errored app accounts for at most one miss. Every miss beyond that
+    # is a render that SHOULD have been served - a key that failed to reproduce
+    # for identical inputs - which byte comparison alone cannot see, because a
+    # from-scratch render produces the right bytes.
+    hits=$(sed -n -E 's/.*Render cache hits=([0-9]+).*/\1/p' "$out/cached/run.log" | tail -1)
+    misses=$(sed -n -E 's/.*Render cache hits=[0-9]+ misses=([0-9]+).*/\1/p' "$out/cached/run.log" | tail -1)
+    errors=$(grep -c 'Error processing application' "$out/cached/run.log")
+
+    if [ "$cached_rc" != "$rc" ]; then
+      # Checked BEFORE the hits requirement: a cached run that died prints no stats
+      # line at all, and reporting that as "the cache was not exercised" would send
+      # the reader after the wrong thing.
+      result="FAIL (cached exit $cached_rc != fresh exit $rc)"
+    elif [ -z "$hits" ] || [ "$hits" -eq 0 ]; then
+      result="FAIL (cached pass reported no cache hits - the cache was not exercised)"
+    elif [ "$misses" -gt "$errors" ]; then
+      result="FAIL (cached pass missed $misses render(s) with only $errors render error(s) - a warm cache key failed to reproduce)"
+    else
+      for f in "${FORMATS[@]}"; do
+        exp="expected/$name/reports/$f.$(ext "$f")"
+        got="$out/cached/$f.$(ext "$f")"
+        if [ -f "$exp" ] && ! diff -q "$exp" "$got" >/dev/null 2>&1; then
+          result="FAIL (cached $f differs - a cache hit served different bytes)"
+          diff -u "$exp" "$got" | head -40 > "$out/cached/$f.expected-diff" 2>/dev/null
+        fi
+      done
+    fi
+  fi
+
   [ "$result" = PASS ] || fails=$((fails+1))
   printf '%-28s %-8s %s\n' "$name" "$rc" "$result"
 done
