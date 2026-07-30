@@ -158,7 +158,7 @@ func TestArgoCDRenderer_LocalHelmChart_IncludesCRDs(t *testing.T) {
 		t.Errorf("rendered output missing ConfigMap/my-app-cm; got %v", docs)
 	}
 	// ArgoCD parity: helm template runs with --include-crds, so crds/ content
-	// must appear (the native engine currently omits it).
+	// must appear.
 	if !docs["CustomResourceDefinition/widgets.example.com"] {
 		t.Errorf("rendered output missing CRD from crds/ dir (ArgoCD --include-crds parity); got %v", docs)
 	}
@@ -370,41 +370,39 @@ func TestArgoCDRenderer_MultiSourceValuesRef(t *testing.T) {
 	}
 }
 
-// TestArgoCDRenderer_NativeParity renders the same simple chart with both
-// engines and requires the same resource set (CRDs excluded — the engines
-// intentionally differ there until --include-crds lands in native).
-func TestArgoCDRenderer_NativeParity(t *testing.T) {
-	requireHelm(t)
-
-	repoDir := t.TempDir()
-	writeArgoTestChart(t, repoDir, "chart", nil)
-	app := testApp("parity-app", "chart", nil)
-
-	native := NewFactory(RenderOptions{})
-	nativeResult, err := native.RenderApplication(context.Background(), app, repoDir, "abcdef1234567890")
-	if err != nil {
-		t.Fatalf("native RenderApplication() error = %v", err)
+// TestChartDepMutex pins the per-path mutex registry: the same path yields
+// the same mutex (so chart-directory writes serialize), different paths yield
+// different mutexes (so unrelated renders don't contend).
+func TestChartDepMutex(t *testing.T) {
+	a1 := chartDepMutex("/repo/charts/a")
+	a2 := chartDepMutex("/repo/charts/a")
+	b := chartDepMutex("/repo/charts/b")
+	if a1 != a2 {
+		t.Error("chartDepMutex returned different mutexes for the same path")
 	}
-
-	argocd := mustNewArgoCDRenderer(t, RenderOptions{})
-	argocdResult, err := argocd.RenderApplication(context.Background(), app, repoDir, "abcdef1234567890")
-	if err != nil {
-		t.Fatalf("argocd RenderApplication() error = %v", err)
+	if a1 == b {
+		t.Error("chartDepMutex returned the same mutex for different paths")
 	}
+}
 
-	nativeDocs := docsByKindName(t, nativeResult.Manifests)
-	argocdDocs := docsByKindName(t, argocdResult.Manifests)
-	delete(argocdDocs, "CustomResourceDefinition/widgets.example.com")
-
-	for k := range nativeDocs {
-		if !argocdDocs[k] {
-			t.Errorf("argocd engine missing resource %s rendered by native", k)
-		}
+func TestIsPureRef(t *testing.T) {
+	tests := []struct {
+		name   string
+		source cluster.ApplicationSource
+		want   bool
+	}{
+		{"ref only", cluster.ApplicationSource{Ref: "values"}, true},
+		{"ref with path renders", cluster.ApplicationSource{Ref: "values", Path: "chart"}, false},
+		{"ref with chart renders", cluster.ApplicationSource{Ref: "values", Chart: "app"}, false},
+		{"no ref", cluster.ApplicationSource{Path: "chart"}, false},
+		{"empty source", cluster.ApplicationSource{}, false},
 	}
-	for k := range argocdDocs {
-		if !nativeDocs[k] {
-			t.Errorf("argocd engine rendered extra resource %s (beyond CRDs)", k)
-		}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isPureRef(tt.source); got != tt.want {
+				t.Errorf("isPureRef() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 

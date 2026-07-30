@@ -139,14 +139,17 @@ func TestManifestGeneratePathsIgnoresForeignRepoSources(t *testing.T) {
 func TestManifestGeneratePathsReplacesRefValueFileMatching(t *testing.T) {
 	const localURL = "https://github.com/org/repo"
 
-	// chart source in the local repo, taking values from a ref source rooted at
-	// config/ - so the values file lives at config/env/prod.yaml.
+	// A chart in the local repo taking values from a PURE ref source (no Path, so
+	// it renders nothing and contributes no source path of its own). $ref paths
+	// resolve against the ref repository ROOT, so the values file is env/prod.yaml -
+	// outside the chart's own path, which is the whole point: only $ref resolution
+	// can attribute a change to it.
 	sources := []cluster.ApplicationSource{
 		{
 			RepoURL: localURL, Path: "apps/chart",
 			Helm: &cluster.ApplicationSourceHelm{ValueFiles: []string{"$values/env/prod.yaml"}},
 		},
-		{RepoURL: localURL, Ref: "values", Path: "config"},
+		{RepoURL: localURL, Ref: "values"},
 	}
 
 	for _, tt := range []struct {
@@ -156,7 +159,7 @@ func TestManifestGeneratePathsReplacesRefValueFileMatching(t *testing.T) {
 	}{
 		{"no annotation: the $ref matcher finds the values file", "", true},
 		{"declares the chart dir only: values change is MISSED", "apps/chart", false},
-		{"declares the values file too: found again", "apps/chart;/config/env/prod.yaml", true},
+		{"declares the values file too: found again", "apps/chart;/env/prod.yaml", true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			app := testutil.TestAppMultiSource("chart-with-values", "argocd", sources)
@@ -170,7 +173,7 @@ func TestManifestGeneratePathsReplacesRefValueFileMatching(t *testing.T) {
 			a := &App{cfg: &config.Config{RepoURL: localURL}, logger: logger}
 
 			got := a.filterAffectedApps([]cluster.Application{app},
-				testutil.TestChangedFiles(nil, []string{"config/env/prod.yaml"}, nil))
+				testutil.TestChangedFiles(nil, []string{"env/prod.yaml"}, nil))
 			if affected := len(got) == 1; affected != tt.want {
 				t.Errorf("affected = %v, want %v", affected, tt.want)
 			}

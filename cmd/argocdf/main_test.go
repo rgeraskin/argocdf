@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
+	"os"
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/log"
 	"github.com/spf13/cobra"
 )
 
@@ -54,4 +57,57 @@ func TestBindEnv_InvalidValueNamesTheEnvVar(t *testing.T) {
 	if !strings.Contains(err.Error(), "ARGOCDF_ALL_NAMESPACES") {
 		t.Errorf("error %q does not name the offending environment variable", err)
 	}
+}
+
+// TestWarnRemovedEnvVars covers the blind spot left by removing flags: cobra
+// rejects an unknown --flag, but nothing rejects ARGOCDF_RENDERER left behind in a
+// CI job, because bindEnv only visits flags that still exist.
+func TestWarnRemovedEnvVars(t *testing.T) {
+	t.Run("set variables are named", func(t *testing.T) {
+		t.Setenv("ARGOCDF_RENDERER", "native")
+		t.Setenv("ARGOCDF_HELM_ADD_REPOS", "stable=https://charts.example.test")
+
+		var buf bytes.Buffer
+		warnRemovedEnvVars(log.NewWithOptions(&buf, log.Options{Level: log.WarnLevel}))
+
+		out := buf.String()
+		for _, want := range []string{"ARGOCDF_RENDERER", "ARGOCDF_HELM_ADD_REPOS", "removed in 0.5.0"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("warning does not mention %q; got: %s", want, out)
+			}
+		}
+		if strings.Contains(out, "ARGOCDF_HELM_SKIP_REFRESH") {
+			t.Errorf("warned about a variable that is not set; got: %s", out)
+		}
+	})
+
+	t.Run("empty value counts as unset", func(t *testing.T) {
+		// bindEnv ignores empty values (viper's IsSet is false), so warning about
+		// them would be noise for an unset-but-declared variable.
+		t.Setenv("ARGOCDF_RENDERER", "")
+
+		var buf bytes.Buffer
+		warnRemovedEnvVars(log.NewWithOptions(&buf, log.Options{Level: log.WarnLevel}))
+
+		if buf.Len() != 0 {
+			t.Errorf("warned for an empty value: %s", buf.String())
+		}
+	})
+
+	t.Run("nothing set, nothing said", func(t *testing.T) {
+		for _, v := range removedEnvVars {
+			// Setenv registers the restore; Unsetenv then clears it for this test.
+			t.Setenv(v.name, "")
+			if err := os.Unsetenv(v.name); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		var buf bytes.Buffer
+		warnRemovedEnvVars(log.NewWithOptions(&buf, log.Options{Level: log.WarnLevel}))
+
+		if buf.Len() != 0 {
+			t.Errorf("unexpected output: %s", buf.String())
+		}
+	})
 }

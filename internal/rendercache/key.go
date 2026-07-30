@@ -21,7 +21,12 @@ import (
 // v2: keys now hash render inputs that live OUTSIDE a source path — helm
 // valueFiles/fileParameters (including $ref references) and, for
 // kustomize/directory sources, the whole commit tree (see ComputeKey).
-const SchemaVersion = "rendercache-v2"
+//
+// v3: the native render engine (and its --helm-skip-refresh/--helm-add-repos
+// flags) is gone — everything renders through ArgoCD's repo-server code, and
+// $ref value files resolve against the ref repository ROOT (ArgoCD semantics)
+// instead of joining the ref source's Path.
+const SchemaVersion = "rendercache-v3"
 
 // KeyOptions holds the render-relevant options that affect rendered output and
 // therefore must participate in the cache key.
@@ -29,18 +34,6 @@ type KeyOptions struct {
 	KustomizeEnableHelm     bool
 	KustomizeBuildOptions   string
 	KustomizeLoadRestrictor string
-	HelmSkipRefresh         bool
-	// HelmAddRepos participates in the key for the same reason HelmSkipRefresh
-	// does: the explicit `helm repo update` it triggers can change which
-	// dependency versions a version-range resolves to, so flag-on and flag-off
-	// renders must not share cache entries. The flag value alone cannot capture
-	// the mutable repo index content, so the range-without-lock case bypasses
-	// the cache entirely — see chartDepsHermetic.
-	HelmAddRepos bool
-	// Renderer identifies the render engine (native/argocd). The engines emit
-	// different output for the same spec (e.g. ArgoCD's --include-crds default),
-	// so their renders must not share cache entries.
-	Renderer string
 }
 
 // KeyInput bundles everything required to compute a cache key for a single
@@ -86,9 +79,10 @@ type KeyInput struct {
 // Soundness of out-of-source-path inputs:
 //   - Helm local-chart sources additionally hash every resolved valueFiles and
 //     fileParameters path (relative paths resolve against the chart dir; $ref
-//     paths resolve against the ref source's path). A value file that is absent
-//     at the commit contributes an "absent" sentinel rather than a bypass,
-//     because absence is itself part of the render identity.
+//     paths resolve against the ref repository root, ArgoCD's semantics). A
+//     value file that is absent at the commit contributes an "absent" sentinel
+//     rather than a bypass, because absence is itself part of the render
+//     identity.
 //   - Helm dependency resolution must be hermetic at the commit to be
 //     cacheable: a chart whose dependency uses a version RANGE with no
 //     committed Chart.lock resolves against the mutable repo index, so it
@@ -127,9 +121,6 @@ func ComputeKey(in KeyInput) (string, bool) {
 		strconv.FormatBool(in.Options.KustomizeEnableHelm),
 		in.Options.KustomizeBuildOptions,
 		in.Options.KustomizeLoadRestrictor,
-		strconv.FormatBool(in.Options.HelmSkipRefresh),
-		strconv.FormatBool(in.Options.HelmAddRepos),
-		in.Options.Renderer,
 	)
 
 	sources := in.Spec.GetSources()
@@ -170,11 +161,11 @@ func ComputeKey(in KeyInput) (string, bool) {
 			// Dependency hermeticity: a committed Chart.lock pins dependency
 			// resolution and is already part of the tree hash above. Without a
 			// lock, a dependency whose version is a RANGE resolves against the
-			// mutable repo index, so the same commit can legitimately render
-			// differently after an index refresh (e.g. --helm-add-repos runs
-			// `helm repo update`) — such renders must bypass the cache.
-			// Exactly-pinned versions resolve deterministically and stay
-			// cacheable.
+			// mutable repo index (the engine's dependency build refreshes it in
+			// an isolated helm home on every render), so the same commit can
+			// legitimately render differently over time — such renders must
+			// bypass the cache. Exactly-pinned versions resolve
+			// deterministically and stay cacheable.
 			if !chartDepsHermetic(src.Path, in.Commit, in.ResolveTree, in.ReadFile) {
 				return "", false
 			}
@@ -233,10 +224,12 @@ func isHelmLikeSource(src cluster.ApplicationSource, commit string, resolve func
 }
 
 // resolveKeyValueFilePath resolves a helm value-file / file-parameter reference
-// to a repo-relative path, mirroring internal/render/helm.go
-// resolveValueFilePath. It returns bypass=true when the reference cannot be
-// soundly resolved to local repo content: a $ref pointing at an external repo,
-// an unknown/malformed $ref, or a path that escapes the repository root.
+// to a repo-relative path, mirroring the render engine (ArgoCD's semantics):
+// "$ref/some/path" resolves against the ref repository ROOT (RefTarget has no
+// Path field), relative paths against the chart directory. It returns
+// bypass=true when the reference cannot be soundly resolved to local repo
+// content: a $ref pointing at an external repo, an unknown/malformed $ref, or
+// a path that escapes the repository root.
 func resolveKeyValueFilePath(
 	ref, chartPath string,
 	refSources map[string]cluster.ApplicationSource,
@@ -255,7 +248,7 @@ func resolveKeyValueFilePath(
 		if sameRepo == nil || !sameRepo(refSource.RepoURL) {
 			return "", true
 		}
-		p := path.Clean(path.Join(refSource.Path, rest))
+		p := path.Clean(rest)
 		if pathEscapesRepo(p) {
 			return "", true
 		}

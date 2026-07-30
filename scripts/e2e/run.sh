@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run the argocdf e2e suite: for every case branch, diff master -> the branch
-# with argocdf (argocd renderer) and compare all report formats byte-for-byte
+# with argocdf and compare all report formats byte-for-byte
 # against expected/<case>/. Flags come from DEFAULT_ARGS below, plus any per-case
 # overrides in CASE_ARGS.
 #
@@ -54,7 +54,7 @@ ext() { case "$1" in unified) echo diff ;; html-side-by-side) echo html ;; *) ec
 # per case and appended in the loop.
 DEFAULT_ARGS=(--quiet --repo-dir . --repo-url "$REPO_URL"
               --context "$KUBE_CONTEXT" --argocd-namespace argocd
-              --renderer argocd --repo-creds cluster
+              --repo-creds cluster
               --kustomize-enable-helm --concurrency 4
               --no-cache --exit-code
               # Above argocdf's 10s default: kyverno apply --cluster costs an API
@@ -76,8 +76,8 @@ DEFAULT_ARGS=(--quiet --repo-dir . --repo-url "$REPO_URL"
 # CASE_ARGS: per-case flag overrides, one "<case>:<flags>" entry per case that
 # needs them ("<case>" = branch name without the case/ prefix). They are
 # APPENDED after DEFAULT_ARGS, and argocdf's flag parser takes the LAST
-# occurrence of a scalar flag - so "--renderer native" alone overrides the
-# default renderer; never restate the whole set. Flags are shell-quoted, so
+# occurrence of a scalar flag - so "--repo-creds none" alone overrides the
+# default creds mode; never restate the whole set. Flags are shell-quoted, so
 # values containing spaces work: "my-case:--lint 'kyverno apply ... | jq ...'".
 # Two caveats from the flag TYPES (not from this harness):
 #   - REPEATABLE flags ACCUMULATE instead of replacing: --lint, -f/--file and
@@ -120,7 +120,7 @@ CASE_ARGS=(
   # broken policy in policies/kyverno would stop every other lint case from
   # producing the findings it pins.
   "lint-broken-policy:--lint-kyverno policies/kyverno-broken"
-  # "helm-values:--renderer native"
+  # "helm-values:--repo-creds none"
 )
 
 # Echo the override flags for one case, empty when it has none.

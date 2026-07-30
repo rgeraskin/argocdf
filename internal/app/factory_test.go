@@ -17,25 +17,25 @@ import (
 	"github.com/rgeraskin/argocdf/internal/config"
 )
 
-// TestCreateRenderFactoryErrorReturnsUntypedNil pins the interface-nil
+// TestCreateRendererErrorReturnsUntypedNil pins the interface-nil
 // contract: on a construction failure the returned applicationRenderer must
 // be a true nil interface, not a typed-nil *ArgoCDRenderer wrapped in a
 // non-nil interface — Run's deferred cleanup type-asserts the stored value
 // and would otherwise call Cleanup on a nil receiver and panic during error
 // unwinding.
-func TestCreateRenderFactoryErrorReturnsUntypedNil(t *testing.T) {
-	// The argocd engine's first construction step creates its registry auth
+func TestCreateRendererErrorReturnsUntypedNil(t *testing.T) {
+	// The render engine's first construction step creates its registry auth
 	// dir under os.TempDir(); pointing TMPDIR at a missing path forces the
 	// failure without any stubbing.
 	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "missing"))
 
-	f := NewFactory(&config.Config{Renderer: config.RendererArgoCD}, log.New(io.Discard))
-	r, err := f.CreateRenderFactory("v1.30.0", nil, nil)
+	f := NewFactory(&config.Config{}, log.New(io.Discard))
+	r, err := f.CreateRenderer("v1.30.0", nil, nil)
 	if err == nil {
-		t.Fatal("CreateRenderFactory() succeeded; the TMPDIR trick no longer forces a construction failure")
+		t.Fatal("CreateRenderer() succeeded; the TMPDIR trick no longer forces a construction failure")
 	}
 	if r != nil {
-		t.Fatalf("CreateRenderFactory() returned a non-nil interface (%T) alongside the error; Run's deferred Cleanup would panic on the typed nil", r)
+		t.Fatalf("CreateRenderer() returned a non-nil interface (%T) alongside the error; Run's deferred Cleanup would panic on the typed nil", r)
 	}
 }
 
@@ -152,7 +152,7 @@ func TestCreateLintRunner(t *testing.T) {
 }
 
 // TestRunCleansUpRendererOnInitializeFailure pins the Run lifecycle contract:
-// when initialize fails AFTER the argocd engine was constructed (here: output
+// when initialize fails AFTER the render engine was constructed (here: output
 // writer creation), the deferred cleanup still runs — the per-run registry
 // auth dir is removed and the scrubbed helm env is restored. The test runs
 // fully offline: client construction never dials, the explicit KubeVersion
@@ -189,7 +189,6 @@ current-context: offline
 		KubeVersion:    "v1.30.0",
 		NoAPIVersions:  true,
 		NoCache:        true,
-		Renderer:       config.RendererArgoCD,
 		RepoCreds:      config.RepoCredsNone,
 		StdoutFormat:   "none",
 		// Writer creation fails AFTER the renderer exists: the parent

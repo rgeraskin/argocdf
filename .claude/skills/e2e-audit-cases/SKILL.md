@@ -71,7 +71,7 @@ cd e2e && git checkout -q -b tmp/tripwire master
 # ... make the change the case is supposed to catch (enable recursion, drop a flag) ...
 git add -A <paths> && git commit -q -m "tmp: tripwire"
 cd .. && ./argocdf --repo-dir e2e --repo-url https://github.com/rgeraskin/argocdf-test-repo.git \
-  --context kind-argocdf --argocd-namespace argocd --renderer argocd --repo-creds cluster \
+  --context kind-argocdf --argocd-namespace argocd --repo-creds cluster \
   --no-cache --base master --target tmp/tripwire --stdout unified | grep -E '<the string the must-not forbids>'
 git -C e2e checkout -q master && git -C e2e branch -D tmp/tripwire
 ```
@@ -115,7 +115,7 @@ Record every adopted rule in the audit report, and delete the corresponding item
 1. A per-case table: case | branch edit -> pinned effect | verdict. Every case appears, including the trivial ones.
 2. Findings, each with its taxonomy pattern and a proposed fix, ordered by cost.
 3. **Rules adopted this pass**, with the diff to `review-expected.sh` and the per-case `checks.grep` lines they require.
-4. The remaining "not guaranteed" list, shortened by whatever step 3 covered. As of the last audit: CASES.md is prose with no binding to the pin; `must-not` falsifiability is unchecked; app-section IDENTITY is unchecked (only counts are, via `expect:`); the suite verifies argocdf against itself, not against ArgoCD; each case pins ONE flag combination (`--renderer native`, `--repo-creds local|none` are unpinned); cross-case equality claims are review-only.
+4. The remaining "not guaranteed" list, shortened by whatever step 3 covered. As of the last audit: CASES.md is prose with no binding to the pin; `must-not` falsifiability is unchecked; app-section IDENTITY is unchecked (only counts are, via `expect:`); the suite verifies argocdf against itself, not against ArgoCD; each case pins ONE flag combination (`--repo-creds local|none` are unpinned); cross-case equality claims are review-only.
 
 ## Cadence
 

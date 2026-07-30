@@ -45,13 +45,12 @@ func (f *Factory) CreateRepository() (*git.Repository, error) {
 	return git.Open(f.config.RepoPath)
 }
 
-// CreateRenderFactory creates the render engine selected by --renderer:
-// argocdf's native helm/kustomize pipeline, or ArgoCD's own repo-server code
-// for exact render parity. apiVersions is the list of cluster API versions to
+// CreateRenderer creates the render engine (ArgoCD's own repo-server code,
+// for exact render parity). apiVersions is the list of cluster API versions to
 // pass to helm; it is ignored when --no-api-versions is set. creds carries
 // the repository credentials loaded per --repo-creds (nil in `none` mode, or
 // when loading was skipped).
-func (f *Factory) CreateRenderFactory(kubeVersion string, apiVersions []string, creds *cluster.RepoCredentials) (applicationRenderer, error) {
+func (f *Factory) CreateRenderer(kubeVersion string, apiVersions []string, creds *cluster.RepoCredentials) (applicationRenderer, error) {
 	if f.config.NoAPIVersions {
 		apiVersions = nil
 	}
@@ -64,8 +63,6 @@ func (f *Factory) CreateRenderFactory(kubeVersion string, apiVersions []string, 
 		KustomizeEnableHelm:     f.config.KustomizeEnableHelm,
 		KustomizeBuildOptions:   f.config.KustomizeBuildOptions,
 		KustomizeLoadRestrictor: f.config.KustomizeLoadRestrictor,
-		HelmSkipRefresh:         f.config.HelmSkipRefresh,
-		HelmAddRepos:            f.config.HelmAddRepos,
 		ChartCacheDir:           f.chartCacheDir(),
 	}
 	if creds != nil {
@@ -76,18 +73,15 @@ func (f *Factory) CreateRenderFactory(kubeVersion string, apiVersions []string, 
 		opts.ResolveRepo = creds.Resolve
 		opts.HelmRegistryConfig = creds.HelmRegistryConfig
 	}
-	if f.config.Renderer == config.RendererArgoCD {
-		// Explicit nil check instead of returning the call directly: that
-		// would convert a typed-nil *ArgoCDRenderer into a NON-nil
-		// applicationRenderer on error, and Run's deferred cleanup would then
-		// call Cleanup on a nil receiver and panic during error unwinding.
-		r, err := render.NewArgoCDRenderer(opts)
-		if err != nil {
-			return nil, err
-		}
-		return r, nil
+	// Explicit nil check instead of returning the call directly: that
+	// would convert a typed-nil *ArgoCDRenderer into a NON-nil
+	// applicationRenderer on error, and Run's deferred cleanup would then
+	// call Cleanup on a nil receiver and panic during error unwinding.
+	r, err := render.NewArgoCDRenderer(opts)
+	if err != nil {
+		return nil, err
 	}
-	return render.NewFactory(opts), nil
+	return r, nil
 }
 
 // baseCacheDir resolves the base argocdf cache directory: the explicit

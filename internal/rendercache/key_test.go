@@ -41,7 +41,6 @@ func baseInput() KeyInput {
 		KubeVersion: "1.29.0",
 		Options: KeyOptions{
 			KustomizeEnableHelm: false,
-			HelmSkipRefresh:     true,
 		},
 		Commit:      "deadbeef",
 		ResolveTree: fixedResolver("treehash-1"),
@@ -113,12 +112,12 @@ func TestComputeKeyChangesWithOptions(t *testing.T) {
 	}
 }
 
-func TestComputeKeyChangesWithHelmAddRepos(t *testing.T) {
+func TestComputeKeyChangesWithKustomizeBuildOptions(t *testing.T) {
 	base := mustKey(t, baseInput())
 	in := baseInput()
-	in.Options.HelmAddRepos = true
+	in.Options.KustomizeBuildOptions = "--enable-alpha-plugins"
 	if got := mustKey(t, in); got == base {
-		t.Error("expected different key when HelmAddRepos changes")
+		t.Error("expected different key when KustomizeBuildOptions changes")
 	}
 }
 
@@ -165,7 +164,9 @@ func TestComputeKeyChangesWithValueFileContent(t *testing.T) {
 }
 
 // TestComputeKeyChangesWithRefValueFile verifies that a change to a $ref value
-// file (resolved against a same-repo ref source) changes the key.
+// file (resolved against a same-repo ref source) changes the key. The path
+// resolves against the ref repository ROOT — never the ref source's Path —
+// matching the engine (ArgoCD's RefTarget has no Path field).
 func TestComputeKeyChangesWithRefValueFile(t *testing.T) {
 	build := func(vfHash string) KeyInput {
 		in := baseInput()
@@ -181,13 +182,15 @@ func TestComputeKeyChangesWithRefValueFile(t *testing.T) {
 			{
 				RepoURL: "https://github.com/owner/repo",
 				Ref:     "values",
-				Path:    "config",
+				// A ref source's Path must NOT shift value-file resolution:
+				// only "env/prod.yaml" (repo-root-relative) may be hashed.
+				Path: "config",
 			},
 		}
 		in.ResolveTree = mapResolver(map[string]string{
-			"chart":                "tree-chart",
-			"config/env/prod.yaml": vfHash,
-			"":                     "root-tree", // ref source uses root tree
+			"chart":         "tree-chart",
+			"env/prod.yaml": vfHash,
+			"":              "root-tree", // ref source uses root tree
 		})
 		in.SameRepo = allRepo
 		return in

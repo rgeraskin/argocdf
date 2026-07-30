@@ -52,10 +52,9 @@ func ExitCodeFor(err error) int {
 
 // applicationRenderer is the part of the render engine that App uses to render
 // an application's manifests. It is a seam that lets tests substitute a fake
-// renderer for the queue/wave orchestration in processApplications, and lets
-// the factory swap engines (--renderer=native|argocd). revision is the commit
-// being rendered; the argocd engine feeds it into the ARGOCD_APP_REVISION*
-// build-env variables, the native engine ignores it.
+// renderer for the queue/wave orchestration in processApplications. revision
+// is the commit being rendered; the engine feeds it into the
+// ARGOCD_APP_REVISION* build-env variables.
 type applicationRenderer interface {
 	RenderApplication(ctx context.Context, app *cluster.Application, repoPath, revision string) (*render.RenderResult, error)
 }
@@ -118,7 +117,7 @@ func New(cfg *config.Config, logger *log.Logger) (*App, error) {
 
 // Run executes the main application logic.
 func (a *App) Run(ctx context.Context) error {
-	// The argocd engine keeps a per-run registry auth file with short-lived
+	// The render engine keeps a per-run registry auth file with short-lived
 	// tokens and mutates the process helm env; undo both on the way out. The
 	// defer is registered BEFORE initialize and resolves a.renderer at unwind
 	// time, so an initialize failure AFTER renderer construction (e.g. output
@@ -315,7 +314,7 @@ func (a *App) initialize(ctx context.Context) error {
 	}
 
 	// Create renderer
-	a.renderer, err = a.factory.CreateRenderFactory(kubeVersion, apiVersions, creds)
+	a.renderer, err = a.factory.CreateRenderer(kubeVersion, apiVersions, creds)
 	if err != nil {
 		return fmt.Errorf("failed to create renderer: %w", err)
 	}
@@ -605,11 +604,12 @@ func (a *App) filterAffectedApps(apps []cluster.Application, changed *git.Change
 		}
 
 		for _, source := range sources {
-			// A helm source may reference value files in another (ref) source
-			// via $<ref>/path. This is independent of this source's own repo
-			// URL (the helm chart often lives in a different repo).
+			// A helm source may reference value files or fileParameters in
+			// another (ref) source via $<ref>/path. This is independent of this
+			// source's own repo URL (the helm chart often lives in a different
+			// repo).
 			if a.helmValueFilesAffected(source, refSources, repoURL, changedPaths) {
-				a.logger.Debug("App affected via ref value file", "app", app.Name)
+				a.logger.Debug("App affected via ref file", "app", app.Name)
 				affected = append(affected, app)
 				break
 			}
@@ -725,10 +725,26 @@ func (a *App) manifestGeneratePathsAffected(
 	return true, false
 }
 
-// helmValueFilesAffected reports whether any of a helm source's value files
-// reference a $<ref>/... path in the local repo that was changed. It resolves
-// the ref name against the app's ref sources, and only matches when the ref
-// source points at the local repo being diffed.
+// helmValueFilesAffected reports whether any of a helm source's value files or
+// fileParameters reference a $<ref>/... path in the local repo that was changed.
+// It resolves the ref name against the app's ref sources, and only matches when
+// the ref source points at the local repo being diffed.
+//
+// Both lists are matched because ArgoCD resolves them through the IDENTICAL two
+// branches - getReferencedSource then getResolvedRefValueFile, else
+// ResolveValueFilePathOrUrl (getResolvedValueFiles and the FileParameters loop in
+// reposerver/repository/repository.go) - and the render-cache key hashes both. An
+// app whose only reference to a changed file is a $ref fileParameter (--set-file
+// reading a file from a ref repo, the release-rollout shape) would otherwise be
+// silently missing from every report.
+//
+// Resolution is against the ref repository ROOT, not the ref source's Path,
+// because that is what ArgoCD does: getResolvedRefValueFile drops the $ref
+// segment and resolves the remainder with the ref repo's checkout as BOTH appPath
+// and repoRoot (RefTarget carries no path at all). Joining the ref source's Path
+// instead - the native engine's old behavior - makes this matcher look for a file
+// that does not exist, so a values change goes unreported. The same mistake lived
+// in the render-cache key until rendercache-v3.
 func (a *App) helmValueFilesAffected(
 	source cluster.ApplicationSource,
 	refSources map[string]cluster.ApplicationSource,
@@ -739,7 +755,13 @@ func (a *App) helmValueFilesAffected(
 		return false
 	}
 
-	for _, vf := range source.Helm.ValueFiles {
+	refFiles := make([]string, 0, len(source.Helm.ValueFiles)+len(source.Helm.FileParameters))
+	refFiles = append(refFiles, source.Helm.ValueFiles...)
+	for _, fp := range source.Helm.FileParameters {
+		refFiles = append(refFiles, fp.Path)
+	}
+
+	for _, vf := range refFiles {
 		if !strings.HasPrefix(vf, "$") {
 			continue
 		}
@@ -761,8 +783,9 @@ func (a *App) helmValueFilesAffected(
 			continue
 		}
 
-		// Repo-relative path of the referenced value file.
-		relPath := path.Clean(path.Join(refSource.Path, remainder))
+		// Repo-relative path of the referenced value file: root-relative within
+		// the ref repository, ignoring refSource.Path (see the doc comment).
+		relPath := path.Clean(remainder)
 		for _, cp := range changedPaths {
 			if path.Clean(cp) == relPath {
 				return true
@@ -1236,9 +1259,6 @@ func (a *App) renderCacheKey(app *cluster.Application, commit string) (string, b
 			KustomizeEnableHelm:     a.cfg.KustomizeEnableHelm,
 			KustomizeBuildOptions:   a.cfg.KustomizeBuildOptions,
 			KustomizeLoadRestrictor: a.cfg.KustomizeLoadRestrictor,
-			HelmSkipRefresh:         a.cfg.HelmSkipRefresh,
-			HelmAddRepos:            a.cfg.HelmAddRepos,
-			Renderer:                a.cfg.Renderer,
 		},
 		Commit: commit,
 		ResolveTree: func(commit, path string) (string, bool) {

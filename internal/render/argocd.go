@@ -1,19 +1,18 @@
-// Package render provides manifest rendering; this file implements the
-// --renderer=argocd engine, which renders through ArgoCD's own repo-server
-// code (reposerver/repository.GenerateManifests) for exact ArgoCD parity.
+// Package render provides manifest rendering; this file implements argocdf's
+// render engine, which renders through ArgoCD's own repo-server code
+// (reposerver/repository.GenerateManifests) for exact ArgoCD parity.
 //
 // What ArgoCD's code takes over here: source-type dispatch (helm / kustomize /
 // directory, including .argocd-source*.yaml overrides), the complete
 // ApplicationSourceHelm/Kustomize option translation, ARGOCD_APP_* build-env
 // substitution, helm's --include-crds default, and dependency building into an
 // isolated temp helm home (no user helm config is touched, and dependency
-// repos from Chart.yaml are registered there automatically — --helm-add-repos
-// is unnecessary with this engine).
+// repos from Chart.yaml are registered there automatically).
 //
 // What stays argocdf's: worktree management, remote-chart fetching (ArgoCD's
 // repo-server fetches charts before calling GenerateManifests, so this file
-// reuses the native chart download cache), $ref-source checkout, and the
-// render cache (keyed with Options.Renderer so engines never share entries).
+// goes through the persistent chart download cache), $ref-source checkout,
+// and the render cache.
 package render
 
 import (
@@ -25,6 +24,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 
 	argoappv1 "github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
 	"github.com/argoproj/argo-cd/v3/reposerver/apiclient"
@@ -49,12 +49,34 @@ var maxCombinedDirectoryManifestsSize = resource.MustParse("10M")
 // setting (util/settings): value files may be fetched over these URL schemes.
 var defaultValuesFileSchemes = []string{"https", "http"}
 
+// KustomizationNames contains the known kustomization file names.
+var KustomizationNames = []string{"kustomization.yaml", "kustomization.yml", "Kustomization"}
+
+// chartDepLocks serializes chart-directory writes (GenerateManifests' helm
+// dependency builds, kustomize edits) per directory. When apps render in
+// parallel from a shared worktree, two apps pointing at the same path would
+// otherwise interleave those writes. It maps an absolute chart path to its
+// *sync.Mutex.
+var chartDepLocks sync.Map
+
+// chartDepMutex returns the mutex guarding chart-directory writes for the
+// given path, creating it on first use.
+func chartDepMutex(chartPath string) *sync.Mutex {
+	m, _ := chartDepLocks.LoadOrStore(chartPath, &sync.Mutex{})
+	return m.(*sync.Mutex)
+}
+
+// isPureRef reports whether a source is used ONLY as a ref and produces no
+// manifests. ArgoCD's IsRef() is simply Ref != "", but a source may legitimately
+// both render manifests (via Path/Chart) AND be referenced by other sources. Only
+// a source with a Ref and neither Path nor Chart is skipped from rendering.
+func isPureRef(source cluster.ApplicationSource) bool {
+	return source.Ref != "" && source.Path == "" && source.Chart == ""
+}
+
 // ArgoCDRenderer renders applications through ArgoCD's repo-server code.
 type ArgoCDRenderer struct {
 	opts RenderOptions
-	// helm is used only for its remote-chart fetching (persistent chart cache);
-	// all templating goes through GenerateManifests.
-	helm *HelmRenderer
 	// ownedRegistryAuth is the per-run registry auth file when this engine
 	// created one (all --repo-creds modes except local, which pierces with the
 	// user's own registry config instead). Removed by Cleanup.
@@ -104,7 +126,6 @@ func NewArgoCDRenderer(opts RenderOptions) (*ArgoCDRenderer, error) {
 	r.restoreHelmEnv = isolateHelmEnv(registryConfig)
 
 	r.opts = opts
-	r.helm = NewHelmRenderer(opts)
 	return r, nil
 }
 
@@ -150,7 +171,7 @@ func (r *ArgoCDRenderer) RenderApplication(ctx context.Context, app *cluster.App
 	var all bytes.Buffer
 	sourceType := types.SourceTypeUnknown
 	for i := range sources {
-		// Pure ref sources produce no manifests (same rule as the native engine).
+		// Pure ref sources produce no manifests.
 		if isPureRef(sources[i]) {
 			continue
 		}
@@ -198,7 +219,7 @@ func (r *ArgoCDRenderer) renderSource(
 		// Remote chart: ArgoCD's repo-server fetches charts BEFORE calling
 		// GenerateManifests, so argocdf does the same — through ArgoCD's own
 		// chart client, wrapped in the persistent chart cache.
-		chartDir, cached, cleanupChart, err := r.helm.fetchRemoteChart(ctx, app, source)
+		chartDir, cached, cleanupChart, err := fetchRemoteChart(ctx, &r.opts, app, source)
 		if err != nil {
 			return nil, "", err
 		}
@@ -237,7 +258,7 @@ func (r *ArgoCDRenderer) renderSource(
 	// Chart.lock state after templating. Two apps sharing one chart directory
 	// in the same worktree must not interleave those writes. The repo-server
 	// never faces this (it locks per repo+revision a level above); argocdf's
-	// parallel waves can. Reuses the same per-path mutex as the native engine.
+	// parallel waves can.
 	//
 	// ArgoCD applies kustomize overrides (namePrefix, images, patches, ...) by
 	// rewriting kustomization.yaml IN PLACE (`kustomize edit` plus a direct
@@ -369,8 +390,8 @@ func (r *ArgoCDRenderer) buildManifestRequest(
 		// ProjectName feeds the ARGOCD_APP_PROJECT_NAME build-env variable.
 		ProjectName: app.Spec.Project,
 		// AppLabelKey/TrackingMethod are intentionally left empty so no
-		// tracking labels are injected — diffs stay comparable to the native
-		// engine and to plain chart output.
+		// tracking labels are injected — diffs stay comparable to plain
+		// chart output.
 		//
 		// ProjectSourceRepos feeds only a permission-check that rewrites
 		// dependency-fetch failures into "repo not permitted in project"
@@ -414,10 +435,9 @@ func (r *ArgoCDRenderer) kustomizeOptions() *argoappv1.KustomizeOptions {
 // the local repo maps to the current worktree, external repos are cloned to
 // temp dirs (removed by cleanup).
 //
-// Note a deliberate semantic difference from the native engine: ArgoCD resolves
-// "$ref/some/path" against the ref repository ROOT (RefTarget has no Path
-// field), while the native engine joins the ref source's Path first. The
-// argocd engine follows ArgoCD.
+// Note: ArgoCD resolves "$ref/some/path" against the ref repository ROOT
+// (RefTarget has no Path field) — the ref source's own Path never participates.
+// The render-cache key resolves $ref value files the same way (rendercache).
 func (r *ArgoCDRenderer) prepareRefSources(
 	ctx context.Context,
 	project string,

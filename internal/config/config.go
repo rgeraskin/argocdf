@@ -45,14 +45,6 @@ const (
 	// nothing. Each invocation's duration is logged at INFO.
 	DefaultLintTimeout = 10 * time.Second
 
-	// RendererNative renders with argocdf's own helm/kustomize pipeline.
-	RendererNative = "native"
-	// RendererArgoCD renders through ArgoCD's own repo-server code
-	// (reposerver/repository.GenerateManifests) for exact ArgoCD parity.
-	RendererArgoCD = "argocd"
-	// DefaultRenderer is the render engine used when --renderer is not given.
-	DefaultRenderer = RendererNative
-
 	// RepoCredsCluster reads repository credentials from ArgoCD's repository
 	// secrets in the cluster (the control-plane namespace).
 	RepoCredsCluster = "cluster"
@@ -133,21 +125,9 @@ type Config struct {
 	KustomizeBuildOptions   string
 	KustomizeLoadRestrictor string
 
-	// Helm options
-	HelmSkipRefresh bool
-	// HelmAddRepos registers chart dependency repositories (helm repo add +
-	// update) before dependency build. Mutates the local helm config; intended
-	// for CI.
-	HelmAddRepos bool
-
 	// NoAPIVersions disables passing cluster-discovered API versions to helm
 	// via --api-versions (faster; useful for compatibility).
 	NoAPIVersions bool
-
-	// Renderer selects the render engine: RendererNative (argocdf's own
-	// helm/kustomize pipeline) or RendererArgoCD (ArgoCD's repo-server code,
-	// for exact ArgoCD parity).
-	Renderer string
 
 	// RepoCreds selects where repository credentials come from:
 	// RepoCredsCluster (ArgoCD repository secrets; read failures are fatal),
@@ -246,7 +226,6 @@ func New() *Config {
 		ArgoCDNamespace: DefaultNamespace,
 		StdoutFormat:    DefaultStdoutFormat,
 		MaxDepth:        DefaultMaxDepth,
-		Renderer:        DefaultRenderer,
 		RepoCreds:       DefaultRepoCreds,
 	}
 }
@@ -278,15 +257,6 @@ func (c *Config) Validate() error {
 		// Valid
 	default:
 		return fmt.Errorf("invalid stdout format: %s (must be fields, summary, unified, or none)", c.StdoutFormat)
-	}
-
-	// Validate renderer choice. Empty is accepted as "not yet defaulted":
-	// WithDefaults resolves it to DefaultRenderer.
-	switch c.Renderer {
-	case "", RendererNative, RendererArgoCD:
-		// Valid
-	default:
-		return fmt.Errorf("invalid renderer: %s (must be %s or %s)", c.Renderer, RendererNative, RendererArgoCD)
 	}
 
 	// Validate the repository credential source. Empty is accepted as "not
@@ -346,29 +316,7 @@ func (c *Config) WithDefaults() *Config {
 	if c.LintTimeout == 0 {
 		c.LintTimeout = DefaultLintTimeout
 	}
-	if c.Renderer == "" {
-		c.Renderer = DefaultRenderer
-	}
 	// Note: UnifiedContext is not defaulted here because 0 is a valid value
 	// (meaning no context lines). The default is set by the CLI flag.
 	return c
-}
-
-// NativeOnlyFlagWarnings reports warnings for helm flags that have no effect
-// with the argocd renderer (it registers chart dependency repositories itself,
-// inside an isolated helm home). The *Set arguments indicate the user
-// explicitly set the flag (command line or environment) — defaults never warn,
-// which matters for --helm-skip-refresh whose default is true.
-func (c *Config) NativeOnlyFlagWarnings(helmSkipRefreshSet, helmAddReposSet bool) []string {
-	if c.Renderer != RendererArgoCD {
-		return nil
-	}
-	var warnings []string
-	if helmSkipRefreshSet {
-		warnings = append(warnings, "--helm-skip-refresh has no effect with --renderer=argocd (native renderer only)")
-	}
-	if helmAddReposSet {
-		warnings = append(warnings, "--helm-add-repos has no effect with --renderer=argocd (native renderer only)")
-	}
-	return warnings
 }

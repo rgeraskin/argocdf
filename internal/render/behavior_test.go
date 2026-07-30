@@ -16,25 +16,10 @@ import (
 	"github.com/rgeraskin/argocdf/internal/cluster"
 )
 
-// renderEngine is the behavior contract both engines must satisfy.
-type renderEngine interface {
-	RenderApplication(ctx context.Context, app *cluster.Application, repoPath, revision string) (*RenderResult, error)
-}
-
-// buildEngines constructs both engines with identical options.
-func buildEngines(t *testing.T, opts RenderOptions) map[string]renderEngine {
-	t.Helper()
-	return map[string]renderEngine{
-		"native": NewFactory(opts),
-		"argocd": mustNewArgoCDRenderer(t, opts),
-	}
-}
-
 // resourceCheck asserts a rendered resource exists and, optionally, that
 // specific fields have specific values. Assertions are SEMANTIC (parsed
-// documents, not raw text) because the engines legitimately differ in YAML
-// serialization: helm emits its templates verbatim while the argocd engine
-// re-serializes from parsed objects (quoting/key order differ).
+// documents, not raw text) because the engine re-serializes YAML from parsed
+// objects (quoting/key order differ from raw helm output).
 type resourceCheck struct {
 	// kindName identifies the resource as "Kind/name".
 	kindName string
@@ -43,19 +28,11 @@ type resourceCheck struct {
 	fields map[string]string
 }
 
-// engineExpect overrides/extends the shared expectations for one engine —
-// used ONLY where the engines intentionally differ (each use documents why).
-type engineExpect struct {
-	want    []resourceCheck
-	absent  []string
-	wantErr bool
-	skip    string // non-empty = skip this engine with the given reason
-}
-
-// engineScenario is one application-rendering behavior asserted on both
-// engines. This suite pins "same app behavior" across --renderer=native and
-// --renderer=argocd: any silent divergence fails here.
-type engineScenario struct {
+// renderScenario is one application-rendering behavior. This suite pins the
+// engine's application-level behavior (helm/kustomize/directory dispatch,
+// option translation, multi-source concatenation): any silent change in what
+// a spec renders to fails here.
+type renderScenario struct {
 	name           string
 	needsHelm      bool
 	needsKustomize bool
@@ -63,12 +40,11 @@ type engineScenario struct {
 	app            func() *cluster.Application
 	opts           RenderOptions
 	wantErr        bool
-	// want/absent apply to both engines; rawNotContains is a raw-text ban for
-	// non-manifest content that has no resource identity.
+	// rawNotContains is a raw-text ban for non-manifest content that has no
+	// resource identity.
 	want           []resourceCheck
 	absent         []string
 	rawNotContains []string
-	perEngine      map[string]engineExpect
 }
 
 const testRevision = "0123456789abcdef0123456789abcdef01234567"
@@ -174,8 +150,8 @@ spec:
 	}
 }
 
-func engineScenarios() []engineScenario {
-	return []engineScenario{
+func renderScenarios() []renderScenario {
+	return []renderScenario{
 		{
 			name:      "helm/values-yaml",
 			needsHelm: true,
@@ -355,14 +331,11 @@ spec:
           type: object
 `,
 			}),
-			app:  helmApp(nil),
-			want: []resourceCheck{{kindName: "ConfigMap/eng-app-cm"}},
-			perEngine: map[string]engineExpect{
-				// KNOWN INTENTIONAL DIFFERENCE: ArgoCD templates with
-				// --include-crds; the native engine does not (yet). If native
-				// gains --include-crds, move the CRD into shared want.
-				"native": {absent: []string{"CustomResourceDefinition/widgets.example.com"}},
-				"argocd": {want: []resourceCheck{{kindName: "CustomResourceDefinition/widgets.example.com"}}},
+			app: helmApp(nil),
+			// ArgoCD templates with --include-crds: crds/ content must appear.
+			want: []resourceCheck{
+				{kindName: "ConfigMap/eng-app-cm"},
+				{kindName: "CustomResourceDefinition/widgets.example.com"},
 			},
 		},
 		{
@@ -432,6 +405,20 @@ spec:
 			want: []resourceCheck{{kindName: "ConfigMap/ovl-base-cm"}},
 		},
 		{
+			// An EXPLICIT directory source wins over kustomization.yaml
+			// auto-detection (ArgoCD's ExplicitType precedence): the overlay
+			// renders as plain files — no namePrefix applied — and the
+			// kustomization document itself passes through as a rendered doc.
+			name: "directory/explicit-directory-overrides-kustomization",
+			files: map[string]string{
+				"overlay/kustomization.yaml": "apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nnamePrefix: pre-\nresources:\n  - cm.yaml\n",
+				"overlay/cm.yaml":            "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: kust-cm\ndata:\n  a: b\n",
+			},
+			app:    dirApp("overlay", &cluster.ApplicationSourceDirectory{}),
+			want:   []resourceCheck{{kindName: "ConfigMap/kust-cm"}},
+			absent: []string{"ConfigMap/pre-kust-cm"},
+		},
+		{
 			name: "directory/plain-yaml-non-recursive",
 			files: map[string]string{
 				"manifests/a-cm.yaml":          "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm1\n",
@@ -465,18 +452,14 @@ spec:
 				"manifests/top.yaml":          "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: top-cm\n",
 				"manifests/.hidden/skip.yaml": "apiVersion: v1\nkind: Pod\nmetadata:\n  name: skip-pod\n",
 			},
-			app:  dirApp("manifests", &cluster.ApplicationSourceDirectory{Recurse: true}),
-			want: []resourceCheck{{kindName: "ConfigMap/top-cm"}},
-			perEngine: map[string]engineExpect{
-				// KNOWN INTENTIONAL DIFFERENCE (found by this suite): ArgoCD's
-				// recursive directory walk (getPotentiallyValidManifests) does
-				// NOT skip hidden directories — the argocd engine matches real
-				// ArgoCD. The native engine skips them; that is a divergence
-				// from ArgoCD kept for now (the hidden-dir skip at
-				// repository.go:3009 is GetGitDirectories, a different code
-				// path).
-				"native": {absent: []string{"Pod/skip-pod"}},
-				"argocd": {want: []resourceCheck{{kindName: "Pod/skip-pod"}}},
+			app: dirApp("manifests", &cluster.ApplicationSourceDirectory{Recurse: true}),
+			// ArgoCD's recursive directory walk (getPotentiallyValidManifests)
+			// does NOT skip hidden directories; the engine matches real ArgoCD
+			// (the hidden-dir skip at repository.go:3009 is GetGitDirectories, a
+			// different code path).
+			want: []resourceCheck{
+				{kindName: "ConfigMap/top-cm"},
+				{kindName: "Pod/skip-pod"},
 			},
 		},
 		{
@@ -542,8 +525,8 @@ data:
 									ValueFiles: []string{"$vals/prod-values.yaml"},
 								},
 							},
-							// Ref source with empty Path: both engines resolve
-							// $vals/... against the repo root then.
+							// Ref source: $vals/... resolves against the ref
+							// repository ROOT (ArgoCD semantics).
 							{RepoURL: "https://github.com/example/repo.git", Ref: "vals"},
 						},
 						Destination: cluster.ApplicationDestination{Namespace: "default"},
@@ -609,12 +592,11 @@ func fieldAt(doc any, path string) (any, bool) {
 	return cur, true
 }
 
-// TestEngineBehaviorParity runs every behavioral scenario against both render
-// engines. It is the contract that --renderer=argocd behaves like
-// --renderer=native for everything argocdf supported before the argocd engine
-// existed; intentional differences are pinned per engine with a comment.
-func TestEngineBehaviorParity(t *testing.T) {
-	for _, sc := range engineScenarios() {
+// TestRenderBehavior runs every behavioral scenario against the render
+// engine, pinning what a spec renders to end-to-end: any silent behavior
+// change in dispatch, option translation, or multi-source handling fails here.
+func TestRenderBehavior(t *testing.T) {
+	for _, sc := range renderScenarios() {
 		t.Run(sc.name, func(t *testing.T) {
 			if sc.needsHelm {
 				requireHelm(t)
@@ -623,69 +605,60 @@ func TestEngineBehaviorParity(t *testing.T) {
 				requireKustomize(t)
 			}
 
-			for engineName := range buildEngines(t, sc.opts) {
-				t.Run(engineName, func(t *testing.T) {
-					exp := sc.perEngine[engineName]
-					if exp.skip != "" {
-						t.Skip(exp.skip)
-					}
+			// Fresh repo per scenario: renders may mutate the tree
+			// (helm dependency build, kustomize edit).
+			repoDir := t.TempDir()
+			for name, content := range sc.files {
+				p := filepath.Join(repoDir, name)
+				if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+					t.Fatalf("mkdir: %v", err)
+				}
+				if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+					t.Fatalf("write %s: %v", name, err)
+				}
+			}
 
-					// Fresh repo per engine: renders may mutate the tree
-					// (helm dependency build, kustomize edit).
-					repoDir := t.TempDir()
-					for name, content := range sc.files {
-						p := filepath.Join(repoDir, name)
-						if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-							t.Fatalf("mkdir: %v", err)
-						}
-						if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
-							t.Fatalf("write %s: %v", name, err)
-						}
-					}
+			engine := mustNewArgoCDRenderer(t, sc.opts)
+			result, err := engine.RenderApplication(context.Background(), sc.app(), repoDir, testRevision)
 
-					engine := buildEngines(t, sc.opts)[engineName]
-					result, err := engine.RenderApplication(context.Background(), sc.app(), repoDir, testRevision)
+			if sc.wantErr {
+				if err == nil {
+					t.Fatalf("RenderApplication() expected error, got nil\noutput:\n%s", result.Manifests)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("RenderApplication() error = %v", err)
+			}
 
-					if sc.wantErr || exp.wantErr {
-						if err == nil {
-							t.Fatalf("RenderApplication() expected error, got nil\noutput:\n%s", result.Manifests)
-						}
-						return
-					}
-					if err != nil {
-						t.Fatalf("RenderApplication() error = %v", err)
-					}
+			docs := parseRendered(t, result.Manifests)
 
-					docs := parseRendered(t, result.Manifests)
-
-					for _, check := range append(append([]resourceCheck{}, sc.want...), exp.want...) {
-						doc, ok := docs[check.kindName]
-						if !ok {
-							t.Errorf("missing resource %s; rendered: %v", check.kindName, keysOf(docs))
-							continue
-						}
-						for path, wantVal := range check.fields {
-							got, ok := fieldAt(doc, path)
-							if !ok {
-								t.Errorf("%s: field %s not found", check.kindName, path)
-								continue
-							}
-							if fmt.Sprint(got) != wantVal {
-								t.Errorf("%s: field %s = %v, want %v", check.kindName, path, got, wantVal)
-							}
-						}
+			for _, check := range sc.want {
+				doc, ok := docs[check.kindName]
+				if !ok {
+					t.Errorf("missing resource %s; rendered: %v", check.kindName, keysOf(docs))
+					continue
+				}
+				for path, wantVal := range check.fields {
+					got, ok := fieldAt(doc, path)
+					if !ok {
+						t.Errorf("%s: field %s not found", check.kindName, path)
+						continue
 					}
-					for _, banned := range append(append([]string{}, sc.absent...), exp.absent...) {
-						if _, ok := docs[banned]; ok {
-							t.Errorf("resource %s must not be rendered", banned)
-						}
+					if fmt.Sprint(got) != wantVal {
+						t.Errorf("%s: field %s = %v, want %v", check.kindName, path, got, wantVal)
 					}
-					for _, banned := range sc.rawNotContains {
-						if strings.Contains(string(result.Manifests), banned) {
-							t.Errorf("output must not contain %q", banned)
-						}
-					}
-				})
+				}
+			}
+			for _, banned := range sc.absent {
+				if _, ok := docs[banned]; ok {
+					t.Errorf("resource %s must not be rendered", banned)
+				}
+			}
+			for _, banned := range sc.rawNotContains {
+				if strings.Contains(string(result.Manifests), banned) {
+					t.Errorf("output must not contain %q", banned)
+				}
 			}
 		})
 	}

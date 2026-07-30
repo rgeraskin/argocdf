@@ -224,16 +224,13 @@ jobs:
         # comment cap: a report that fits stays a single pr-comment.md; an
         # oversized one is split into self-contained parts (pr-comment.md,
         # pr-comment.2.md, ...) that the post step below publishes one comment
-        # each.
-        # --helm-add-repos: a fresh runner has no helm repo cache, and
-        # `helm dependency build` never adds/refreshes classic HTTP(S) chart
-        # repos itself, so argocdf registers them first (see the README note).
+        # each. Chart dependency repos need no priming: argocdf registers them
+        # itself in an isolated helm home during rendering.
         run: |
           argocdf --quiet \
             --base origin/main --target HEAD \
             --file md-unified,split:pr-comment.md \
-            --concurrency 4 \
-            --helm-add-repos
+            --concurrency 4
 
       - name: Upload full report artifact
         if: always()

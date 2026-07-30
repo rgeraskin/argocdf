@@ -251,28 +251,6 @@ func TestConfigValidate(t *testing.T) {
 			errMsg:  "invalid stdout format",
 		},
 		{
-			name: "valid config with argocd renderer",
-			config: &Config{
-				RepoPath:     tmpDir,
-				StdoutFormat: "fields",
-				MaxDepth:     10,
-				Concurrency:  1,
-				Renderer:     RendererArgoCD,
-			},
-		},
-		{
-			name: "invalid renderer",
-			config: &Config{
-				RepoPath:     tmpDir,
-				StdoutFormat: "fields",
-				MaxDepth:     10,
-				Concurrency:  1,
-				Renderer:     "helmfile",
-			},
-			wantErr: true,
-			errMsg:  "invalid renderer",
-		},
-		{
 			name: "valid repo-creds sources",
 			config: &Config{
 				RepoPath:     tmpDir,
@@ -475,30 +453,6 @@ func TestNew(t *testing.T) {
 	}
 	if cfg.MaxDepth != DefaultMaxDepth {
 		t.Errorf("New() MaxDepth = %v, want %v", cfg.MaxDepth, DefaultMaxDepth)
-	}
-}
-
-func TestNativeOnlyFlagWarnings(t *testing.T) {
-	tests := []struct {
-		name           string
-		renderer       string
-		skipRefreshSet bool
-		addReposSet    bool
-		wantCount      int
-	}{
-		{"native renderer never warns", RendererNative, true, true, 0},
-		{"argocd renderer with flag defaults never warns", RendererArgoCD, false, false, 0},
-		{"argocd renderer warns per explicitly set flag", RendererArgoCD, true, true, 2},
-		{"argocd renderer warns for helm-add-repos alone", RendererArgoCD, false, true, 1},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			c := &Config{Renderer: tt.renderer}
-			got := c.NativeOnlyFlagWarnings(tt.skipRefreshSet, tt.addReposSet)
-			if len(got) != tt.wantCount {
-				t.Errorf("NativeOnlyFlagWarnings() = %v, want %d warnings", got, tt.wantCount)
-			}
-		})
 	}
 }
 

@@ -89,7 +89,7 @@ func TestFetchRemoteChart_ClientInputs(t *testing.T) {
 	var gotEnableOCI bool
 	stubNewChartClient(t, fake, &gotRepo, &gotEnableOCI)
 
-	r := NewHelmRenderer(RenderOptions{
+	opts := RenderOptions{
 		ResolveRepo: func(_ context.Context, repoURL, _ string) (*argoappv1.Repository, error) {
 			return &argoappv1.Repository{
 				Repo:      repoURL,
@@ -98,11 +98,11 @@ func TestFetchRemoteChart_ClientInputs(t *testing.T) {
 				EnableOCI: true,
 			}, nil
 		},
-	})
+	}
 	source := chartSource("1.2.3")
 	source.Helm = &cluster.ApplicationSourceHelm{PassCredentials: true}
 
-	dir, cached, cleanup, err := r.fetchRemoteChart(context.Background(), chartTestApp(), source)
+	dir, cached, cleanup, err := fetchRemoteChart(context.Background(), &opts, chartTestApp(), source)
 	if err != nil {
 		t.Fatalf("fetchRemoteChart() error: %v", err)
 	}
@@ -129,8 +129,8 @@ func TestFetchRemoteChart_SchemeLessURLHeuristic(t *testing.T) {
 	var gotEnableOCI bool
 	stubNewChartClient(t, fake, nil, &gotEnableOCI)
 
-	r := NewHelmRenderer(RenderOptions{})
-	_, _, cleanup, err := r.fetchRemoteChart(context.Background(), chartTestApp(), chartSource("1.2.3"))
+	opts := RenderOptions{}
+	_, _, cleanup, err := fetchRemoteChart(context.Background(), &opts, chartTestApp(), chartSource("1.2.3"))
 	if err != nil {
 		t.Fatalf("fetchRemoteChart() error: %v", err)
 	}
@@ -143,12 +143,12 @@ func TestFetchRemoteChart_SchemeLessURLHeuristic(t *testing.T) {
 
 // TestFetchRemoteChart_RegistryAuthFileStripsLogin is the regression test
 // for the chart-fetch `helm registry login` keychain collisions (macOS
-// errSecDuplicateItem -25299): under the argocd engine (registryAuth set),
-// resolved OCI credentials are recorded in the engine's auth file and the
-// chart client receives a credential-stripped repository, so ArgoCD's
-// login/logout (whose helm exec would hit the shared system keychain via
-// ORAS native-store detection, and whose argv would carry the token) never
-// runs. Concurrent fetches share the file through argocdf-side writes only.
+// errSecDuplicateItem -25299): with an engine-owned auth file (registryAuth
+// set), resolved OCI credentials are recorded there and the chart client
+// receives a credential-stripped repository, so ArgoCD's login/logout (whose
+// helm exec would hit the shared system keychain via ORAS native-store
+// detection, and whose argv would carry the token) never runs. Concurrent
+// fetches share the file through argocdf-side writes only.
 func TestFetchRemoteChart_RegistryAuthFileStripsLogin(t *testing.T) {
 	fake := &fakeChartClient{extractedDir: chartFixture(t, "mychart")}
 	var gotRepo *argoappv1.Repository
@@ -160,7 +160,7 @@ func TestFetchRemoteChart_RegistryAuthFileStripsLogin(t *testing.T) {
 	}
 	defer auth.Remove()
 
-	r := NewHelmRenderer(RenderOptions{
+	opts := RenderOptions{
 		registryAuth: auth,
 		ResolveRepo: func(_ context.Context, repoURL, _ string) (*argoappv1.Repository, error) {
 			return &argoappv1.Repository{
@@ -169,8 +169,8 @@ func TestFetchRemoteChart_RegistryAuthFileStripsLogin(t *testing.T) {
 				Proxy: "http://proxy.local", Insecure: true,
 			}, nil
 		},
-	})
-	_, _, cleanup, err := r.fetchRemoteChart(context.Background(), chartTestApp(), chartSource("1.2.3"))
+	}
+	_, _, cleanup, err := fetchRemoteChart(context.Background(), &opts, chartTestApp(), chartSource("1.2.3"))
 	if err != nil {
 		t.Fatalf("fetchRemoteChart() error: %v", err)
 	}
@@ -190,28 +190,46 @@ func TestFetchRemoteChart_RegistryAuthFileStripsLogin(t *testing.T) {
 	}
 }
 
-// TestFetchRemoteChart_NativeKeepsClientLogin pins the native engine's
-// behavior: without an engine-owned auth file, resolved credentials still
-// reach ArgoCD's chart client (its own login flow against the ambient helm
-// environment).
-func TestFetchRemoteChart_NativeKeepsClientLogin(t *testing.T) {
+// TestFetchRemoteChart_NoAuthFilePassesCredsThrough pins the defensive
+// fallback: with neither an engine-owned auth file nor a pierced registry
+// config, resolved credentials still reach ArgoCD's chart client (its own
+// login flow). The engine always sets one of the two, so this path is only
+// reachable when fetching outside an engine.
+func TestFetchRemoteChart_NoAuthFilePassesCredsThrough(t *testing.T) {
 	fake := &fakeChartClient{extractedDir: chartFixture(t, "mychart")}
 	var gotRepo *argoappv1.Repository
 	stubNewChartClient(t, fake, &gotRepo, nil)
 
-	r := NewHelmRenderer(RenderOptions{
+	opts := RenderOptions{
 		ResolveRepo: func(_ context.Context, repoURL, _ string) (*argoappv1.Repository, error) {
 			return &argoappv1.Repository{Repo: repoURL, EnableOCI: true, Username: "u", Password: "p"}, nil
 		},
-	})
-	_, _, cleanup, err := r.fetchRemoteChart(context.Background(), chartTestApp(), chartSource("1.2.3"))
+	}
+	_, _, cleanup, err := fetchRemoteChart(context.Background(), &opts, chartTestApp(), chartSource("1.2.3"))
 	if err != nil {
 		t.Fatalf("fetchRemoteChart() error: %v", err)
 	}
 	defer cleanup()
 
 	if gotRepo == nil || gotRepo.Username != "u" || gotRepo.Password != "p" {
-		t.Errorf("native-engine chart client repo = %+v, want credentials passed through", gotRepo)
+		t.Errorf("chart client repo = %+v, want credentials passed through", gotRepo)
+	}
+}
+
+func TestIsOCIChartRepo(t *testing.T) {
+	tests := []struct {
+		repoURL string
+		want    bool
+	}{
+		{"oci://ghcr.io/org", true},
+		{"ghcr.io/org", true}, // scheme-less: ArgoCD's OCI repo secret shape
+		{"https://charts.example.com", false},
+		{"http://charts.example.com", false},
+	}
+	for _, tt := range tests {
+		if got := isOCIChartRepo(tt.repoURL); got != tt.want {
+			t.Errorf("isOCIChartRepo(%q) = %v, want %v", tt.repoURL, got, tt.want)
+		}
 	}
 }
 
@@ -225,13 +243,13 @@ func TestFetchRemoteChart_LocalModeStripsClientLogin(t *testing.T) {
 	var gotRepo *argoappv1.Repository
 	stubNewChartClient(t, fake, &gotRepo, nil)
 
-	r := NewHelmRenderer(RenderOptions{
+	opts := RenderOptions{
 		HelmRegistryConfig: "/user/registry/config.json",
 		ResolveRepo: func(_ context.Context, repoURL, _ string) (*argoappv1.Repository, error) {
 			return &argoappv1.Repository{Repo: repoURL, EnableOCI: true, Username: "u", Password: "p"}, nil
 		},
-	})
-	_, _, cleanup, err := r.fetchRemoteChart(context.Background(), chartTestApp(), chartSource("1.2.3"))
+	}
+	_, _, cleanup, err := fetchRemoteChart(context.Background(), &opts, chartTestApp(), chartSource("1.2.3"))
 	if err != nil {
 		t.Fatalf("fetchRemoteChart() error: %v", err)
 	}
@@ -250,11 +268,11 @@ func TestFetchRemoteChart_CachePublishAndHit(t *testing.T) {
 	fake := &fakeChartClient{extractedDir: chartFixture(t, "mychart")}
 	stubNewChartClient(t, fake, nil, nil)
 
-	r := NewHelmRenderer(RenderOptions{ChartCacheDir: cacheBase})
+	opts := RenderOptions{ChartCacheDir: cacheBase}
 	source := chartSource("1.2.3")
 
 	// Miss: fetches, publishes into the cache, closes the extraction.
-	dir, cached, cleanup, err := r.fetchRemoteChart(context.Background(), chartTestApp(), source)
+	dir, cached, cleanup, err := fetchRemoteChart(context.Background(), &opts, chartTestApp(), source)
 	if err != nil {
 		t.Fatalf("fetchRemoteChart() error: %v", err)
 	}
@@ -271,7 +289,7 @@ func TestFetchRemoteChart_CachePublishAndHit(t *testing.T) {
 	}
 
 	// Hit: served from the cache, the client is never called again.
-	dir2, cached2, cleanup2, err := r.fetchRemoteChart(context.Background(), chartTestApp(), source)
+	dir2, cached2, cleanup2, err := fetchRemoteChart(context.Background(), &opts, chartTestApp(), source)
 	if err != nil {
 		t.Fatalf("fetchRemoteChart() second call error: %v", err)
 	}
@@ -289,8 +307,8 @@ func TestFetchRemoteChart_UnpinnedSkipsCache(t *testing.T) {
 	fake := &fakeChartClient{extractedDir: chartFixture(t, "mychart")}
 	stubNewChartClient(t, fake, nil, nil)
 
-	r := NewHelmRenderer(RenderOptions{ChartCacheDir: cacheBase})
-	dir, cached, cleanup, err := r.fetchRemoteChart(context.Background(), chartTestApp(), chartSource("HEAD"))
+	opts := RenderOptions{ChartCacheDir: cacheBase}
+	dir, cached, cleanup, err := fetchRemoteChart(context.Background(), &opts, chartTestApp(), chartSource("HEAD"))
 	if err != nil {
 		t.Fatalf("fetchRemoteChart() error: %v", err)
 	}
@@ -314,8 +332,8 @@ func TestFetchRemoteChart_ErrorWrapsChartAndRepo(t *testing.T) {
 	fake := &fakeChartClient{err: errors.New("401 unauthorized")}
 	stubNewChartClient(t, fake, nil, nil)
 
-	r := NewHelmRenderer(RenderOptions{})
-	_, _, _, err := r.fetchRemoteChart(context.Background(), chartTestApp(), chartSource("1.2.3"))
+	opts := RenderOptions{}
+	_, _, _, err := fetchRemoteChart(context.Background(), &opts, chartTestApp(), chartSource("1.2.3"))
 	if err == nil {
 		t.Fatal("fetchRemoteChart() = nil error, want fetch failure")
 	}
@@ -365,8 +383,8 @@ func TestFetchRemoteChart_PublishFailureServesExtracted(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := NewHelmRenderer(RenderOptions{ChartCacheDir: blocker})
-	dir, cached, cleanup, err := r.fetchRemoteChart(context.Background(), chartTestApp(), chartSource("1.2.3"))
+	opts := RenderOptions{ChartCacheDir: blocker}
+	dir, cached, cleanup, err := fetchRemoteChart(context.Background(), &opts, chartTestApp(), chartSource("1.2.3"))
 	if err != nil {
 		t.Fatalf("fetchRemoteChart() error: %v", err)
 	}
@@ -389,8 +407,8 @@ func TestFetchRemoteChart_ContextCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	r := NewHelmRenderer(RenderOptions{})
-	_, _, _, err := r.fetchRemoteChart(ctx, chartTestApp(), chartSource("1.2.3"))
+	opts := RenderOptions{}
+	_, _, _, err := fetchRemoteChart(ctx, &opts, chartTestApp(), chartSource("1.2.3"))
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("fetchRemoteChart() error = %v, want context.Canceled", err)
 	}
@@ -432,8 +450,8 @@ func TestFetchRemoteChart_InFlightCancellation(t *testing.T) {
 		cancel()
 	}()
 
-	r := NewHelmRenderer(RenderOptions{})
-	_, _, _, err := r.fetchRemoteChart(ctx, chartTestApp(), chartSource("1.2.3"))
+	opts := RenderOptions{}
+	_, _, _, err := fetchRemoteChart(ctx, &opts, chartTestApp(), chartSource("1.2.3"))
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("fetchRemoteChart() error = %v, want context.Canceled while the fetch is in flight", err)
 	}
@@ -457,12 +475,12 @@ func TestFetchRemoteChart_ResolveErrorIsLoud(t *testing.T) {
 	}
 	t.Cleanup(func() { newChartClient = original })
 
-	r := NewHelmRenderer(RenderOptions{
+	opts := RenderOptions{
 		ResolveRepo: func(context.Context, string, string) (*argoappv1.Repository, error) {
 			return nil, errors.New("token exchange failed")
 		},
-	})
-	_, _, _, err := r.fetchRemoteChart(context.Background(), chartTestApp(), chartSource("1.2.3"))
+	}
+	_, _, _, err := fetchRemoteChart(context.Background(), &opts, chartTestApp(), chartSource("1.2.3"))
 	if err == nil || !strings.Contains(err.Error(), "token exchange failed") {
 		t.Errorf("fetchRemoteChart() error = %v, want the credential resolution root cause", err)
 	}

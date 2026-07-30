@@ -211,6 +211,19 @@ func TestFilterAffectedApps_RefValueFiles(t *testing.T) {
 			Helm:    &cluster.ApplicationSourceHelm{ValueFiles: valueFiles},
 		}
 	}
+	// helmFileParamSource references a file in a ref source via a $<ref>/...
+	// fileParameter (--set-file), the other list ArgoCD resolves identically.
+	helmFileParamSource := func(paths ...string) cluster.ApplicationSource {
+		params := make([]cluster.HelmFileParameter, 0, len(paths))
+		for _, p := range paths {
+			params = append(params, cluster.HelmFileParameter{Name: "image.tag", Path: p})
+		}
+		return cluster.ApplicationSource{
+			RepoURL: "https://charts.example.com",
+			Chart:   "app",
+			Helm:    &cluster.ApplicationSourceHelm{FileParameters: params},
+		}
+	}
 	refSource := func(refPath string) cluster.ApplicationSource {
 		return cluster.ApplicationSource{
 			RepoURL: localURL,
@@ -244,12 +257,97 @@ func TestFilterAffectedApps_RefValueFiles(t *testing.T) {
 			want:         false,
 		},
 		{
-			name: "ref source with path prefix - affected",
+			// A $ref path resolves against the ref repository ROOT, never against
+			// the ref source's own Path - ArgoCD's getResolvedRefValueFile drops the
+			// $ref segment and resolves the remainder with the ref repo checkout as
+			// both appPath and repoRoot. So the file below is env/prod.yaml even
+			// though the ref source sits at config/.
+			name: "ref source with a path - value file is still root-relative",
 			app: testutil.TestAppMultiSource("my-app", "argocd", []cluster.ApplicationSource{
 				helmSource("$values/env/prod.yaml"),
 				refSource("config"),
 			}),
-			changedFiles: testutil.TestChangedFiles(nil, []string{"config/env/prod.yaml"}, nil),
+			changedFiles: testutil.TestChangedFiles(nil, []string{"env/prod.yaml"}, nil),
+			want:         true,
+		},
+		{
+			// A ref source that ALSO carries a Path is a renderable source in
+			// argocdf (isPureRef requires a Ref and neither Path nor Chart), so
+			// changes under that path match by ordinary path containment - not
+			// through $ref resolution. Worth pinning because it is why the
+			// root-relative fix above is invisible in this shape unless the value
+			// file lives outside the ref source's path.
+			name: "ref source with a path is itself path-matched",
+			app: testutil.TestAppMultiSource("my-app", "argocd", []cluster.ApplicationSource{
+				helmSource("$values/deep/prod.yaml"),
+				refSource("config"),
+			}),
+			changedFiles: testutil.TestChangedFiles(nil, []string{"config/deep/prod.yaml"}, nil),
+			want:         true,
+		},
+		// The cases below mirror the refusals the render-cache key asserts for this
+		// same resolution (TestComputeKeyBypassOnExternalRef and friends): the logic
+		// lives in two places, so both sides should state the same rules.
+		//
+		// Mutation-tested, and only two of them are load-bearing: deleting the
+		// ref-repo URL check fails "another repository", and checking only the first
+		// value file fails "second of several". The other three hold whichever guard
+		// is removed - an unresolvable reference trips several defenses at once (an
+		// unknown ref name yields a zero-value source whose empty RepoURL the URL
+		// check rejects; a missing path segment resolves to "." which no changed file
+		// equals) - so they document intent rather than pinning a line.
+		{
+			// A $ref pointing at ANOTHER repository cannot be satisfied by a file
+			// in the repo being diffed, whatever the paths look like.
+			name: "$ref into another repository - not affected",
+			app: testutil.TestAppMultiSource("my-app", "argocd", []cluster.ApplicationSource{
+				helmSource("$values/env/prod.yaml"),
+				{RepoURL: "https://github.com/other/repo", Ref: "values"},
+			}),
+			changedFiles: testutil.TestChangedFiles(nil, []string{"env/prod.yaml"}, nil),
+			want:         false,
+		},
+		{
+			// The $-prefix names a ref that this app does not declare; there is
+			// nothing to resolve against, so it must not fall through to a match.
+			name: "unknown $ref name - not affected",
+			app: testutil.TestAppMultiSource("my-app", "argocd", []cluster.ApplicationSource{
+				helmSource("$other/env/prod.yaml"),
+				refSource(""),
+			}),
+			changedFiles: testutil.TestChangedFiles(nil, []string{"env/prod.yaml"}, nil),
+			want:         false,
+		},
+		{
+			// "$values" with no path segment names no file.
+			name: "$ref without a path segment - not affected",
+			app: testutil.TestAppMultiSource("my-app", "argocd", []cluster.ApplicationSource{
+				helmSource("$values"),
+				refSource(""),
+			}),
+			changedFiles: testutil.TestChangedFiles(nil, []string{"values"}, nil),
+			want:         false,
+		},
+		{
+			// Traversal out of the ref repository resolves to a path that starts
+			// with "..", which no repo-relative changed file can equal - so it
+			// matches nothing rather than escaping upward.
+			name: "$ref traversal escapes the repo - not affected",
+			app: testutil.TestAppMultiSource("my-app", "argocd", []cluster.ApplicationSource{
+				helmSource("$values/../outside.yaml"),
+				refSource(""),
+			}),
+			changedFiles: testutil.TestChangedFiles(nil, []string{"outside.yaml"}, nil),
+			want:         false,
+		},
+		{
+			// Every value file is checked, not just the first.
+			name: "second of several value files matches - affected",
+			app: testutil.TestAppMultiSource("my-app", "argocd", []cluster.ApplicationSource{
+				helmSource("$values/env/dev.yaml", "$values/env/prod.yaml"),
+				refSource(""),
+			}),
+			changedFiles: testutil.TestChangedFiles(nil, []string{"env/prod.yaml"}, nil),
 			want:         true,
 		},
 		{
@@ -260,6 +358,48 @@ func TestFilterAffectedApps_RefValueFiles(t *testing.T) {
 			}),
 			changedFiles: testutil.TestChangedFiles([]string{"env/prod.yaml"}, nil, nil),
 			want:         true,
+		},
+		{
+			// fileParameters are resolved by ArgoCD through the SAME two branches
+			// as value files, so a $ref --set-file must select the app too. This
+			// case fails if the matcher iterates only ValueFiles.
+			name: "ref fileParameter changed - affected",
+			app: testutil.TestAppMultiSource("my-app", "argocd", []cluster.ApplicationSource{
+				helmFileParamSource("$values/env/version.txt"),
+				refSource(""),
+			}),
+			changedFiles: testutil.TestChangedFiles(nil, []string{"env/version.txt"}, nil),
+			want:         true,
+		},
+		{
+			// Both lists populated, only the fileParameter matches: guards the
+			// combined iteration rather than a first-list-wins shortcut.
+			name: "value files present but only the ref fileParameter matches - affected",
+			app: testutil.TestAppMultiSource("my-app", "argocd", []cluster.ApplicationSource{
+				func() cluster.ApplicationSource {
+					s := helmFileParamSource("$values/env/version.txt")
+					s.Helm.ValueFiles = []string{"$values/env/prod.yaml"}
+					return s
+				}(),
+				refSource(""),
+			}),
+			changedFiles: testutil.TestChangedFiles(nil, []string{"env/version.txt"}, nil),
+			want:         true,
+		},
+		{
+			// Mirrors the value-file guard: a ref source in a foreign repo maps
+			// to no file in the repo being diffed.
+			name: "ref fileParameter into another repository - not affected",
+			app: testutil.TestAppMultiSource("my-app", "argocd", []cluster.ApplicationSource{
+				helmFileParamSource("$values/env/version.txt"),
+				func() cluster.ApplicationSource {
+					s := refSource("")
+					s.RepoURL = "https://github.com/other/repo"
+					return s
+				}(),
+			}),
+			changedFiles: testutil.TestChangedFiles(nil, []string{"env/version.txt"}, nil),
+			want:         false,
 		},
 	}
 

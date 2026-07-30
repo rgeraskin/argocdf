@@ -39,11 +39,11 @@ Both are stripped of org-specific values. Search for placeholders and replace th
 
 The **Login to GHCR for helm** step is only needed if your Helm charts pull dependencies from a *private* OCI registry; delete it for public chart deps.
 
-### Classic (non-OCI) chart dependency repos need `--helm-add-repos`
+### Chart dependency repos need no priming
 
-`helm dependency build` never adds or refreshes classic HTTP(S) chart repositories — it requires their index to already be in the runner's helm cache, which on a fresh runner it never is. If any chart declares a dependency like `repository: https://cloudnative-pg.github.io/charts`, the base/target render fails with `no cached repository for <name> found` (or `no repository definition for <url>`). Pass `--helm-add-repos` (as both example workflows do) so argocdf registers and refreshes those repos itself before building dependencies. A repo URL that is already registered under any name is only refreshed, never re-added; only URLs the local helm config has never seen get a new (hash-named) entry. Either way the flag **mutates local helm state** — it refreshes index caches (which can change what version-range dependencies resolve to elsewhere) and can write new `repositories.yaml` entries — which is why it stays off by default and belongs on throwaway CI runners rather than developer machines.
+argocdf renders through ArgoCD's own repo-server code, which builds helm dependencies in an isolated temp helm home and registers the chart's dependency repositories there automatically. A fresh runner needs no `helm repo add` step, and nothing touches the runner's own helm config.
 
-One case it cannot fix: dependencies referencing a repo **alias** (`repository: "@stable"` / `alias:stable`). The chart carries no URL for an alias, so argocdf has nothing to register — such repos must be `helm repo add`-ed by name in a workflow step before argocdf runs.
+One exception: dependencies referencing a repo **alias** (`repository: "@stable"` / `alias:stable`). The chart carries no URL for an alias, so there is nothing to register automatically — the name must come through `--repo-creds`: an ArgoCD repository secret named `stable` (`cluster` mode), or a `helm repo add stable <url>` entry in the runner's helm config with `--repo-creds=local`. A plain `helm repo add` does nothing in `cluster` mode — the isolated helm home never reads the runner's config.
 
 ### Why `--base origin/main` + `fetch-depth: 0`
 
@@ -63,7 +63,5 @@ ARGOCDF_REPO_URL = "https://github.com/<your-org>/<your-repo>/"
 ARGOCDF_KUSTOMIZE_ENABLE_HELM = "true"
 ARGOCDF_KUSTOMIZE_LOAD_RESTRICTOR = "LoadRestrictionsNone"
 ```
-
-Note `--helm-add-repos` stays on the workflow's `run:` line, not in `[env]`: `.mise.toml` applies on developer machines too, and this flag mutates the local helm repository config.
 
 The workflow's `run:` line then only carries the per-run bits (`--base`, `--target`, `--file`, `--concurrency`).

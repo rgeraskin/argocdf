@@ -256,7 +256,7 @@ func (r *Runner) runOne(ctx context.Context, command, dir, content string) []str
 // by making the slice say exactly what the child will see, which is what the
 // tests below assert against.
 //
-// This is NOT the reason the argocd renderer scrubs HELM_*: there the inherited
+// This is NOT the reason the render engine scrubs HELM_*: there the inherited
 // values win because helm prefers its own HELM_* variables over the XDG_* ones
 // ArgoCD sets, and because ArgoCD never sets most of them (see
 // render.inheritedHelmEnvVars).

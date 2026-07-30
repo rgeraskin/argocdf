@@ -54,6 +54,15 @@ func resolveRepoOrBare(ctx context.Context, opts *RenderOptions, project, repoUR
 	return repo, nil
 }
 
+// isOCIChartRepo reports whether a chart source's repoURL refers to an OCI
+// registry. ArgoCD stores OCI helm repositories scheme-less (e.g.
+// "ghcr.io/org", with enableOCI set on the repository secret), so a chart
+// repoURL is OCI both with an explicit oci:// scheme and with no scheme at
+// all — http(s):// are the only classic chart-repository forms.
+func isOCIChartRepo(repoURL string) bool {
+	return strings.HasPrefix(repoURL, "oci://") || !strings.Contains(repoURL, "://")
+}
+
 // fetchRemoteChart materializes a source's remote chart as a local unpacked
 // directory through ArgoCD's chart client, wrapped in argocdf's persistent
 // chart cache (pinned versions only; a hit skips fetching — and auth —
@@ -61,9 +70,9 @@ func resolveRepoOrBare(ctx context.Context, opts *RenderOptions, project, repoUR
 // SHARED persistent cache (callers that mutate the chart must copy it first).
 // The returned cleanup must be called when the chart directory is no longer
 // needed; for cached charts it is a no-op.
-func (r *HelmRenderer) fetchRemoteChart(ctx context.Context, app *cluster.Application, source *cluster.ApplicationSource) (dir string, cached bool, cleanup func(), err error) {
+func fetchRemoteChart(ctx context.Context, opts *RenderOptions, app *cluster.Application, source *cluster.ApplicationSource) (dir string, cached bool, cleanup func(), err error) {
 	cacheDir, chartDir, hit, cacheEnabled := chartCacheDecision(
-		r.opts.ChartCacheDir, source.RepoURL, source.Chart, source.TargetRevision, dirExists,
+		opts.ChartCacheDir, source.RepoURL, source.Chart, source.TargetRevision, dirExists,
 	)
 	if cacheEnabled && hit {
 		return chartDir, true, func() {}, nil
@@ -75,35 +84,32 @@ func (r *HelmRenderer) fetchRemoteChart(ctx context.Context, app *cluster.Applic
 	default:
 	}
 
-	repo, err := resolveRepoOrBare(ctx, &r.opts, app.Spec.Project, source.RepoURL)
+	repo, err := resolveRepoOrBare(ctx, opts, app.Spec.Project, source.RepoURL)
 	if err != nil {
 		return "", false, nil, err
 	}
 	// The resolved repo's EnableOCI is authoritative; the scheme-less URL
 	// heuristic stays as the fallback for unconfigured repos.
 	enableOCI := repo.EnableOCI || isOCIChartRepo(source.RepoURL)
-	// Under the argocd engine, OCI credentials ride the engine's registry
-	// auth file instead of ArgoCD's `helm registry login` (which on macOS
-	// writes to the shared system keychain — see registryAuthFile). Recording
-	// them lazily here covers repos known only through ResolveRepo. Under
-	// --repo-creds=local there is no owned auth file: OCI auth is defined to
-	// ride the user's own registry config (the pierced HELM_REGISTRY_CONFIG),
-	// and inline username/password on an OCI-flavored entry — nothing `helm
-	// repo add` can produce — would reintroduce the login, so it is stripped
-	// the same way without seeding. The stripped copy makes ExtractChart skip
-	// its login/logout entirely; the helm pull then authenticates from the
-	// effective registry config. Failures are LOUD, per the
-	// no-anonymous-fallback contract above. The native engine without a
-	// pierced registry config keeps the client's own login flow (ambient helm
-	// environment).
+	// OCI credentials ride the engine's registry auth file instead of ArgoCD's
+	// `helm registry login` (which on macOS writes to the shared system
+	// keychain — see registryAuthFile). Recording them lazily here covers
+	// repos known only through ResolveRepo. Under --repo-creds=local there is
+	// no owned auth file: OCI auth is defined to ride the user's own registry
+	// config (the pierced HELM_REGISTRY_CONFIG), and inline username/password
+	// on an OCI-flavored entry — nothing `helm repo add` can produce — would
+	// reintroduce the login, so it is stripped the same way without seeding.
+	// The stripped copy makes ExtractChart skip its login/logout entirely; the
+	// helm pull then authenticates from the effective registry config.
+	// Failures are LOUD, per the no-anonymous-fallback contract above.
 	if enableOCI && repo.Username != "" && repo.Password != "" {
-		auth := r.opts.registryAuth
+		auth := opts.registryAuth
 		if auth != nil {
 			if err := auth.Ensure(repo.Repo, repo.Username, repo.Password); err != nil {
 				return "", false, nil, fmt.Errorf("failed to record registry credentials for %s: %w", source.RepoURL, err)
 			}
 		}
-		if auth != nil || r.opts.HelmRegistryConfig != "" {
+		if auth != nil || opts.HelmRegistryConfig != "" {
 			repo = repo.DeepCopy()
 			repo.Username = ""
 			repo.Password = ""

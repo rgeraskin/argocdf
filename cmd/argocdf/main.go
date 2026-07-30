@@ -65,12 +65,7 @@ var (
 	kustomizeLoadRestrictor string
 
 	// Helm options
-	helmSkipRefresh bool
-	helmAddRepos    bool
-	noAPIVersions   bool
-
-	// Render engine selection
-	renderer string
+	noAPIVersions bool
 
 	// Repository credential source
 	repoCreds string
@@ -113,6 +108,38 @@ func bindEnv(cmd *cobra.Command) error {
 		}
 	})
 	return bindErr
+}
+
+// removedEnvVars names ARGOCDF_* variables whose flags no longer exist, with the
+// reason the setting is gone.
+//
+// An unknown FLAG is rejected by cobra, loudly. An env var for a removed flag has
+// no such protection: bindEnv only visits flags that exist, so ARGOCDF_RENDERER
+// left in a CI job is read by nobody and the pipeline looks upgraded while its
+// configuration silently no longer applies. Say so once, per run.
+var removedEnvVars = []struct{ name, why string }{
+	{
+		"ARGOCDF_RENDERER",
+		"the native render pipeline is gone; every render goes through ArgoCD's repo-server code",
+	},
+	{
+		"ARGOCDF_HELM_ADD_REPOS",
+		"the engine registers a chart's dependency repositories itself, in an isolated helm home",
+	},
+	{
+		"ARGOCDF_HELM_SKIP_REFRESH",
+		"dependency builds use an isolated helm home, so there is no shared repo index to skip refreshing",
+	},
+}
+
+// warnRemovedEnvVars reports any set variable from removedEnvVars. An empty value
+// is treated as unset, matching bindEnv (viper's IsSet is false for empty).
+func warnRemovedEnvVars(logger *log.Logger) {
+	for _, v := range removedEnvVars {
+		if os.Getenv(v.name) != "" {
+			logger.Warn("Ignoring "+v.name+": the flag it set was removed in 0.5.0", "reason", v.why)
+		}
+	}
 }
 
 func main() {
@@ -201,9 +228,6 @@ Examples:
 
 	// Rendering flags
 	rootCmd.Flags().StringVar(&kubeVersion, "kube-version", "", "Kubernetes version for rendering (auto-detected)")
-	rootCmd.Flags().StringVar(&renderer, "renderer", config.DefaultRenderer,
-		"Render engine: 'native' (argocdf's own helm/kustomize pipeline) or 'argocd' "+
-			"(ArgoCD's repo-server code, for exact ArgoCD render parity)")
 	rootCmd.Flags().StringVar(&repoCreds, "repo-creds", config.DefaultRepoCreds,
 		"Repository credential source: 'cluster' (ArgoCD repository secrets from --argocd-namespace; "+
 			"read failures are fatal), 'local' (your helm config: registry logins and repositories.yaml "+
@@ -218,10 +242,6 @@ Examples:
 		"Load restrictor mode (e.g., 'LoadRestrictionsNone')")
 
 	// Helm options
-	rootCmd.Flags().BoolVar(&helmSkipRefresh, "helm-skip-refresh", true,
-		"Skip refreshing repository cache during helm dependency build (native renderer only)")
-	rootCmd.Flags().BoolVar(&helmAddRepos, "helm-add-repos", false,
-		"Make chart dependency repos resolvable before dependency build: refresh a matching existing entry, or helm repo add + update unknown URLs; mutates the local helm config/cache, intended for CI (native renderer only)")
 	rootCmd.Flags().BoolVar(&noAPIVersions, "no-api-versions", false,
 		"Do not pass cluster-discovered API versions to helm via --api-versions")
 
@@ -469,11 +489,11 @@ func (h klogHandler) WithGroup(name string) slog.Handler {
 //     unless --verbose keeps the full stream as a debug channel.
 //   - ArgoCD's exec tracer (util/exec) builds a FRESH logrus logger per
 //     command from ARGOCD_LOG_LEVEL/ARGOCD_LOG_FORMAT, unreachable by the
-//     hook above. BOTH engines reach it — the native engine through ArgoCD's
-//     chart client (chartfetch.go). Default it to text (JSON otherwise) and,
-//     without --verbose, to errors-only; explicit values are respected either
-//     way, so ARGOCD_LOG_LEVEL=info stays available as a render debug channel
-//     even in quiet runs.
+//     hook above (GenerateManifests and the chart client both exec through
+//     it). Default it to text (JSON otherwise) and, without --verbose, to
+//     errors-only; explicit values are respected either way, so
+//     ARGOCD_LOG_LEVEL=info stays available as a render debug channel even
+//     in quiet runs.
 //   - client-go logs through klog — e.g. the reflector reporting the EXPECTED
 //     watch cancellation when ArgoCD's settings informers shut down after
 //     credential loading. Real API failures surface as returned errors, so
@@ -533,6 +553,7 @@ func runMain(cmd *cobra.Command, args []string) error {
 	})
 
 	configureDependencyLogging(logger, logLevel == log.DebugLevel)
+	warnRemovedEnvVars(logger)
 
 	// Handle quiet flag (alias for --stdout none)
 	if quiet {
@@ -570,10 +591,7 @@ func runMain(cmd *cobra.Command, args []string) error {
 		KustomizeEnableHelm:     kustomizeEnableHelm,
 		KustomizeBuildOptions:   kustomizeBuildOptions,
 		KustomizeLoadRestrictor: kustomizeLoadRestrictor,
-		HelmSkipRefresh:         helmSkipRefresh,
-		HelmAddRepos:            helmAddRepos,
 		NoAPIVersions:           noAPIVersions,
-		Renderer:                renderer,
 		RepoCreds:               repoCreds,
 		NoCache:                 noCache,
 		CacheDir:                cacheDir,
@@ -598,16 +616,6 @@ func runMain(cmd *cobra.Command, args []string) error {
 	// Validate configuration
 	if err := cfg.Validate(); err != nil {
 		return err
-	}
-
-	// Explicitly set native-only helm flags do nothing under the argocd
-	// renderer; say so instead of silently ignoring them. bindEnv marks
-	// env-provided flags as Changed, so env values are covered too.
-	for _, warning := range cfg.NativeOnlyFlagWarnings(
-		cmd.Flags().Changed("helm-skip-refresh"),
-		cmd.Flags().Changed("helm-add-repos"),
-	) {
-		logger.Warn(warning)
 	}
 
 	logger.Info("Using repository URL", "repoURL", cfg.RepoURL)
