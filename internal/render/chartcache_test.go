@@ -5,20 +5,25 @@ import (
 	"testing"
 )
 
-func TestIsPinnedChartVersion(t *testing.T) {
-	tests := []struct {
-		version string
-		want    bool
-	}{
-		{"1.2.3", true},
-		{"v2.0.0", true},
-		{"", false},
-		{"HEAD", false},
-		{"*", false},
+// TestIsImmutableChartVersion pins the single exact-vs-mutable classification
+// BOTH caches share. The range rows are the ones that used to disagree: the
+// chart cache treated everything but ""/HEAD/* as pinned, so a constraint like
+// ^2.0.0 was cached forever while the version it resolves to moved.
+func TestIsImmutableChartVersion(t *testing.T) {
+	exact := []string{"1.2.3", "v2.0.0", "0.3.1-rc.1", "1.2.3+build.7", " 1.0.0 "}
+	mutable := []string{
+		"", "HEAD", "*", // "latest" spellings
+		"^2.0.0", "~1.2", ">=0.3.0", "1.x", "1.2.*", "1.2", // constraints helm resolves against the index
+		"1.2.3 - 1.4.0", "1.2.3 || 2.0.0",
 	}
-	for _, tt := range tests {
-		if got := isPinnedChartVersion(tt.version); got != tt.want {
-			t.Errorf("isPinnedChartVersion(%q) = %v, want %v", tt.version, got, tt.want)
+	for _, v := range exact {
+		if !IsImmutableChartVersion(v) {
+			t.Errorf("IsImmutableChartVersion(%q) = false, want true", v)
+		}
+	}
+	for _, v := range mutable {
+		if IsImmutableChartVersion(v) {
+			t.Errorf("IsImmutableChartVersion(%q) = true, want false", v)
 		}
 	}
 }

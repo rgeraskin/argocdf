@@ -187,6 +187,20 @@ func (c *Client) ResolvedContext() string {
 	return c.resolvedContext
 }
 
+// ClusterServer returns the API server URL this client talks to - the
+// coordinate the context name DEREFERENCES to. Cache scopes key on it rather
+// than on the context name, because a name is an alias local to one kubeconfig
+// file: two files can both define a "prod" pointing at different clusters, and
+// one file can repoint a name at a new cluster (kind recreations do exactly
+// that) - while the server endpoint is the identity ArgoCD itself keys cluster
+// secrets by. It is "" only before connect succeeded.
+func (c *Client) ClusterServer() string {
+	if c.restConfig == nil {
+		return ""
+	}
+	return c.restConfig.Host
+}
+
 // GVR is a helper type for GroupVersionResource.
 type GVR = schema.GroupVersionResource
 

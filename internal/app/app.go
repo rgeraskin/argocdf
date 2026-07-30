@@ -95,9 +95,24 @@ type App struct {
 	baseCommit     string
 	targetCommit   string
 
+	// helmRepoAliases are the name->URL mappings the active --repo-creds source
+	// provides. They belong in the render-cache key because helm resolves a
+	// `repository: "@name"` dependency through them - see
+	// rendercache.HelmRepoAlias.
+	helmRepoAliases []rendercache.HelmRepoAlias
+
 	// Render cache (nil when disabled for this run)
 	cache       *rendercache.Cache
 	kubeVersion string
+	// apiVersions is the discovered cluster API-version set handed to the
+	// renderer (nil when --no-api-versions). It is a render input charts branch
+	// on, so it participates in the render-cache key.
+	apiVersions []string
+	// repoCredsInstance identifies which INSTANCE of the credential source this
+	// run reads (cluster API server + ArgoCD namespace in cluster mode, else "");
+	// see credentialInstance. It scopes the chart cache and the render key so
+	// pointing the same mode at another cluster re-verifies instead of reusing.
+	repoCredsInstance string
 	// cacheHits/cacheMisses are incremented from parallel render goroutines and
 	// must be accessed atomically.
 	cacheHits   atomic.Int64
@@ -260,6 +275,17 @@ func (a *App) initialize(ctx context.Context) error {
 		}
 		a.logger.Debug("Discovered cluster API versions", "count", len(apiVersions))
 	}
+	// Kept on the App because the set is a render input (charts branch on
+	// .Capabilities.APIVersions.Has) and must participate in the render-cache
+	// key - a CRD installed on the same cluster, or the same repo diffed
+	// against another cluster, changes output the key would otherwise miss.
+	a.apiVersions = apiVersions
+
+	// The credential-source INSTANCE this run reads. Both caches scope by it
+	// (chart dir + render key) for the same reason they scope by MODE -
+	// pointing the same mode at another cluster is asking whether THAT
+	// cluster's credentials work.
+	a.repoCredsInstance = a.credentialInstanceFor(a.kubeClient)
 
 	// Create application service
 	a.appService = a.factory.CreateAppService(a.kubeClient)
@@ -313,8 +339,10 @@ func (a *App) initialize(ctx context.Context) error {
 			"helmRepos", len(creds.HelmRepos))
 	}
 
+	a.helmRepoAliases = helmRepoAliases(creds)
+
 	// Create renderer
-	a.renderer, err = a.factory.CreateRenderer(kubeVersion, apiVersions, creds)
+	a.renderer, err = a.factory.CreateRenderer(kubeVersion, apiVersions, creds, a.repoCredsInstance)
 	if err != nil {
 		return fmt.Errorf("failed to create renderer: %w", err)
 	}
@@ -867,6 +895,31 @@ func (a *App) helmLocalFilesAffected(source cluster.ApplicationSource, changedPa
 	return false
 }
 
+// helmRepoAliases extracts the name->URL mappings a credential source provides,
+// for the render-cache key.
+//
+// Only entries that CAN be referenced as `@name` are included: a nameless
+// repository is reachable only by URL, and an OCI-enabled one takes ArgoCD's
+// registry-login path instead of `helm repo add`, so neither participates in alias
+// resolution (util/helm/helm.go:85-109). Credentials are deliberately dropped -
+// they decide whether a fetch is permitted, never what it returns, and hashing
+// them would invalidate the cache on a password rotation that changes no manifest.
+func helmRepoAliases(creds *cluster.RepoCredentials) []rendercache.HelmRepoAlias {
+	if creds == nil {
+		return nil
+	}
+
+	aliases := make([]rendercache.HelmRepoAlias, 0, len(creds.HelmRepos))
+	for _, repo := range creds.HelmRepos {
+		if repo == nil || repo.Name == "" || repo.EnableOCI {
+			continue
+		}
+		aliases = append(aliases, rendercache.HelmRepoAlias{Name: repo.Name, URL: repo.Repo})
+	}
+
+	return aliases
+}
+
 // processApplications processes all affected applications with recursion.
 func (a *App) processApplications(ctx context.Context, apps []cluster.Application) ([]*types.AppDiff, error) {
 	results := make(map[string]*types.AppDiff)
@@ -1314,6 +1367,17 @@ func (a *App) renderBranch(
 	return manifests, sourceType, nil
 }
 
+// credentialInstanceFor derives the credential-source instance from the
+// connected client: the cluster API SERVER plus the ArgoCD namespace in
+// cluster mode, empty otherwise. Extracted so the choice of coordinate is
+// unit-tested (TestCredentialInstanceKeysOnServerNotContextName): the server
+// is what a context name dereferences to, and passing ResolvedContext here
+// instead would reintroduce the alias collision - two kubeconfigs both naming
+// a "prod" - that the test exists to make unrepeatable.
+func (a *App) credentialInstanceFor(client *cluster.Client) string {
+	return credentialInstance(a.cfg.RepoCreds, client.ClusterServer(), a.cfg.ArgoCDNamespace)
+}
+
 // renderCacheKey computes the cache key for rendering app at the given commit.
 // It returns ok=false whenever caching should be bypassed for this render
 // (cache disabled or a local source tree hash unavailable).
@@ -1334,7 +1398,11 @@ func (a *App) renderCacheKey(app *cluster.Application, commit string) (string, b
 			KustomizeBuildOptions:   a.cfg.KustomizeBuildOptions,
 			KustomizeLoadRestrictor: a.cfg.KustomizeLoadRestrictor,
 		},
-		Commit: commit,
+		Commit:            commit,
+		RepoCredsMode:     a.cfg.RepoCreds,
+		RepoCredsInstance: a.repoCredsInstance,
+		APIVersions:       a.apiVersions,
+		HelmRepoAliases:   a.helmRepoAliases,
 		ResolveTree: func(commit, path string) (string, bool) {
 			h, terr := a.repo.TreeHash(commit, path)
 			if terr != nil {

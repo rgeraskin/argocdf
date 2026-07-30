@@ -369,21 +369,10 @@ dependencies:
 	}
 }
 
-// TestExactSemver pins the exact-vs-range version classification.
-func TestExactSemver(t *testing.T) {
-	exact := []string{"0.3.0", "v1.2.3", "0.3.1-1.5.2", "1.2.3+build.7", " 1.0.0 "}
-	ranges := []string{"", "^1.2.3", "~1.2", ">=0.3.0", "1.x", "1.2.*", "1.2", "1.2.3 - 1.4.0", "1.2.3 || 2.0.0", "*"}
-	for _, v := range exact {
-		if !exactSemver(v) {
-			t.Errorf("exactSemver(%q) = false, want true", v)
-		}
-	}
-	for _, v := range ranges {
-		if exactSemver(v) {
-			t.Errorf("exactSemver(%q) = true, want false", v)
-		}
-	}
-}
+// The exact-vs-range version classification now lives in
+// render.IsImmutableChartVersion (one predicate for both caches) and is pinned
+// by render's TestIsImmutableChartVersion; the ComputeKey tests here exercise
+// it through dependency hermeticity and remote-chart bypasses.
 
 // TestComputeKeyMixedLockAndUnlockedSources pins per-source hermeticity in one
 // app: a multi-source app combining a locked chart with an unlocked exact-pin
@@ -521,5 +510,173 @@ func TestComputeKeyRelativeValueFilesUnchanged(t *testing.T) {
 		if !askedFor(asked, want) {
 			t.Errorf("entry %q hashed something other than %q; asked for %v", entry, want, asked)
 		}
+	}
+}
+
+// TestComputeKeyChangesWithHelmRepoAlias: a helm repository alias is a render
+// INPUT, not just an access mechanism. ArgoCD runs `helm repo add <name> <url>` for
+// every non-OCI repo in the active credential list before a dependency build, so a
+// chart depending on `repository: "@myrepo"` resolves that name from the list. Point
+// the name somewhere else - by switching --repo-creds, or by editing one source -
+// and the same commit renders different dependency content.
+func TestComputeKeyChangesWithHelmRepoAlias(t *testing.T) {
+	base := func(aliases ...HelmRepoAlias) KeyInput {
+		in := baseInput()
+		in.HelmRepoAliases = aliases
+		return in
+	}
+
+	none := mustKey(t, base())
+	one := mustKey(t, base(HelmRepoAlias{Name: "myrepo", URL: "https://charts.example.test"}))
+	moved := mustKey(t, base(HelmRepoAlias{Name: "myrepo", URL: "https://mirror.example.test"}))
+	renamed := mustKey(t, base(HelmRepoAlias{Name: "other", URL: "https://charts.example.test"}))
+
+	if none == one {
+		t.Error("adding an alias did not change the key")
+	}
+	if one == moved {
+		t.Error("pointing the same alias at another URL did not change the key - the stale-render case this exists for")
+	}
+	if one == renamed {
+		t.Error("renaming an alias did not change the key")
+	}
+}
+
+// The key must not depend on the order a credential source happened to list its
+// repositories, or two runs of the same configuration would miss each other.
+func TestComputeKeyHelmRepoAliasOrderIndependent(t *testing.T) {
+	a := HelmRepoAlias{Name: "alpha", URL: "https://a.example.test"}
+	b := HelmRepoAlias{Name: "beta", URL: "https://b.example.test"}
+
+	in1 := baseInput()
+	in1.HelmRepoAliases = []HelmRepoAlias{a, b}
+	in2 := baseInput()
+	in2.HelmRepoAliases = []HelmRepoAlias{b, a}
+
+	if mustKey(t, in1) != mustKey(t, in2) {
+		t.Error("key depends on alias order; the same configuration would not hit its own entries")
+	}
+}
+
+// TestComputeKeyChangesWithRepoCredsMode pins the verification workflow: render
+// with --repo-creds local, then re-run with cluster to check that ArgoCD's own
+// credentials can produce the same manifests. If the second run is served from the
+// first one's cache it answers "yes" without ever consulting the cluster, and the
+// merge fails on a repository ArgoCD cannot reach.
+//
+// The alias fingerprint cannot cover this: a missing OCI registry, a credential
+// template with no repository name, and a wrong password all leave the alias list
+// identical - which is why the mode is hashed as well as the mappings.
+func TestComputeKeyChangesWithRepoCredsMode(t *testing.T) {
+	keyFor := func(mode string) string {
+		in := baseInput()
+		in.RepoCredsMode = mode
+		// Identical mappings on both sides: the point is that the MODE alone must
+		// separate them, since that is all that differs in the failing scenario.
+		in.HelmRepoAliases = []HelmRepoAlias{{Name: "stable", URL: "https://charts.example.test"}}
+		return mustKey(t, in)
+	}
+
+	cluster, local, none := keyFor("cluster"), keyFor("local"), keyFor("none")
+	if cluster == local {
+		t.Error("local and cluster renders share a key: a cluster-creds verification run would be answered by the local run")
+	}
+	if cluster == none || local == none {
+		t.Error("--repo-creds none shares a key with a credentialed mode")
+	}
+	if keyFor("cluster") != cluster {
+		t.Error("the same mode produced two different keys")
+	}
+}
+
+// chartInput builds a remote-chart KeyInput at the given target revision.
+func chartInput(revision string) KeyInput {
+	return KeyInput{
+		AppName:   "chart-app",
+		Namespace: "argocd",
+		Spec: &cluster.ApplicationSpec{
+			Source: &cluster.ApplicationSource{
+				RepoURL:        "https://charts.example.com",
+				Chart:          "nginx",
+				TargetRevision: revision,
+			},
+		},
+		KubeVersion: "1.29.0",
+		Commit:      "deadbeef",
+	}
+}
+
+// TestComputeKeyMutableChartRevisionBypasses pins the remote-chart half of the
+// immutability rule (GPT review #1): a chart whose target revision helm
+// resolves against the mutable registry index - HEAD, "*", empty, or a
+// constraint range - can produce different content over time under IDENTICAL
+// key inputs, so it must never be cached. Before this rule the key hashed the
+// literal revision string: render a chart at HEAD, publish a newer chart, and
+// the same Git comparison kept returning the previous manifests forever.
+func TestComputeKeyMutableChartRevisionBypasses(t *testing.T) {
+	for _, rev := range []string{"HEAD", "", "*", "^2.0.0", "~1.2", "1.x", "1.2", ">=1.0.0"} {
+		if _, ok := ComputeKey(chartInput(rev)); ok {
+			t.Errorf("revision %q: ComputeKey ok = true, want bypass (mutable revisions must not be cached)", rev)
+		}
+	}
+	// Exact versions stay cacheable - including prerelease/build metadata.
+	for _, rev := range []string{"1.2.3", "v1.2.3", "0.3.1-rc.1", "1.2.3+build.7"} {
+		mustKey(t, chartInput(rev))
+	}
+}
+
+// TestComputeKeyAPIVersions pins the API-version-set rules (GPT review #2):
+// the set is a render input (.Capabilities.APIVersions.Has), so membership
+// changes must miss, while discovery ORDER and duplicates are not render
+// inputs and must not thrash the cache. Nil and empty both mean "helm gets no
+// --api-versions" (the --no-api-versions toggle) and hash identically.
+func TestComputeKeyAPIVersions(t *testing.T) {
+	withAPIVersions := func(vs []string) KeyInput {
+		in := baseInput()
+		in.APIVersions = vs
+		return in
+	}
+
+	base := mustKey(t, withAPIVersions([]string{"batch/v1", "cert-manager.io/v1"}))
+
+	if mustKey(t, withAPIVersions([]string{"cert-manager.io/v1", "batch/v1"})) != base {
+		t.Error("discovery order changed the key")
+	}
+	if mustKey(t, withAPIVersions([]string{"batch/v1", "batch/v1", "cert-manager.io/v1"})) != base {
+		t.Error("a duplicate entry changed the key")
+	}
+	if mustKey(t, withAPIVersions([]string{"batch/v1"})) == base {
+		t.Error("removing an API version (a CRD uninstalled) did not change the key")
+	}
+	if mustKey(t, withAPIVersions(nil)) == base {
+		t.Error("disabling API versions (--no-api-versions) did not change the key")
+	}
+	if mustKey(t, withAPIVersions(nil)) != mustKey(t, withAPIVersions([]string{})) {
+		t.Error("nil and empty API-version sets hash differently")
+	}
+}
+
+// TestComputeKeyRepoCredsInstance pins the instance half of credential-source
+// keying (GPT review #4): two clusters both read with --repo-creds=cluster are
+// two credential sources, and verifying cluster B's credentials must not be
+// answered from entries cluster A rendered. The instance sits BESIDE the mode
+// in the key, so local/none (empty instance) behave exactly as before.
+func TestComputeKeyRepoCredsInstance(t *testing.T) {
+	withInstance := func(inst string) KeyInput {
+		in := baseInput()
+		in.RepoCredsMode = "cluster"
+		in.RepoCredsInstance = inst
+		return in
+	}
+
+	prod := mustKey(t, withInstance("prod-cluster\x00argocd"))
+	if mustKey(t, withInstance("staging-cluster\x00argocd")) == prod {
+		t.Error("two contexts share a render-cache key")
+	}
+	if mustKey(t, withInstance("prod-cluster\x00argocd-team")) == prod {
+		t.Error("two ArgoCD namespaces share a render-cache key")
+	}
+	if mustKey(t, withInstance("prod-cluster\x00argocd")) != prod {
+		t.Error("instance keying is not deterministic")
 	}
 }

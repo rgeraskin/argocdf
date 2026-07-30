@@ -4,18 +4,29 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"path/filepath"
+	"regexp"
+	"strings"
 )
 
-// isPinnedChartVersion reports whether a target revision names an immutable
-// chart version safe to cache persistently. Empty, "HEAD" and "*" mean "latest"
-// (mutable) and must always be re-fetched.
-func isPinnedChartVersion(version string) bool {
-	switch version {
-	case "", "HEAD", "*":
-		return false
-	default:
-		return true
-	}
+// immutableChartVersionRe matches a single exact semver version (optional v
+// prefix, optional prerelease/build metadata). Anything else - operators
+// (^ ~ > <), wildcards (x, *), hyphen ranges, ORs, partial versions like
+// "1.2", HEAD, empty - is a CONSTRAINT that helm resolves against the mutable
+// repository index, so the version it selects can move between runs.
+var immutableChartVersionRe = regexp.MustCompile(`^v?\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$`)
+
+// IsImmutableChartVersion reports whether a chart target revision names ONE
+// exact, immutable version. It is the single predicate both caches share: the
+// chart-download cache below only persists immutable versions, and the render
+// cache (rendercache.ComputeKey) bypasses itself for a remote chart whose
+// revision is mutable - a "HEAD", "*" or "^2.0.0" chart can resolve to
+// different content over time under identical key inputs, so a hit could
+// serve manifests from a chart that no longer exists. Two predicates is how
+// the caches previously DISAGREED: the chart cache treated only ""/HEAD/* as
+// mutable (so a range like ^2.0.0 was wrongly cached forever), while the
+// render cache keyed the literal revision string and never bypassed at all.
+func IsImmutableChartVersion(version string) bool {
+	return immutableChartVersionRe.MatchString(strings.TrimSpace(version))
 }
 
 // chartCacheKey is the content-independent identity of a pinned remote chart:
@@ -51,7 +62,7 @@ func chartCacheDecision(
 	baseDir, repoURL, chart, version string,
 	dirExists func(string) bool,
 ) (cacheDir, chartDir string, hit, enabled bool) {
-	if baseDir == "" || !isPinnedChartVersion(version) {
+	if baseDir == "" || !IsImmutableChartVersion(version) {
 		return "", "", false, false
 	}
 	cacheDir, chartDir = chartCachePaths(baseDir, repoURL, chart, version)

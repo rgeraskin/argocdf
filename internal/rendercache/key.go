@@ -6,7 +6,8 @@ import (
 	"encoding/json"
 	"io"
 	"path"
-	"regexp"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -27,7 +28,43 @@ import (
 // flags) is gone — everything renders through ArgoCD's repo-server code, and
 // $ref value files resolve against the ref repository ROOT (ArgoCD semantics)
 // instead of joining the ref source's Path.
-const SchemaVersion = "rendercache-v3"
+//
+// v4: keys hash the credential SOURCE (--repo-creds) and the helm repository
+// ALIASES it provides — see KeyInput.RepoCredsMode and KeyInput.HelmRepoAliases.
+//
+// v5: three soundness inputs joined the key. A remote chart whose target
+// revision is not one exact immutable version (HEAD, "*", a range like ^2.0.0)
+// now BYPASSES the cache — the same predicate the chart-download cache uses —
+// because such a revision can resolve to different content over time under
+// identical key inputs. The discovered cluster API-version set is hashed
+// (charts branch on .Capabilities.APIVersions.Has, so a CRD installed or a
+// cluster switched changes render output the old key could not see; this also
+// keys the --no-api-versions toggle, which empties the set). And the
+// credential-source INSTANCE is hashed alongside the mode: two clusters both
+// read with --repo-creds=cluster are different credential sources, and
+// verifying cluster B's credentials must not be answered from entries cluster
+// A rendered — see KeyInput.RepoCredsInstance.
+const SchemaVersion = "rendercache-v5"
+
+// HelmRepoAlias is one `name → URL` mapping that helm dependency resolution can
+// reach through a `repository: "@name"` (or `alias:`) entry in a chart's
+// Chart.yaml.
+//
+// It participates in the cache key because it decides WHAT gets rendered, not
+// merely whether the fetch is allowed. ArgoCD registers every non-OCI repository
+// from the active credential list with `helm repo add <name> <url>` before running
+// a dependency build (util/helm/helm.go:105), so a chart depending on `@myrepo`
+// resolves that name from the list argocdf handed over. Two --repo-creds sources
+// that define the same name with different URLs - or one source edited to point a
+// name elsewhere - render different dependency content at the SAME commit. Without
+// this in the key, the cache serves whichever render came first.
+//
+// Only the mapping is hashed, never credentials: usernames, passwords and
+// certificates gate access and cannot change the manifests.
+type HelmRepoAlias struct {
+	Name string
+	URL  string
+}
 
 // KeyOptions holds the render-relevant options that affect rendered output and
 // therefore must participate in the cache key.
@@ -61,6 +98,47 @@ type KeyInput struct {
 	// implement this with git.NormalizeRepoURL. When nil, every ref is treated
 	// as external (conservative bypass).
 	SameRepo func(repoURL string) bool
+	// RepoCredsMode is the --repo-creds source this render used ("cluster",
+	// "local", "none").
+	//
+	// It is in the key for a reason that has nothing to do with output identity:
+	// people switch modes to ASK A QUESTION. Render locally with `local`, then
+	// re-run with `cluster` to check that ArgoCD's own credentials can produce the
+	// same manifests - and if the second run is served from the first one's cache,
+	// it answers "yes" without ever consulting the cluster's credentials. The merge
+	// then fails on a repository ArgoCD cannot reach.
+	//
+	// Hashing the mode makes any switch a miss, so the question gets asked. The
+	// alias fingerprint below cannot substitute for it: a missing OCI registry, a
+	// credential template with no repository name, or a repository whose password
+	// is simply wrong all leave the alias list identical.
+	//
+	// It costs almost nothing. The cache is per-machine
+	// (os.UserCacheDir()/argocdf), so CI and a laptop never share entries anyway,
+	// and a single machine switching modes is doing exactly the verification above -
+	// where a fresh render is the point.
+	RepoCredsMode string
+	// RepoCredsInstance identifies WHICH instance of the credential source this
+	// render read, one level inside RepoCredsMode: for `cluster` it is the
+	// resolved kube context plus the ArgoCD namespace, for `local` and `none` it
+	// is empty (the user's helm config is machine-global, and `none` has no
+	// credentials to instantiate). It exists for the same verification reason as
+	// the mode: pointing the SAME mode at another cluster is asking whether THAT
+	// cluster's credentials work, and answering from the first cluster's entries
+	// reports success for a repository the second one cannot reach.
+	RepoCredsInstance string
+	// APIVersions is the cluster API-version set handed to helm via
+	// --api-versions (empty when --no-api-versions disabled discovery). It is a
+	// render input a chart can branch on (.Capabilities.APIVersions.Has), so
+	// installing a CRD — or switching clusters at an identical Kubernetes
+	// version — must miss. The key sorts and deduplicates the set, so discovery
+	// order cannot thrash the cache.
+	APIVersions []string
+	// HelmRepoAliases are the named helm repositories the render can resolve
+	// `repository: "@name"` dependencies through, in any order (the key sorts
+	// them). Callers pass the aliases their --repo-creds source produced; see
+	// HelmRepoAlias for why a mapping is a render input.
+	HelmRepoAliases []HelmRepoAlias
 	// ReadFile returns the content of a repo-relative file at the given commit.
 	// It is used to inspect a local chart's Chart.yaml dependencies for cache
 	// soundness (see the hermeticity note in ComputeKey). It must return
@@ -124,6 +202,37 @@ func ComputeKey(in KeyInput) (string, bool) {
 		in.Options.KustomizeLoadRestrictor,
 	)
 
+	// Helm repository aliases, sorted so the key does not depend on the order the
+	// credential source happened to list them, and length-prefixed so "no aliases"
+	// cannot collide with a list whose entries hash to the same bytes.
+	aliases := make([]HelmRepoAlias, len(in.HelmRepoAliases))
+	copy(aliases, in.HelmRepoAliases)
+	sort.Slice(aliases, func(i, j int) bool {
+		if aliases[i].Name != aliases[j].Name {
+			return aliases[i].Name < aliases[j].Name
+		}
+		return aliases[i].URL < aliases[j].URL
+	})
+	writeField("repocreds", in.RepoCredsMode)
+	writeField("repocredsinstance", in.RepoCredsInstance)
+	writeField("repoaliases", strconv.Itoa(len(aliases)))
+	for _, a := range aliases {
+		writeField("repoalias", a.Name, a.URL)
+	}
+
+	// The API-version set, sorted and deduplicated so the key reflects the SET
+	// (discovery order is not a render input), and length-prefixed like the
+	// aliases. Nil and empty are identical on purpose: both mean "helm gets no
+	// --api-versions".
+	apiVersions := make([]string, 0, len(in.APIVersions))
+	apiVersions = append(apiVersions, in.APIVersions...)
+	sort.Strings(apiVersions)
+	apiVersions = slices.Compact(apiVersions)
+	writeField("apiversions", strconv.Itoa(len(apiVersions)))
+	for _, v := range apiVersions {
+		writeField("apiversion", v)
+	}
+
 	sources := in.Spec.GetSources()
 
 	// Build a lookup of ref name -> ref source so $<ref>/... value files can be
@@ -140,8 +249,16 @@ func ComputeKey(in KeyInput) (string, bool) {
 		src := sources[i]
 
 		if src.Chart != "" {
-			// Remote chart: identity is repo + chart + target revision. The
-			// chart version is immutable, so this is sufficient.
+			// Remote chart: identity is repo + chart + target revision — but only
+			// when that revision names ONE immutable version. HEAD, "*", "" and
+			// constraint ranges (^2.0.0, 1.x) resolve against the mutable registry
+			// index, so the same key inputs can legitimately render differently
+			// after the publisher moves the resolved version; such renders bypass.
+			// Same predicate as the chart-download cache, so the two caches cannot
+			// disagree about what "pinned" means.
+			if !render.IsImmutableChartVersion(src.TargetRevision) {
+				return "", false
+			}
 			writeField("chart", src.RepoURL, src.Chart, src.TargetRevision)
 			continue
 		}
@@ -324,19 +441,11 @@ func chartDepsHermetic(
 		return false
 	}
 	for _, d := range chart.Dependencies {
-		if !exactSemver(d.Version) {
+		// Same immutability predicate as remote-chart revisions and the
+		// chart-download cache: one definition of "exact version" everywhere.
+		if !render.IsImmutableChartVersion(d.Version) {
 			return false
 		}
 	}
 	return true
-}
-
-// exactSemverRe matches a single exact semver version (optional v prefix,
-// optional prerelease/build metadata). Anything else — operators (^ ~ > <),
-// wildcards (x, *), hyphen ranges, ORs, empty — is a range.
-var exactSemverRe = regexp.MustCompile(`^v?\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$`)
-
-// exactSemver reports whether the version string pins one exact version.
-func exactSemver(version string) bool {
-	return exactSemverRe.MatchString(strings.TrimSpace(version))
 }

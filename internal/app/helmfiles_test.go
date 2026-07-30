@@ -3,11 +3,13 @@ package app
 import (
 	"testing"
 
+	argoappv1 "github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
 	"github.com/charmbracelet/log"
 
 	"github.com/rgeraskin/argocdf/internal/cluster"
 	"github.com/rgeraskin/argocdf/internal/config"
 	"github.com/rgeraskin/argocdf/internal/git"
+	"github.com/rgeraskin/argocdf/internal/rendercache"
 	"github.com/rgeraskin/argocdf/internal/testutil"
 )
 
@@ -199,5 +201,44 @@ func TestHelmLocalFilesAffected_RemoteChart(t *testing.T) {
 	}
 	if !a.helmLocalFilesAffected(gitRootSource, []string{"vals.yaml"}) {
 		t.Error("helmLocalFilesAffected() = false for a git source at the repo root, want true")
+	}
+}
+
+// TestHelmRepoAliases covers what goes into the cache key from a credential
+// source: the name->URL mappings that helm dependency resolution can reach as
+// `@name`, and nothing else.
+func TestHelmRepoAliases(t *testing.T) {
+	if got := helmRepoAliases(nil); got != nil {
+		t.Errorf("helmRepoAliases(nil) = %v, want nil (--repo-creds none loads no credentials)", got)
+	}
+
+	creds := &cluster.RepoCredentials{
+		HelmRepos: []*argoappv1.Repository{
+			// Referenceable as @stable: this is the mapping that matters.
+			{Name: "stable", Repo: "https://charts.example.test", Username: "u", Password: "p"},
+			// Nameless: reachable only by URL, so no alias resolves through it.
+			{Repo: "https://nameless.example.test"},
+			// OCI-enabled entries take ArgoCD's registry-login path instead of
+			// `helm repo add`, so they register no name either.
+			{Name: "oci-repo", Repo: "ghcr.io/org/charts", EnableOCI: true},
+			nil,
+		},
+	}
+
+	got := helmRepoAliases(creds)
+	want := []rendercache.HelmRepoAlias{{Name: "stable", URL: "https://charts.example.test"}}
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Errorf("helmRepoAliases() = %v, want %v", got, want)
+	}
+
+	// Credentials must never reach the key: rotating a password changes no
+	// manifest, and hashing it would throw the cache away for nothing.
+	rotated := &cluster.RepoCredentials{
+		HelmRepos: []*argoappv1.Repository{
+			{Name: "stable", Repo: "https://charts.example.test", Username: "u", Password: "different"},
+		},
+	}
+	if r := helmRepoAliases(rotated); len(r) != 1 || r[0] != want[0] {
+		t.Errorf("credentials leaked into the alias list: %v", r)
 	}
 }

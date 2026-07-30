@@ -30,7 +30,7 @@ func TestCreateRendererErrorReturnsUntypedNil(t *testing.T) {
 	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "missing"))
 
 	f := NewFactory(&config.Config{}, log.New(io.Discard))
-	r, err := f.CreateRenderer("v1.30.0", nil, nil)
+	r, err := f.CreateRenderer("v1.30.0", nil, nil, "")
 	if err == nil {
 		t.Fatal("CreateRenderer() succeeded; the TMPDIR trick no longer forces a construction failure")
 	}
@@ -331,18 +331,18 @@ func TestChartCacheDirScopedByCredentialSource(t *testing.T) {
 	logger := log.New(nil)
 	logger.SetLevel(log.FatalLevel)
 
-	dirFor := func(mode, noCache string) string {
+	dirFor := func(mode, noCache, instance string) string {
 		f := NewFactory(&config.Config{
 			CacheDir:  base,
 			RepoCreds: mode,
 			NoCache:   noCache,
 		}, logger)
-		return f.chartCacheDir()
+		return f.chartCacheDir(instance)
 	}
 
-	cluster := dirFor(config.RepoCredsCluster, config.NoCacheNone)
-	local := dirFor(config.RepoCredsLocal, config.NoCacheNone)
-	none := dirFor(config.RepoCredsNone, config.NoCacheNone)
+	cluster := dirFor(config.RepoCredsCluster, config.NoCacheNone, "")
+	local := dirFor(config.RepoCredsLocal, config.NoCacheNone, "")
+	none := dirFor(config.RepoCredsNone, config.NoCacheNone, "")
 
 	if cluster == local || cluster == none || local == none {
 		t.Errorf("credential sources share a chart cache dir: cluster=%q local=%q none=%q", cluster, local, none)
@@ -352,20 +352,138 @@ func TestChartCacheDirScopedByCredentialSource(t *testing.T) {
 	}
 	// An unset source must not produce a differently-scoped directory than the
 	// default it resolves to, or a run before WithDefaults would use its own cache.
-	if dirFor("", config.NoCacheNone) != cluster {
-		t.Errorf("empty --repo-creds scoped to %q, want the default %q", dirFor("", config.NoCacheNone), cluster)
+	if dirFor("", config.NoCacheNone, "") != cluster {
+		t.Errorf("empty --repo-creds scoped to %q, want the default %q", dirFor("", config.NoCacheNone, ""), cluster)
 	}
 
 	// Disabled: "" is what tells the renderer to skip the cache entirely.
-	if got := dirFor(config.RepoCredsCluster, config.NoCacheCharts); got != "" {
+	if got := dirFor(config.RepoCredsCluster, config.NoCacheCharts, ""); got != "" {
 		t.Errorf("--no-cache=charts still returned a chart dir: %q", got)
 	}
-	if got := dirFor(config.RepoCredsCluster, config.NoCacheAll); got != "" {
+	if got := dirFor(config.RepoCredsCluster, config.NoCacheAll, ""); got != "" {
 		t.Errorf("--no-cache=all still returned a chart dir: %q", got)
 	}
 	// ...while disabling only the render cache must leave downloads reusable.
-	if got := dirFor(config.RepoCredsCluster, config.NoCacheRender); got == "" {
+	if got := dirFor(config.RepoCredsCluster, config.NoCacheRender, ""); got == "" {
 		t.Error("--no-cache=render also disabled the chart cache")
+	}
+}
+
+// TestChartCacheDirScopedByCredentialInstance: one level inside `cluster` mode,
+// two clusters are two credential sources. A chart downloaded while reading
+// cluster A's repository Secrets must not satisfy a run whose purpose is
+// checking that cluster B's Secrets can fetch it - the same false-positive
+// verification the mode split fixes, recurring one step in.
+func TestChartCacheDirScopedByCredentialInstance(t *testing.T) {
+	base := t.TempDir()
+	logger := log.New(nil)
+	logger.SetLevel(log.FatalLevel)
+	f := NewFactory(&config.Config{CacheDir: base, RepoCreds: config.RepoCredsCluster}, logger)
+
+	prod := credentialInstance(config.RepoCredsCluster, "https://prod.example:6443", "argocd")
+	staging := credentialInstance(config.RepoCredsCluster, "https://staging.example:6443", "argocd")
+	otherNS := credentialInstance(config.RepoCredsCluster, "https://prod.example:6443", "argocd-team")
+
+	dirProd := f.chartCacheDir(prod)
+	if dirProd == f.chartCacheDir(staging) {
+		t.Error("two clusters share a chart cache dir")
+	}
+	if dirProd == f.chartCacheDir(otherNS) {
+		t.Error("two ArgoCD namespaces share a chart cache dir")
+	}
+	if f.chartCacheDir(prod) != dirProd {
+		t.Error("instance segment is not deterministic")
+	}
+	// The instance nests INSIDE the mode scope, so `cache clean` semantics and
+	// the charts/<mode> layout stay intact.
+	if filepath.Base(filepath.Dir(dirProd)) != config.RepoCredsCluster {
+		t.Errorf("instance dir %q is not nested under the mode scope", dirProd)
+	}
+	// The segment stays filesystem-safe and identifiable for server URLs (and
+	// any hostile input); the trailing hash keeps sanitized collisions apart.
+	weird := credentialInstance(config.RepoCredsCluster, "https://10.0.0.5:6443/api", "argocd")
+	weirdAlias := credentialInstance(config.RepoCredsCluster, "https://10.0.0.5:6443_api", "argocd")
+	if seg := filepath.Base(f.chartCacheDir(weird)); strings.ContainsAny(seg, "/:\x00") {
+		t.Errorf("instance segment %q is not filesystem-safe", seg)
+	}
+	if f.chartCacheDir(weird) == f.chartCacheDir(weirdAlias) {
+		t.Error("sanitization collision merged two instances (the hash suffix must keep them apart)")
+	}
+
+	// local and none have no instance dimension - and credentialInstance is
+	// what guarantees it, so a caller cannot accidentally scope them.
+	if credentialInstance(config.RepoCredsLocal, "https://prod.example:6443", "argocd") != "" {
+		t.Error("local mode grew an instance identity")
+	}
+	if credentialInstance(config.RepoCredsNone, "https://prod.example:6443", "argocd") != "" {
+		t.Error("none mode grew an instance identity")
+	}
+}
+
+// TestCredentialInstanceKeysOnServerNotContextName is the collision pin from
+// review: a context NAME is an alias local to one kubeconfig file, so two
+// files can both define a "prod" pointing at different clusters - and keying
+// the credential instance on the name would let cluster A's cache answer for
+// cluster B (or a recreated kind cluster reuse its predecessor's). The
+// instance must come from what the name DEREFERENCES to: the API server. Two
+// real Clients are built from two kubeconfigs (construction never dials), so
+// this pins the wiring, not just the pure function.
+func TestCredentialInstanceKeysOnServerNotContextName(t *testing.T) {
+	writeKubeconfig := func(server string) string {
+		t.Helper()
+		p := filepath.Join(t.TempDir(), "kubeconfig")
+		if err := os.WriteFile(p, []byte(`apiVersion: v1
+kind: Config
+clusters:
+- cluster: {server: "`+server+`"}
+  name: prod
+contexts:
+- context: {cluster: prod}
+  name: prod
+current-context: prod
+`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	clientA, err := cluster.NewClient(writeKubeconfig("https://cluster-a.example:6443"), "prod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientB, err := cluster.NewClient(writeKubeconfig("https://cluster-b.example:6443"), "prod")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Same alias, same resolved context name - the coordinate that used to
+	// feed the instance and is proven here to be worthless as an identity.
+	if clientA.ResolvedContext() != "prod" || clientB.ResolvedContext() != "prod" {
+		t.Fatalf("resolved contexts = %q, %q; the collision setup requires both to be \"prod\"",
+			clientA.ResolvedContext(), clientB.ResolvedContext())
+	}
+
+	// Through the App's own derivation (the call site initialize uses), so a
+	// refactor that feeds ResolvedContext back in fails HERE, not only in a
+	// live two-cluster setup.
+	app := &App{cfg: &config.Config{RepoCreds: config.RepoCredsCluster, ArgoCDNamespace: "argocd"}}
+	instA := app.credentialInstanceFor(clientA)
+	instB := app.credentialInstanceFor(clientB)
+	if instA == "" || instB == "" {
+		t.Fatalf("instance empty: A=%q B=%q (ClusterServer not populated from the kubeconfig?)", instA, instB)
+	}
+	if instA == instB {
+		t.Error("two clusters behind the same context name share a credential instance - the cache would answer across clusters")
+	}
+
+	// And the inverse: one cluster reached through two kubeconfig files (or
+	// names) is ONE instance, so the cache is not split by the alias either.
+	clientA2, err := cluster.NewClient(writeKubeconfig("https://cluster-a.example:6443"), "prod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if app.credentialInstanceFor(clientA2) != instA {
+		t.Error("the same cluster from a second kubeconfig produced a different instance")
 	}
 }
 
