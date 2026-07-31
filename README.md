@@ -235,7 +235,11 @@ Private chart repositories and registries authenticate through one of three cred
 
 In both credentialed modes, remote chart downloads run through ArgoCD's own chart client (the repo-server's fetch path), so username/password, TLS client certificates (from the repository secret in `cluster` mode, from `certFile`/`keyFile` entries in `local` mode), `insecure`, and — in `cluster` mode — proxy settings from the resolved repository all apply. Custom CA bundles are not supported: ArgoCD serves those from its certificate database, which a CLI run does not have. Credentials also authenticate git clones of external repositories referenced by multi-source apps and apps-of-apps children (HTTPS basic auth and bearer tokens; SSH remotes keep using your ambient git configuration).
 
-Two credential-adjacent notes: a **chart-cache hit skips fetching — and therefore authentication — entirely** (pinned chart versions are immutable, so the cached content is identical; use `--no-cache` to force a re-fetch), and switching `--repo-creds` never invalidates the cache.
+Two credential-adjacent notes: a **chart-cache hit skips fetching — and therefore authentication — entirely** (pinned chart versions are immutable, so the cached content is identical; use `--no-cache` to force a re-fetch), and the render cache keys on **both** the credential source and the **name → URL mappings** it provides, so switching `--repo-creds` re-renders instead of answering from the previous mode's entries. That matters for the obvious workflow: render with `local`, then re-run with `cluster` to check ArgoCD's own credentials can produce the same manifests. Served from cache, the second run would answer "yes" without consulting the cluster at all, and the merge would fail on a repository ArgoCD cannot reach. The mappings are keyed separately because helm resolves a `repository: "@myrepo"` chart dependency through them, so a name pointed elsewhere changes what gets rendered even within one mode. Credentials themselves are never hashed - rotating a password changes no manifest.
+
+The chart cache is scoped by credential source for the same reason, so a **mode switch really does re-fetch**: charts downloaded under `local` live in their own directory and cannot answer for `cluster`. The cost is one re-download per mode for content that is byte-identical, which is what makes the verification real rather than reported.
+
+What remains, within a single mode: a chart already downloaded is served without contacting the registry, so a credential that expired since the download stays invisible. `--no-cache=charts` forces the download for apps that re-render anyway, and `--no-cache` forces everything. Local charts pulling helm dependencies always re-fetch on a re-render, since each render builds them in a fresh isolated helm home.
 
 ### Output Flags
 
@@ -409,10 +413,12 @@ A working adapter under continuous test lives in the e2e suite: [`scripts/lint-k
 
 ### Cache Flags
 
-| Flag          | Description                                | Default                    |
-|---------------|--------------------------------------------|----------------------------|
-| `--no-cache`  | Disable the persistent render cache        | `false`                    |
-| `--cache-dir` | Base directory for render and chart caches | `<user cache dir>/argocdf` |
+| Flag                    | Description                                                                        | Default                    |
+|-------------------------|------------------------------------------------------------------------------------|----------------------------|
+| `--no-cache[=layer]`    | Disable persistent caches: `all` (bare flag), `render`, or `charts`                 | both caches enabled        |
+| `--cache-dir`           | Base directory for render and chart caches                                         | `<user cache dir>/argocdf` |
+
+`--no-cache` disables both caches, as it always has. The value form disables one: `--no-cache=render` re-renders everything while keeping downloaded charts (the fast way to re-check manifests), and `--no-cache=charts` re-downloads charts for the apps that re-render anyway. Attach the value with `=`; a space-separated word would be read as the next argument. To re-enable caching when an environment variable or a wrapper script disabled it, write `--no-cache=false` - the boolean spellings still work, so `ARGOCDF_NO_CACHE=true` in existing scripts keeps its meaning too. (`--no-cache=none` is accepted as well, but it reads as a double negative, so the help text does not suggest it.)
 
 ## Environment Variables
 

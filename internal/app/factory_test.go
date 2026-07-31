@@ -188,7 +188,7 @@ current-context: offline
 		RepoPath:       repoDir,
 		KubeVersion:    "v1.30.0",
 		NoAPIVersions:  true,
-		NoCache:        true,
+		NoCache:        config.NoCacheAll,
 		RepoCreds:      config.RepoCredsNone,
 		StdoutFormat:   "none",
 		// Writer creation fails AFTER the renderer exists: the parent
@@ -317,5 +317,79 @@ func TestCreateLintRunnerWithoutClient(t *testing.T) {
 	}
 	if got, ok := runner.Env["ARGOCDF_CONTEXT"]; ok {
 		t.Errorf("ARGOCDF_CONTEXT = %q, want it absent when no client resolved a context", got)
+	}
+}
+
+// TestChartCacheDirScopedByCredentialSource: the chart cache is keyed by chart and
+// version, which are credential-independent - so without a per-source directory a
+// chart downloaded with local credentials would satisfy a run whose purpose is
+// checking that the CLUSTER's credentials can fetch it. The render cache keys on the
+// mode for the same reason; a miss there would otherwise be followed by a fetch that
+// never happened.
+func TestChartCacheDirScopedByCredentialSource(t *testing.T) {
+	base := t.TempDir()
+	logger := log.New(nil)
+	logger.SetLevel(log.FatalLevel)
+
+	dirFor := func(mode, noCache string) string {
+		f := NewFactory(&config.Config{
+			CacheDir:  base,
+			RepoCreds: mode,
+			NoCache:   noCache,
+		}, logger)
+		return f.chartCacheDir()
+	}
+
+	cluster := dirFor(config.RepoCredsCluster, config.NoCacheNone)
+	local := dirFor(config.RepoCredsLocal, config.NoCacheNone)
+	none := dirFor(config.RepoCredsNone, config.NoCacheNone)
+
+	if cluster == local || cluster == none || local == none {
+		t.Errorf("credential sources share a chart cache dir: cluster=%q local=%q none=%q", cluster, local, none)
+	}
+	if filepath.Base(cluster) != config.RepoCredsCluster {
+		t.Errorf("chart cache dir %q is not scoped by the credential source", cluster)
+	}
+	// An unset source must not produce a differently-scoped directory than the
+	// default it resolves to, or a run before WithDefaults would use its own cache.
+	if dirFor("", config.NoCacheNone) != cluster {
+		t.Errorf("empty --repo-creds scoped to %q, want the default %q", dirFor("", config.NoCacheNone), cluster)
+	}
+
+	// Disabled: "" is what tells the renderer to skip the cache entirely.
+	if got := dirFor(config.RepoCredsCluster, config.NoCacheCharts); got != "" {
+		t.Errorf("--no-cache=charts still returned a chart dir: %q", got)
+	}
+	if got := dirFor(config.RepoCredsCluster, config.NoCacheAll); got != "" {
+		t.Errorf("--no-cache=all still returned a chart dir: %q", got)
+	}
+	// ...while disabling only the render cache must leave downloads reusable.
+	if got := dirFor(config.RepoCredsCluster, config.NoCacheRender); got == "" {
+		t.Error("--no-cache=render also disabled the chart cache")
+	}
+}
+
+// TestCreateRenderCacheRespectsLayers pins the other half of the split.
+func TestCreateRenderCacheRespectsLayers(t *testing.T) {
+	logger := log.New(nil)
+	logger.SetLevel(log.FatalLevel)
+
+	for _, tc := range []struct {
+		noCache string
+		wantNil bool
+	}{
+		{config.NoCacheNone, false},
+		{config.NoCacheCharts, false}, // charts off, renders still cached
+		{config.NoCacheRender, true},
+		{config.NoCacheAll, true},
+	} {
+		f := NewFactory(&config.Config{CacheDir: t.TempDir(), NoCache: tc.noCache}, logger)
+		cache, err := f.CreateRenderCache()
+		if err != nil {
+			t.Fatalf("--no-cache=%s: %v", tc.noCache, err)
+		}
+		if (cache == nil) != tc.wantNil {
+			t.Errorf("--no-cache=%s: cache nil = %v, want %v", tc.noCache, cache == nil, tc.wantNil)
+		}
 	}
 }

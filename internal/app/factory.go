@@ -94,24 +94,44 @@ func (f *Factory) baseCacheDir() (string, error) {
 }
 
 // chartCacheDir returns the directory for the remote chart download cache, or
-// "" when caching is disabled (--no-cache) or the base dir cannot be resolved.
+// "" when the chart cache is disabled (--no-cache=all|charts) or the base dir
+// cannot be resolved.
+//
+// The directory is SCOPED BY CREDENTIAL SOURCE. A chart already downloaded under
+// one --repo-creds source must not satisfy a run whose whole point is checking that
+// another source can fetch it: render locally with `local`, re-run with `cluster`
+// to see whether ArgoCD's own credentials work, and a shared chart directory would
+// serve the chart without contacting the registry - reporting success for a
+// registry ArgoCD cannot reach. The render cache keys on the mode for the same
+// reason; without this, its miss would still be followed by a fetch that never
+// happened.
+//
+// The cost is a re-download per mode (and per mode a copy on disk) for charts that
+// are byte-identical. That is the price of the verification being real, it is
+// bounded by the cache's own GC, and `argocdf cache clean` removes every scope at
+// once.
 func (f *Factory) chartCacheDir() string {
-	if f.config.NoCache {
+	if !f.config.ChartCacheEnabled() {
 		return ""
 	}
 	base, err := f.baseCacheDir()
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(base, "charts")
+	mode := f.config.RepoCreds
+	if mode == "" {
+		mode = config.DefaultRepoCreds
+	}
+
+	return filepath.Join(base, "charts", mode)
 }
 
-// CreateRenderCache creates the persistent render cache, or returns nil when
-// caching is disabled via --no-cache. When the cache directory cannot be
+// CreateRenderCache creates the persistent render cache, or returns nil when it is
+// disabled (--no-cache=all|render). When the cache directory cannot be
 // prepared it returns an error; callers degrade to normal rendering. Best-effort
 // garbage collection runs inline at creation to bound the cache by age and size.
 func (f *Factory) CreateRenderCache() (*rendercache.Cache, error) {
-	if f.config.NoCache {
+	if !f.config.RenderCacheEnabled() {
 		return nil, nil
 	}
 

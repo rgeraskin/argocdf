@@ -135,7 +135,12 @@ type Config struct {
 	RepoCreds string
 
 	// Render cache options
-	NoCache bool // Disable the persistent render cache
+
+	// NoCache selects which persistent caches are disabled: NoCacheAll,
+	// NoCacheRender, NoCacheCharts or NoCacheNone (the default - both enabled).
+	// Read it through RenderCacheEnabled/ChartCacheEnabled rather than comparing
+	// directly, so a new layer cannot be missed at one call site.
+	NoCache string
 	// CacheDir is the base cache directory holding the render cache (render/)
 	// and the downloaded-chart cache (charts/). Empty = os.UserCacheDir()/argocdf.
 	CacheDir string

@@ -8,6 +8,8 @@ import (
 
 	"github.com/charmbracelet/log"
 	"github.com/spf13/cobra"
+
+	"github.com/rgeraskin/argocdf/internal/config"
 )
 
 // The breaking 0.5.0 namespace change relies on pflag's StringSlice splitting
@@ -108,6 +110,54 @@ func TestWarnRemovedEnvVars(t *testing.T) {
 
 		if buf.Len() != 0 {
 			t.Errorf("unexpected output: %s", buf.String())
+		}
+	})
+}
+
+// TestBindEnvNoCacheLayer: --no-cache carries an optional VALUE now, so its
+// environment variable must be validated rather than coerced. A typo in
+// ARGOCDF_NO_CACHE that silently left the caches enabled would be the worst
+// outcome - the run would look cache-free and quietly reuse entries.
+func TestBindEnvNoCacheLayer(t *testing.T) {
+	newCmd := func(target *string) *cobra.Command {
+		cmd := &cobra.Command{Use: "argocdf"}
+		cmd.Flags().Var(config.NewNoCacheFlag(target), "no-cache", "")
+		cmd.Flags().Lookup("no-cache").NoOptDefVal = config.NoCacheAll
+		return cmd
+	}
+
+	t.Run("layer from the environment", func(t *testing.T) {
+		t.Setenv("ARGOCDF_NO_CACHE", "render")
+		target := config.NoCacheNone
+		if err := bindEnv(newCmd(&target)); err != nil {
+			t.Fatal(err)
+		}
+		if target != config.NoCacheRender {
+			t.Errorf("target = %q, want %q", target, config.NoCacheRender)
+		}
+	})
+
+	t.Run("legacy boolean still means all", func(t *testing.T) {
+		// ARGOCDF_NO_CACHE=true predates the layers and appears in CI configs.
+		t.Setenv("ARGOCDF_NO_CACHE", "true")
+		target := config.NoCacheNone
+		if err := bindEnv(newCmd(&target)); err != nil {
+			t.Fatal(err)
+		}
+		if target != config.NoCacheAll {
+			t.Errorf("target = %q, want %q", target, config.NoCacheAll)
+		}
+	})
+
+	t.Run("invalid layer is a startup error", func(t *testing.T) {
+		t.Setenv("ARGOCDF_NO_CACHE", "manifests")
+		target := config.NoCacheNone
+		err := bindEnv(newCmd(&target))
+		if err == nil {
+			t.Fatal("bindEnv accepted an invalid layer")
+		}
+		if !strings.Contains(err.Error(), "ARGOCDF_NO_CACHE") {
+			t.Errorf("error does not name the variable: %v", err)
 		}
 	})
 }

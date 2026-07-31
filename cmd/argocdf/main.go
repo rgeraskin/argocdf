@@ -71,7 +71,7 @@ var (
 	repoCreds string
 
 	// Render cache options
-	noCache  bool
+	noCache  = config.NoCacheNone
 	cacheDir string
 
 	// Lint options
@@ -281,8 +281,13 @@ Examples:
 		"Marker id for the markdown PR-comment upsert marker (default: <!-- argocdf-diff -->)")
 
 	// Render cache flags
-	rootCmd.Flags().BoolVar(&noCache, "no-cache", false,
-		"Disable the persistent render cache")
+	// --no-cache takes an OPTIONAL layer: bare (the historical spelling) disables
+	// both caches, a value disables one. NoOptDefVal is what makes the value
+	// optional, and it means the value must be attached with "=" (--no-cache=render);
+	// pflag would read a space-separated word as the next argument.
+	rootCmd.Flags().Var(config.NewNoCacheFlag(&noCache), "no-cache",
+		"Disable persistent caches: all (the default when given without a value), render, or charts; --no-cache=false re-enables both")
+	rootCmd.Flags().Lookup("no-cache").NoOptDefVal = config.NoCacheAll
 	rootCmd.Flags().StringVar(&cacheDir, "cache-dir", "",
 		"Base cache directory for render and chart caches (default: <user cache dir>/argocdf)")
 
