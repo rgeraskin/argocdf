@@ -241,6 +241,21 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("repository path is required")
 	}
 
+	// The flag and env paths validate at parse time (NoCacheFlag.Set), but a
+	// programmatic caller - a test harness, a future subcommand - can assign the
+	// field directly. RenderCacheEnabled/ChartCacheEnabled answer with "!=", so an
+	// unrecognized value silently leaves BOTH caches on: the failure direction that
+	// makes a run look cache-free while it reuses entries. Reject it here instead.
+	// An empty field is the unset state and keeps both caches, which is the default;
+	// only the FLAG spells "both off" as the empty string, and ParseNoCache maps that
+	// to NoCacheAll before it ever reaches a Config.
+	switch c.NoCache {
+	case "", NoCacheNone, NoCacheAll, NoCacheRender, NoCacheCharts:
+	default:
+		return fmt.Errorf("invalid cache layer %q: want %s, %s, %s or %s",
+			c.NoCache, NoCacheAll, NoCacheRender, NoCacheCharts, NoCacheNone)
+	}
+
 	// Verify repo path exists
 	info, err := os.Stat(c.RepoPath)
 	if err != nil {

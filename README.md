@@ -239,6 +239,8 @@ Two credential-adjacent notes: a **chart-cache hit skips fetching — and theref
 
 The chart cache is scoped by credential source for the same reason, so a **mode switch really does re-fetch**: charts downloaded under `local` live in their own directory and cannot answer for `cluster`. The cost is one re-download per mode for content that is byte-identical, which is what makes the verification real rather than reported.
 
+Note the chart cache has no garbage collection - only the render cache is age- and size-bounded - so `charts/` grows until `argocdf cache clean` removes it, and the per-mode split multiplies that. Entries written by versions before the scope existed are unreachable and cleared by the same command.
+
 What remains, within a single mode: a chart already downloaded is served without contacting the registry, so a credential that expired since the download stays invisible. `--no-cache=charts` forces the download for apps that re-render anyway, and `--no-cache` forces everything. Local charts pulling helm dependencies always re-fetch on a re-render, since each render builds them in a fresh isolated helm home.
 
 ### Output Flags

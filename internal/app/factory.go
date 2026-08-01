@@ -107,9 +107,16 @@ func (f *Factory) baseCacheDir() (string, error) {
 // happened.
 //
 // The cost is a re-download per mode (and per mode a copy on disk) for charts that
-// are byte-identical. That is the price of the verification being real, it is
-// bounded by the cache's own GC, and `argocdf cache clean` removes every scope at
-// once.
+// are byte-identical - the price of the verification being real.
+//
+// It is NOT bounded by garbage collection, and this comment used to claim otherwise:
+// rendercache.Cache.GC walks the render/ entries only, and nothing prunes charts/.
+// So chart-cache growth is bounded only by `argocdf cache clean`, which removes every
+// scope at once, and the per-mode split multiplies what accumulates (up to one copy
+// per credential source). Entries written before the scope existed sit at
+// charts/<sha>/ and are now unreachable - never read, never evicted, removed by that
+// same clean. A chart-cache GC over charts/*/* (age and size, mirroring the render
+// one, sweeping the legacy layout) is the fix; until then this says what is true.
 func (f *Factory) chartCacheDir() string {
 	if !f.config.ChartCacheEnabled() {
 		return ""

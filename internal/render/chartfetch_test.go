@@ -3,6 +3,7 @@ package render
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -508,5 +509,78 @@ func TestCopyChartToTempDir(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(src, "Chart.lock")); !os.IsNotExist(err) {
 		t.Error("mutating the private copy leaked into the source directory")
+	}
+}
+
+// TestRedactChartTempPaths: a failed chart pull surfaces helm's argv, including the
+// temp destination ArgoCD's client created. That path is gone by the time anyone
+// reads the report - and for argocdf a report is usually a PR comment, so leaving it
+// in rewrites the comment on every re-run.
+func TestRedactChartTempPaths(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "helm pull argv from a real failure",
+			in: "failed to get command args to log: `helm pull oci://reg.test/charts/app --version 1.0.0 " +
+				"--destination /var/folders/xy/T/3f2b1c4d-1a2b-3c4d-5e6f-7a8b9c0d1e2f` failed exit status 1",
+			want: "failed to get command args to log: `helm pull oci://reg.test/charts/app --version 1.0.0 " +
+				"--destination (temp dir)` failed exit status 1",
+		},
+		{
+			name: "several paths in one message",
+			in: "cp /tmp/3f2b1c4d-1a2b-3c4d-5e6f-7a8b9c0d1e2f/app " +
+				"/tmp/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/dst",
+			want: "cp (temp dir)/app (temp dir)/dst",
+		},
+		{
+			// Everything actionable must survive: the registry, chart, version and
+			// the underlying cause are what a reader needs.
+			name: "the diagnosis is untouched",
+			in:   `Get "https://reg.test/v2/charts/app/manifests/1.0.0": unauthorized`,
+			want: `Get "https://reg.test/v2/charts/app/manifests/1.0.0": unauthorized`,
+		},
+		{
+			// A UUID that is not a path component stays: it could be meaningful.
+			name: "bare uuid is not a path",
+			in:   "request 3f2b1c4d-1a2b-3c4d-5e6f-7a8b9c0d1e2f failed",
+			want: "request 3f2b1c4d-1a2b-3c4d-5e6f-7a8b9c0d1e2f failed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := redactChartTempPaths(tt.in); got != tt.want {
+				t.Errorf("redactChartTempPaths()\n got: %s\nwant: %s", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestChartFetchErrorKeepsChain: the redaction must not flatten the cause. Wrapping
+// with %s would have rendered identically while silently breaking errors.Is/As for
+// anything under ExtractChart - a future retry-on-timeout would compile and simply
+// never match.
+func TestChartFetchErrorKeepsChain(t *testing.T) {
+	sentinel := errors.New("boom")
+	cause := fmt.Errorf("helm pull --destination /tmp/3f2b1c4d-1a2b-3c4d-5e6f-7a8b9c0d1e2f: %w", sentinel)
+	err := &chartFetchError{chart: "app", repoURL: "reg.test/charts", cause: cause}
+
+	if !errors.Is(err, sentinel) {
+		t.Error("errors.Is could not reach the cause through the chart-fetch error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "(temp dir)") {
+		t.Errorf("temp path not redacted in Error(): %s", msg)
+	}
+	if strings.Contains(msg, "3f2b1c4d") {
+		t.Errorf("Error() still carries the temp path: %s", msg)
+	}
+	for _, want := range []string{"app", "reg.test/charts", "boom"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("Error() dropped %q: %s", want, msg)
+		}
 	}
 }

@@ -111,3 +111,35 @@ func TestCacheLayerHelpers(t *testing.T) {
 		}
 	}
 }
+
+// TestValidateRejectsUnknownCacheLayer closes the gap between the two entry points:
+// the flag and env paths validate at parse time, but a programmatic caller assigning
+// Config.NoCache directly used to get BOTH caches silently enabled for a typo - the
+// worst failure direction, since the run looks cache-free while reusing entries.
+func TestValidateRejectsUnknownCacheLayer(t *testing.T) {
+	dir := t.TempDir()
+	cfgWith := func(layer string) *Config {
+		return &Config{RepoPath: dir, NoCache: layer}
+	}
+
+	// Validate() also checks the repository, which a bare temp dir fails - so the
+	// assertion is about the cache-layer check specifically, not about Validate
+	// succeeding.
+	for _, ok := range []string{"", NoCacheNone, NoCacheAll, NoCacheRender, NoCacheCharts} {
+		if err := cfgWith(ok).Validate(); err != nil && strings.Contains(err.Error(), "cache layer") {
+			t.Errorf("Validate() rejected the valid layer %q: %v", ok, err)
+		}
+	}
+	// Case and whitespace variants are exactly what a hand-assigned field gets wrong;
+	// ParseNoCache tolerates them, a raw field assignment does not go through it.
+	for _, bad := range []string{"Render", "charts ", "manifests", "yes"} {
+		err := cfgWith(bad).Validate()
+		if err == nil {
+			t.Errorf("Validate() accepted %q", bad)
+			continue
+		}
+		if !strings.Contains(err.Error(), NoCacheRender) {
+			t.Errorf("error for %q does not name the valid layers: %v", bad, err)
+		}
+	}
+}
