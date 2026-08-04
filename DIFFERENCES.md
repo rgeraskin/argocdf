@@ -9,7 +9,7 @@ This document outlines the key implementation differences between `argocdf` (thi
 | **Where rendering happens** | Dedicated `argocd-repo-server` pod with timeout (90s default) | In-process, same machine as CLI                                                                                                                                                       |
 | **Caching**                 | Aggressive caching with commit SHA as key; Redis-backed       | Persistent file-based caches: content-addressed render cache (keyed by spec, options, and git tree/blob hashes) plus a download cache for pinned remote charts; `--no-cache` disables |
 | **Parallel execution**      | Parallel Helm manifest generation (v3.0+)                     | Parallel rendering within each wave via `--concurrency` (default `min(4, NumCPU)`); discovery between waves is single-threaded                                                        |
-| **Timeout handling**        | Configurable via `ARGOCD_EXEC_TIMEOUT`                        | No configurable timeout; SIGINT/SIGTERM cancel in-flight renders via context                                                                                                          |
+| **Timeout handling**        | Configurable via `ARGOCD_EXEC_TIMEOUT`                        | Same `ARGOCD_EXEC_TIMEOUT` (it is ArgoCD's own exec code doing the tool invocations); SIGINT/SIGTERM additionally cancel in-flight renders via context                                |
 | **Repository clone**        | Maintains local clone, reused across requests                 | Renders from ephemeral worktrees of the local clone; external `$ref` repos are cloned fresh per render                                                                                |
 
 ArgoCD's repo-server is designed for scale - it caches manifests, handles concurrent requests, and isolates manifest generation from the controller. argocdf runs everything in a single process which is fine for a preview tool but wouldn't scale for production.
@@ -92,77 +92,33 @@ IgnoredFields: map[string]bool{
 
 ## 5. Helm Rendering
 
-| Aspect                 | ArgoCD                                           | argocdf                                                                                                                                                                                                              |
-|------------------------|--------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| **Version bundled**    | Specific Helm version bundled in container image | Uses system `helm` binary                                                                                                                                                                                            |
-| **API versions**       | Uses `--api-versions` from cluster capabilities  | ✅ Same — discovered from the cluster and passed via `--api-versions` (opt out with `--no-api-versions`), plus sanitized `--kube-version`. Per-source `helm.kubeVersion`/`helm.apiVersions` overrides are not honored |
-| **Namespace handling** | Full namespace resolution with cluster defaults  | Basic namespace flags                                                                                                                                                                                                |
-| **Hooks**              | Filters Helm hooks during rendering              | No hook filtering                                                                                                                                                                                                    |
-| **Pass credentials**   | Supports `--pass-credentials` for private repos  | ✅ Same — `spec.source.helm.passCredentials` is passed to chart fetching, exactly as the repo-server does                                                                                                             |
+Since 0.5.0 argocdf renders through ArgoCD's own repo-server code (`reposerver/repository.GenerateManifests`, the `argocd app diff --local` path), so the Helm OPTION TRANSLATION is not a reimplementation with gaps — it is the same code: `--include-crds` by default, `skipCrds`, `skipTests`, `skipSchemaValidation`, parameters/`--set-string` coercion via `forceString`, `fileParameters`, inline `values`, `valuesObject`, `$ref` value files, release-name and namespace handling, `ARGOCD_APP_*` build-env substitution, `.argocd-source*.yaml` overrides, and per-source `helm.kubeVersion`/`helm.apiVersions` overrides all behave as the linked ArgoCD (v3.3.x) behaves, structurally.
 
-### Missing Helm features:
+What actually differs:
 
-- Helm hook filtering (`helm.sh/hook` annotations)
-- Skip CRDs option (`--skip-crds`)
+| Aspect                | ArgoCD                                                 | argocdf                                                                                                                                       |
+|-----------------------|--------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------|
+| **Helm binary**       | Specific version bundled in the repo-server image      | The system `helm` on PATH — output can differ between helm versions exactly as it can between differently-versioned repo-servers              |
+| **Helm environment**  | The repo-server pod's isolated environment             | An isolated per-render temp helm home built by ArgoCD's code, with inherited `HELM_*` env vars scrubbed so the user's machine cannot leak in  |
+| **Cluster versions**  | `--kube-version`/`--api-versions` from the destination | Discovered from the connected cluster (`--kube-version` override, `--no-api-versions` opt-out) — the destination cluster is not consulted     |
+| **Hooks in output**   | Rendered manifests include hooks; SYNC filters them    | Same rendered output; argocdf diffs it and never syncs, so hook filtering is out of scope by design                                           |
 
 ## 6. Kustomize Rendering
 
-| Aspect                                                | ArgoCD                                    | argocdf                                                     |
-|-------------------------------------------------------|-------------------------------------------|-------------------------------------------------------------|
-| **NamePrefix/NameSuffix**                             | Full support                              | ✅ Supported (via `kustomize edit`)                          |
-| **Images override**                                   | Full support                              | ✅ Supported (via `kustomize edit set image`)                |
-| **Replicas**                                          | Full support                              | ✅ Supported (via `kustomize edit set replicas`)             |
-| **CommonLabels**                                      | Full support with force/without-selector  | ✅ Supported (via `kustomize edit add label`)                |
-| **CommonAnnotations**                                 | Full support with force                   | ✅ Supported (via `kustomize edit add annotation`)           |
-| **Namespace**                                         | Full support                              | ✅ Supported (via `kustomize edit set namespace`)            |
-| **Components**                                        | Full support                              | ✅ Supported (via `kustomize edit add component`)            |
-| **Patches**                                           | Full support                              | ✅ Supported (direct kustomization.yaml modification)        |
-| **`--enable-helm`**                                   | Configurable globally or per-app          | ✅ Supported via `--kustomize-enable-helm` CLI flag          |
-| **Build options**                                     | Configurable via `kustomize.buildOptions` | ✅ Supported via `--kustomize-build-options` CLI flag        |
-| **Load restrictor**                                   | Configurable                              | ✅ Supported via `--kustomize-load-restrictor` CLI flag      |
-| **`kustomize.version`** (per-app binary version)      | Supported via configured tool versions    | ❌ Not supported — always uses the system `kustomize` binary |
-| **`kustomize.kubeVersion` / `kustomize.apiVersions`** | Passed through to Helm inflation          | ❌ Not supported                                             |
-| **`ignoreMissingComponents`**                         | Supported                                 | ❌ Not supported                                             |
+Kustomize sources render through the same ArgoCD repo-server code path as Helm ones: every `spec.source.kustomize` field the linked ArgoCD honors — namePrefix/nameSuffix, images, replicas, commonLabels/commonAnnotations (with their force/without-selector variants), namespace, components, patches, `ignoreMissingComponents`, `kubeVersion`/`apiVersions` for Helm inflation — is applied by ArgoCD's own translation, not by an argocdf reimplementation. Source-type detection is likewise ArgoCD's (explicit tool config first, then filesystem discovery), identically for single- and multi-source apps.
 
-### Implementation approach:
+What actually differs:
 
-argocdf uses `kustomize edit` commands to apply Application-level overrides before running `kustomize build`, matching ArgoCD's approach. When overrides are present, the repository tree is first copied to a temp directory and edits are applied there — the user's checkout and the render worktrees are never modified.
-
-Source-type detection also matches ArgoCD's repo-server: explicit tool config (`helm:`, `kustomize:`, `directory:`) takes precedence, otherwise the source path is inspected (`Chart.yaml` → Helm, kustomization file → Kustomize, else plain directory). This applies identically to single- and multi-source apps.
-
-```yaml
-# Fully supported via Application spec:
-spec:
-  source:
-    kustomize:
-      namePrefix: "prod-"
-      nameSuffix: "-v2"
-      images:
-        - nginx:1.21
-      replicas:
-        - name: deployment
-          count: 3
-      commonLabels:
-        app: myapp
-      commonAnnotations:
-        team: platform
-      namespace: production
-      components:
-        - ../components/monitoring
-      patches:
-        - patch: |-
-            - op: replace
-              path: /spec/replicas
-              value: 5
-          target:
-            kind: Deployment
-```
+| Aspect                                           | ArgoCD                                                       | argocdf                                                                                                                |
+|--------------------------------------------------|--------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------|
+| **Kustomize binary**                             | Bundled; `kustomize.version` selects a configured alternate  | The system `kustomize` on PATH — per-app `kustomize.version` has no configured tool versions to select from             |
+| **Cluster-level kustomize settings** (argocd-cm) | `kustomize.buildOptions` etc. read from the control plane    | Not read — `--kustomize-enable-helm`, `--kustomize-build-options`, `--kustomize-load-restrictor` flags stand in          |
 
 ## 7. Multi-Source Applications
 
 | Aspect                        | ArgoCD                                                | argocdf                                                                                                                                                                |
 |-------------------------------|-------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| **Ref source authentication** | Uses stored credentials/SSH keys                      | Relies on git CLI credentials                                                                                                                                          |
+| **Ref source authentication** | Uses stored credentials/SSH keys                      | HTTP(S) credentials from the `--repo-creds` source ride `GIT_CONFIG_*` env (never argv); SSH remotes use ambient git config                                            |
 | **Repository caching**        | Reuses cached clones                                  | Ref sources pointing at the diffed repo use the local branch checkout (so PR edits to `$values` files diff correctly); external ref repos are cloned fresh each render |
 | **Cross-repo values**         | Full `$values` reference support                      | ✅ `$ref` resolution in `valueFiles` and `fileParameters`, with path-containment validation                                                                             |
 | **Source type detection**     | Per-source, explicit config then filesystem discovery | ✅ Same logic as single-source apps (explicit config, then `Chart.yaml` auto-detection)                                                                                 |
@@ -269,38 +225,27 @@ argocdf only does two-way diff (base branch vs target branch), missing this nuan
 | Server-side diff              | Medium   | High       |
 | CMP support                   | Medium   | High       |
 | ApplicationSet                | Medium   | High       |
-| Helm hook filtering           | Low      | Low        |
-| Retry logic                   | Low      | Low        |
+| Retry logic                   | Low      | Low       |
 
 ## 13. Implementation Approach: Reuse vs Reimplementation
 
-argocdf deliberately reimplements some functionality rather than importing ArgoCD's libraries directly. This table documents these decisions:
+Through 0.4.x argocdf rendered with its own `exec.Command("helm"|"kustomize")` pipeline; 0.5.0 deleted it. The boundary is now: manifest GENERATION is ArgoCD's code running in-process, while everything around it — worktrees, discovery, diffing, output — is argocdf's own:
 
-| Area                       | argocdf Approach                                              | ArgoCD Alternative     | Rationale                                                                      |
-|----------------------------|---------------------------------------------------------------|------------------------|--------------------------------------------------------------------------------|
-| **Application Types**      | Uses ArgoCD types via aliases                                 | Same                   | Ensures field compatibility, no drift                                          |
-| **Repository credentials** | ArgoCD's `util/db` + `util/settings` (`--repo-creds=cluster`) | Same                   | Zero drift in secret parsing, URL matching, and credential-template resolution |
-| **Chart downloads**        | ArgoCD's `util/helm.Client.ExtractChart` (both engines)       | Same                   | Repo-server parity: OCI dispatch, registry login, TLS/proxy handling for free  |
-| **Helm Rendering**         | `exec.Command("helm", ...)`                                   | gitops-engine          | Simpler, uses user's installed helm version                                    |
-| **Kustomize Rendering**    | `exec.Command("kustomize", ...)`                              | gitops-engine          | Simpler, uses user's installed kustomize                                       |
-| **Git Operations**         | `exec.Command("git", ...)`                                    | gitops-engine / go-git | Simpler, no version mismatch concerns                                          |
-| **Manifest Diffing**       | Custom recursive comparison                                   | gitops-engine diff     | Lighter weight, tailored for preview use case                                  |
-| **URL Normalization**      | `git.NormalizeRepoURL()`                                      | ArgoCD has similar     | Small utility, consolidated in git package                                     |
+| Area                       | argocdf Approach                                                        | Alternative considered  | Rationale                                                                                                    |
+|----------------------------|--------------------------------------------------------------------------|-------------------------|----------------------------------------------------------------------------------------------------------------|
+| **Application Types**      | ArgoCD's types via aliases                                              | Custom structs          | Ensures field compatibility, no drift                                                                          |
+| **Manifest generation**    | ArgoCD's `reposerver/repository.GenerateManifests`, in-process          | Own helm/kustomize exec | Exact render parity, structurally: option translation, build-env, source dispatch cannot drift (~85MB binary) |
+| **Repository credentials** | ArgoCD's `util/db` + `util/settings` (`--repo-creds=cluster`)           | Own secret parsing      | Zero drift in secret parsing, URL matching, and credential-template resolution                                 |
+| **Chart downloads**        | ArgoCD's `util/helm.Client.ExtractChart` behind argocdf's chart cache   | Own helm pull           | Repo-server parity: OCI dispatch, TLS/proxy handling for free (registry auth rides an isolated config file)   |
+| **Git Operations**         | `exec.Command("git", ...)`, ephemeral worktrees                         | gitops-engine / go-git  | argocdf owns the two-sided checkout model; no version mismatch concerns                                        |
+| **Manifest Diffing**       | Custom recursive comparison                                             | gitops-engine diff      | gitops-engine diffs desired-vs-LIVE state; argocdf diffs branch-vs-branch, a different problem                 |
+| **URL Normalization**      | `git.NormalizeRepoURL()`                                                | ArgoCD has similar      | Small utility, consolidated in git package                                                                     |
 
-### Why Not Use gitops-engine?
+Note that ArgoCD's tools still run as the SYSTEM `helm`/`kustomize` binaries — GenerateManifests execs them — so tool versions remain the user's, exactly as a differently-imaged repo-server would differ.
 
-ArgoCD's `gitops-engine` provides rendering and diffing, but:
+### Why import the repo-server instead of gitops-engine?
 
-1. **Designed for controller context** - Expects ArgoCD repo-server architecture
-2. **Heavy abstraction layers** - Adds complexity for features argocdf doesn't need
-3. **Binary bloat** - Would significantly increase binary size
-4. **Version coupling** - Ties argocdf to specific ArgoCD internals
-
-The `exec.Command` approach for Helm/Kustomize is:
-- Simpler to understand and debug
-- Uses the exact binaries users have installed
-- No version mismatch between embedded vs system tools
-- More portable across environments
+The rendering half of the old "don't import ArgoCD" rationale inverted once render parity became the product: reimplementing option translation is where parity bugs came from, and the ~85MB binary cost bought their structural elimination (the same trade-off as the type aliases). gitops-engine remains unimported for DIFFING, deliberately: its diff answers "how does desired differ from live cluster state" for a sync engine, while argocdf answers "how does branch A differ from branch B" for a preview — the live-state machinery (normalization against cluster defaults, three-way merge metadata) has no counterpart in a two-branch comparison.
 
 ## 14. Repository Credentials
 
