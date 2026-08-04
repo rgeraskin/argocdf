@@ -24,6 +24,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/charmbracelet/log"
 )
 
 // Runner executes lint commands against rendered manifest content.
@@ -48,6 +50,15 @@ type Runner struct {
 
 	// Timeout bounds each command invocation.
 	Timeout time.Duration
+
+	// Logger, when set, records one INFO line per linter invocation - which
+	// linter ran, against what, how long it took, and how many lines it
+	// produced. It is the only signal that separates "ran and found nothing"
+	// from "was never invoked": both leave the REPORT identical, since empty
+	// tool output at exit 0 is a legitimate no-findings result by contract.
+	// The e2e suite asserts on these lines (must-log: in checks.grep) for
+	// exactly that distinction. Nil disables the logging.
+	Logger *log.Logger
 
 	// Env holds variables exported to every command on top of argocdf's own
 	// environment, replacing any inherited entry with the same name (see
@@ -91,15 +102,37 @@ const waitDelay = 2 * time.Second
 func (r *Runner) Lint(ctx context.Context, dir, content string) []string {
 	var warnings []string
 	for _, command := range r.Commands {
-		warnings = append(warnings, r.runOne(ctx, command, dir, content)...)
+		warnings = append(warnings, r.logged("lint", displayCommand(command), func() []string {
+			return r.runOne(ctx, command, dir, content)
+		})...)
 	}
 	for _, policyDir := range r.Kyverno {
-		warnings = append(warnings, r.runKyverno(ctx, dir, policyDir, content)...)
+		warnings = append(warnings, r.logged("lint-kyverno", policyDir, func() []string {
+			return r.runKyverno(ctx, dir, policyDir, content)
+		})...)
 	}
 	for _, policyDir := range r.Conftest {
-		warnings = append(warnings, r.runConftest(ctx, dir, policyDir, content)...)
+		warnings = append(warnings, r.logged("lint-conftest", policyDir, func() []string {
+			return r.runConftest(ctx, dir, policyDir, content)
+		})...)
 	}
 	return warnings
+}
+
+// logged runs one linter invocation and records it at INFO (see Runner.Logger).
+// lines counts every line the invocation contributed - findings AND failure
+// warnings alike - because the log's job is proving the invocation happened
+// and what it emitted, not classifying the output.
+func (r *Runner) logged(linter, target string, run func() []string) []string {
+	start := time.Now()
+	out := run()
+	if r.Logger != nil {
+		r.Logger.Info("Lint invocation finished",
+			"linter", linter, "target", target,
+			"lines", len(out),
+			"duration", time.Since(start).Round(time.Millisecond))
+	}
+	return out
 }
 
 // Configured reports whether the runner has any linter to run.
