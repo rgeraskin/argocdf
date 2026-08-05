@@ -214,14 +214,14 @@ An all-literal `--application-namespaces` list is served with one namespaced rea
 
 ### Rendering Flags
 
-| Flag                          | Description                                                                                                                      | Default       |
-|-------------------------------|----------------------------------------------------------------------------------------------------------------------------------|---------------|
-| `--kube-version`              | Kubernetes version for rendering                                                                                                 | Auto-detected |
-| `--kustomize-enable-helm`     | Enable Helm chart inflation via kustomize                                                                                        | `false`       |
-| `--kustomize-build-options`   | Additional kustomize build options (space-separated)                                                                             | (none)        |
-| `--kustomize-load-restrictor` | Load restrictor mode (e.g., `LoadRestrictionsNone`)                                                                              | (none)        |
+| Flag                          | Description                                                                                                                     | Default       |
+|-------------------------------|---------------------------------------------------------------------------------------------------------------------------------|---------------|
+| `--kube-version`              | Kubernetes version for rendering                                                                                                | Auto-detected |
+| `--kustomize-enable-helm`     | Enable Helm chart inflation via kustomize                                                                                       | `false`       |
+| `--kustomize-build-options`   | Additional kustomize build options (space-separated)                                                                            | (none)        |
+| `--kustomize-load-restrictor` | Load restrictor mode (e.g., `LoadRestrictionsNone`)                                                                             | (none)        |
 | `--repo-creds`                | Repository credential source: `cluster` (ArgoCD repository secrets), `local` (your helm config), `none` (anonymous) — see below | `cluster`     |
-| `--no-api-versions`           | Do not pass cluster-discovered API versions to helm via `--api-versions`                                                         | `false`       |
+| `--no-api-versions`           | Do not pass cluster-discovered API versions to helm via `--api-versions`                                                        | `false`       |
 
 **Rendering runs through ArgoCD's own repo-server code** (`reposerver/repository.GenerateManifests` — the same code path behind `argocd app diff --local`), so option translation matches ArgoCD exactly: helm runs with `--include-crds` (CRDs from `crds/` appear in diffs), all `spec.source.helm`/`kustomize` fields are honored, `$ARGOCD_APP_*` build-env substitution works, `.argocd-source*.yaml` overrides are merged, and helm dependencies are built in an isolated temp helm home — your helm config is never touched, and dependency repos from `Chart.yaml` are registered there automatically, so fresh CI runners need no helm setup. YAML is re-serialized from ArgoCD's parsed objects (key order may differ from raw helm output; diffs are computed semantically so this does not affect results). Set `ARGOCD_LOG_LEVEL=info` to see ArgoCD's per-command exec traces when debugging renders.
 
@@ -288,12 +288,12 @@ The summary and footer land on the last part. Leftover part files from a previou
 
 ### Lint Flags
 
-| Flag              | Description                                                          | Default |
-|-------------------|----------------------------------------------------------------------|---------|
-| `--lint-kyverno`  | Lint with the kyverno policies in DIR (can be repeated)              | none    |
-| `--lint-conftest` | Lint with the rego policies in DIR (can be repeated)                 | none    |
-| `--lint`          | Shell command that lints rendered manifests (can be repeated)        | none    |
-| `--lint-timeout`  | Timeout for each lint invocation                                     | `10s`   |
+| Flag              | Description                                                   | Default |
+|-------------------|---------------------------------------------------------------|---------|
+| `--lint-kyverno`  | Lint with the kyverno policies in DIR (can be repeated)       | none    |
+| `--lint-conftest` | Lint with the rego policies in DIR (can be repeated)          | none    |
+| `--lint`          | Shell command that lints rendered manifests (can be repeated) | none    |
+| `--lint-timeout`  | Timeout for each lint invocation                              | `10s`   |
 
 For kyverno and conftest there is nothing to write:
 
@@ -344,67 +344,13 @@ argocdf --lint ': "${ARGOCDF_CONTEXT:?}"; err=$(kubectl apply --dry-run=server \
 
 Three details in that one-liner are the contract in miniature. Success prints one `… (server dry run)` line **per resource on stdout**, and every stdout line becomes a finding — so stdout is discarded and only stderr, where kubectl puts the errors, is reported. `printf` on the failure branch exits 0, because findings are not a tool failure. And the context check is hoisted into its own `: "${ARGOCDF_CONTEXT:?}"` rather than written inline as `--context "${ARGOCDF_CONTEXT:?}"`: inline, the unset variable kills only the command substitution, leaving `err` empty, so `|| printf` emits a blank line and the adapter exits **0 with no findings** — the linter never ran, yet every application is reported clean. Hoisted, the shell exits non-zero before kubectl starts and argocdf attaches its own failure warning.
 
+That one-liner is only meant to show the contract — the shell quoting gets cryptic fast. For real use, put the tool and its output handling into a small script committed to your repo and pass that to `--lint`: `argocdf --lint ./scripts/lint-manifests.sh`. See reference implementations: [`lint-kyverno.sh`](https://github.com/rgeraskin/argocdf-test-repo/blob/master/scripts/lint-kyverno.sh) and [`lint-conftest.sh`](https://github.com/rgeraskin/argocdf-test-repo/blob/master/scripts/lint-conftest.sh). Because each side's command runs in that side's worktree, the script — like the policies it references — is picked up in each branch's own version.
+
 **Apply CRDs before relying on policies over custom resources.** argocdf renders what your PR *will* produce, which routinely includes resources the cluster does not have yet — an operator's CRs introduced alongside its CRD, or a chart shipping CRs for an operator you have not installed. kyverno can only evaluate a resource whose GVK it can map to a GVR, so a policy over such a kind is **skipped silently**: no finding, no error, and a report that reads clean. Nothing distinguishes "the policy passed" from "the policy never ran", so apply the CRD first (or accept that those policies are not enforced in the diff). This is also why argocdf passes `--continue-on-fail`: without it a single unmappable document makes kyverno return an empty report, discarding the findings it already made on everything else. `case/lint-unmappable-kind` in the e2e suite pins both halves of that behavior.
 
 **One check per policy.** kyverno stops at the first failing validation within a policy, so a policy carrying four `validations:` reports only the first violation it hits — you fix it, re-run, and discover the next. Split independent checks into separate policies to see them all at once.
 
 Whether you use `--lint-kyverno` or your own adapter, keep non-policy files out of the directory kyverno is pointed at: a `kyverno-test.yaml` beside a policy makes it emit NOTHING — exit 0, empty stdout, empty stderr — which any correct adapter can only read as "no findings", so the policy silently stops being enforced with nothing anywhere to signal it. `apply` recurses to any depth and skips dot-files and dot-dirs, so `policies/.tests/` is a safe home for test manifests (a `kyverno-test.yaml` there can reference `../<policy>.yaml`); conftest is not affected, since its own `*_test.rego` unit tests define `test_*` rules rather than `deny` rules.
-
-That one-liner is only meant to show the contract — the shell quoting gets cryptic fast. For real use, put the tool and its output handling into a small script committed to your repo and pass that to `--lint`. Reference implementations: [`lint-kyverno.sh`](https://github.com/rgeraskin/argocdf-test-repo/blob/master/scripts/lint-kyverno.sh) and [`lint-conftest.sh`](https://github.com/rgeraskin/argocdf-test-repo/blob/master/scripts/lint-conftest.sh). Because each side's command runs in that side's worktree, the script — like the policies it references — is picked up in each branch's own version:
-
-```bash
-argocdf --lint ./scripts/lint-manifests.sh
-```
-
-```bash
-#!/usr/bin/env bash
-# scripts/lint-manifests.sh — argocdf lint adapter.
-# Reads rendered manifests on stdin, prints one finding per line on stdout.
-# No errexit/pipefail: kyverno and conftest exit non-zero on FINDINGS (normal
-# operation), and one tool's outcome must never skip the tools after it.
-set -u
-
-# Capture stdin once so several tools can each read the manifests.
-manifests=$(cat)
-
-# emit <label> <raw-output> <exit-code> <jq-filter>
-# Findings when the tool produced output; ONE failure line when it produced
-# nothing AND failed; silence when it produced nothing and succeeded.
-emit() {
-  if [ -n "$2" ]; then
-    printf '%s\n' "$2" | jq -r "$4"
-  elif [ "$3" -ne 0 ]; then
-    echo "$1 failed (exit $3)"
-  fi
-}
-
-# kyverno consults the cluster (--cluster) to resolve the CRDs of any custom
-# resources in the input, so it must be argocdf's cluster: without the exported
-# context, findings would describe whatever cluster the shell points at.
-if [ -z "${ARGOCDF_CONTEXT:-}" ]; then
-  echo "ARGOCDF_CONTEXT not set: refusing to lint against an unknown cluster"
-  exit 1
-fi
-[ -n "${ARGOCDF_KUBECONFIG:-}" ] && export KUBECONFIG="$ARGOCDF_KUBECONFIG"
-
-# --continue-on-fail: rendered manifests routinely contain custom resources
-# whose CRDs kyverno cannot resolve (a PR that adds a CRD alongside its CRs, a
-# chart shipping CRs for another operator). Without it, ONE unmappable document
-# aborts the whole apply — and the violations it did find on ordinary workloads
-# in the same input are lost silently.
-out=$(kyverno apply policies/ --resource - --policy-report --output-format json \
-  --cluster --context "$ARGOCDF_CONTEXT" --continue-on-fail 2>/dev/null <<<"$manifests")
-emit "kyverno apply" "$out" "$?" '.results[]?
-  | select(.result == "fail" or .result == "warn")
-  | "[kyverno/\(.policy)] \(.resources[0].kind)/\(.resources[0].name): \(.message | gsub("\n"; " "))"'
-
-# conftest evaluates the manifests offline, so it needs neither variable.
-out=$(conftest test - --policy policy/ --output json 2>/dev/null <<<"$manifests")
-emit "conftest" "$out" "$?" '.[] | .failures[]?.msg, .warnings[]?.msg
-  | select(. != null) | "[conftest] " + gsub("\n"; " ")'
-```
-
-A working adapter under continuous test lives in the e2e suite: [`scripts/lint-kyverno.sh`](https://github.com/rgeraskin/argocdf-test-repo/blob/master/scripts/lint-kyverno.sh) in [argocdf-test-repo](https://github.com/rgeraskin/argocdf-test-repo) (this repository's `e2e/` submodule). The suite (50 cases) runs it on the cases that pin lint findings — deliberately not on every case, so each pinned finding stays attributable — on both sides of each, so its empty-output handling, exit-code contract and use of the exported cluster selectors are exercised continuously. One case exists specifically to prove the cluster reached is argocdf's: its pinned finding comes from a policy over Application CRs, which kyverno can only evaluate after resolving that CRD from the cluster.
 
 ### CI Flags
 
@@ -415,10 +361,10 @@ A working adapter under continuous test lives in the e2e suite: [`scripts/lint-k
 
 ### Cache Flags
 
-| Flag                    | Description                                                                        | Default                    |
-|-------------------------|------------------------------------------------------------------------------------|----------------------------|
-| `--no-cache[=layer]`    | Disable persistent caches: `all` (bare flag), `render`, or `charts`                 | both caches enabled        |
-| `--cache-dir`           | Base directory for render and chart caches                                         | `<user cache dir>/argocdf` |
+| Flag                 | Description                                                         | Default                    |
+|----------------------|---------------------------------------------------------------------|----------------------------|
+| `--no-cache[=layer]` | Disable persistent caches: `all` (bare flag), `render`, or `charts` | both caches enabled        |
+| `--cache-dir`        | Base directory for render and chart caches                          | `<user cache dir>/argocdf` |
 
 `--no-cache` disables both caches, as it always has. The value form disables one: `--no-cache=render` re-renders everything while keeping downloaded charts (the fast way to re-check manifests), and `--no-cache=charts` re-downloads charts for the apps that re-render anyway. Attach the value with `=`; a space-separated word would be read as the next argument. To re-enable caching when an environment variable or a wrapper script disabled it, write `--no-cache=false` - the boolean spellings still work, so `ARGOCDF_NO_CACHE=true` in existing scripts keeps its meaning too. (`--no-cache=none` is accepted as well, but it reads as a double negative, so the help text does not suggest it.)
 
@@ -533,9 +479,15 @@ mise run check
 
 ### End-to-end tests
 
+See [argocdf-test-repo](https://github.com/rgeraskin/argocdf-test-repo) for details.
+
 ```bash
-mise run e2e:bootstrap   # create a kind cluster with ArgoCD CRDs (WIP)
-mise run e2e:clean       # tear it down
+mise run e2e:bootstrap-static   # kind cluster without a controller — needs no push
+mise run e2e:bootstrap          # baseline: real ArgoCD controller + apps. Needs the
+                                # e2e submodule's master pushed, since the controller
+                                # syncs the remote at targetRevision HEAD
+mise run e2e:run                # run the tests (builds argocdf first)
+mise run e2e:clean              # tear it down
 ```
 
 ## Project Structure
