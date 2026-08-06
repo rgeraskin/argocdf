@@ -49,6 +49,10 @@ go install -ldflags "-X main.Version=$VERSION" ./cmd/argocdf
 description = "Run tests"
 run = "go test -v ./..."
 
+[tasks.test-race]
+description = "Run tests under the race detector. Separate from `test` because it is ~10x slower; `check` runs it, so CI does."
+run = "go test -race ./..."
+
 [tasks.test-coverage]
 alias = "coverage"
 description = "Run tests with coverage"
@@ -96,8 +100,8 @@ run = "go run ./cmd/argocdf"
 
 [tasks.check]
 alias = "ci"
-description = "Run all checks (vet, lint, test)"
-depends = ["vet", "lint", "test"]
+description = "Run all checks (vet, lint, test, test-race)"
+depends = ["vet", "lint", "test", "test-race"]
 
 [tasks."e2e:bootstrap"]
 description = "Bootstrap the e2e cluster with the REAL ArgoCD controller (the baseline: production-shaped). Requires e2e master pushed, because the controller syncs the remote at targetRevision HEAD. Waits until every Application is Synced+Healthy (E2E_SYNC_TIMEOUT bounds it). REFUSES to run when the cluster is already alive - reuse it with e2e:bootstrap-static, or e2e:clean first"
