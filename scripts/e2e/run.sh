@@ -165,6 +165,10 @@ CASE_ARGS=(
   # thing distinguishing it: both invocations are kyverno, so #1/#2 (flag order) is
   # all that says which directory a finding came from.
   "lint-two-policy-dirs:--lint-kyverno policies/kyverno --lint-kyverno policies/kyverno-broken"
+  # The MIRROR of lint-policy-added: the branch DELETES the policy directory, so the
+  # TARGET side is the unlinted one. Points at policies/kyverno-removed, which exists on
+  # master for this case alone.
+  "lint-policy-removed:--lint-kyverno policies/kyverno-removed"
   # The ONLY case that renders without credentials, carrying the identical fixture to
   # private-chart-bump so the two differ in exactly one flag. It is the end-to-end
   # tripwire for the per-mode chart-cache scope: an anonymous run that SUCCEEDS means
