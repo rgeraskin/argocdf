@@ -324,6 +324,35 @@ for name in "${cases[@]}"; do
     [ -f "$src" ] && command mv -f "$src" "$dst" && "$SCRIPT_DIR/normalize.sh" "$dst"
   done
 
+  # must-log: runtime assertions from checks.grep against the FRESH run's log, for
+  # facts a report cannot carry - "this linter was actually invoked" being the
+  # motivating one (an adapter that never ran and one that ran finding nothing leave
+  # IDENTICAL reports by contract). review-expected.sh ignores these lines: they
+  # assert against a live run, not against the pinned tree.
+  #
+  # Checked HERE, before the regenerate branch returns: it used to sit in the
+  # compare path only, so `--regenerate` re-pinned a case whose log had lost the
+  # fact and its review gate passed, with the failure appearing only in some later
+  # verification run.
+  #
+  # What regeneration does with a failure is FAIL LOUDLY, not decline to write: the
+  # reports are still recorded (they come from the same run and are usually
+  # legitimate - what was lost is a log fact, not a report), so the diff stays
+  # inspectable, and the case is counted as failed so the exit code and the summary
+  # both say so. The pins are written; the failure is the signal.
+  mustlog_failure=""
+  if [ -f "expected/$name/checks.grep" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        must-log:*)
+          pat=${line#must-log:}
+          grep -Eq -- "$pat" "$out/run.log" \
+            || mustlog_failure="FAIL (must-log pattern not found in run.log: $pat)"
+          ;;
+      esac
+    done < "expected/$name/checks.grep"
+  fi
+
   if $regenerate; then
     # Rebuild the RECORDED half from scratch so a format that stopped being
     # produced leaves no stale file behind (the strict compare below would
@@ -336,6 +365,11 @@ for name in "${cases[@]}"; do
       [ -f "$out/$f.$(ext "$f")" ] && command cp -f "$out/$f.$(ext "$f")" "expected/$name/reports/"
     done
     echo "exit: $rc" > "expected/$name/reports/meta.yaml"
+    if [ -n "$mustlog_failure" ]; then
+      printf '%-28s %-8s %s\n' "$name" "$rc" "REGENERATED but $mustlog_failure"
+      fails=$((fails+1))
+      continue
+    fi
     printf '%-28s %-8s %s\n' "$name" "$rc" "REGENERATED"
     continue
   fi
@@ -351,6 +385,8 @@ for name in "${cases[@]}"; do
   fi
   want_rc=$(awk '/^exit:/{print $2}' "expected/$name/reports/meta.yaml" 2>/dev/null)
   result=PASS
+  # Carried from the fresh invocation above, which is where the log exists.
+  [ -n "$mustlog_failure" ] && result="$mustlog_failure"
   [ "$rc" = "$want_rc" ] || result="FAIL (exit $rc != $want_rc)"
   for f in "${FORMATS[@]}"; do
     exp="expected/$name/reports/$f.$(ext "$f")"
@@ -365,22 +401,6 @@ for name in "${cases[@]}"; do
     fi
   done
 
-  # must-log: runtime assertions from checks.grep against the FRESH run's log, for
-  # facts a report cannot carry - "this linter was actually invoked" being the
-  # motivating one (an adapter that never ran and one that ran finding nothing leave
-  # IDENTICAL reports by contract). review-expected.sh ignores these lines: they
-  # assert against a live run, not against the pinned tree.
-  if [ -f "expected/$name/checks.grep" ]; then
-    while IFS= read -r line || [ -n "$line" ]; do
-      case "$line" in
-        must-log:*)
-          pat=${line#must-log:}
-          grep -Eq -- "$pat" "$out/run.log" \
-            || result="FAIL (must-log pattern not found in run.log: $pat)"
-          ;;
-      esac
-    done < "expected/$name/checks.grep"
-  fi
   # ---- cached pass -----------------------------------------------------------
   # Same case, caches ENABLED, compared against the same expectations. Runs only
   # when the fresh pass matched: after a real failure its output is the diagnosis,
