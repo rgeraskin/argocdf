@@ -3,6 +3,7 @@ package render
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -903,6 +904,60 @@ func TestIsRetriedMissingDependencyLog(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := IsRetriedMissingDependencyLog(tt.msg); got != tt.want {
 				t.Errorf("IsRetriedMissingDependencyLog() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestElideAPIVersions(t *testing.T) {
+	// The real shape: ArgoCD passes one pair per group/version AND per kind, so a
+	// live cluster contributes hundreds between two ordinary arguments.
+	var flood strings.Builder
+	for i := 0; i < 309; i++ {
+		fmt.Fprintf(&flood, "--api-versions group%d.example.com/v1 ", i)
+	}
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "a cluster's whole API set collapses to its count",
+			in:   "`helm template . --kube-version 1.34.9 " + flood.String() + "--include-crds` failed",
+			want: "`helm template . --kube-version 1.34.9 --api-versions <309 elided> --include-crds` failed",
+		},
+		{
+			// Below the threshold the line is already readable, and eliding would
+			// hide real information to save nothing.
+			name: "a short list is left alone",
+			in:   "`helm template . --api-versions v1 --api-versions v1/ConfigMap --include-crds`",
+			want: "`helm template . --api-versions v1 --api-versions v1/ConfigMap --include-crds`",
+		},
+		{
+			name: "a run at the end of the message gains no trailing space",
+			in:   "cmd --api-versions a/v1 --api-versions b/v1 --api-versions c/v1",
+			want: "cmd --api-versions <3 elided>",
+		},
+		{
+			// util/exec formats a failure as `<argv>` failed <cause>, so when the run
+			// ENDS the argv — which it does whenever an app sets helm.skipCrds,
+			// since nothing is appended after the pairs — the closing backtick sits
+			// flush against the last value. Swallowing it made the line read as
+			// though the failure text were part of the quoted command.
+			name: "the closing backtick of a quoted argv survives",
+			in:   "`helm template . --api-versions a/v1 --api-versions b/v1 --api-versions c/v1` failed exit status 1: Error: boom",
+			want: "`helm template . --api-versions <3 elided>` failed exit status 1: Error: boom",
+		},
+		{
+			name: "nothing to elide is returned unchanged",
+			in:   "`helm dependency build` failed exit status 1: Error: no cached repo found",
+			want: "`helm dependency build` failed exit status 1: Error: no cached repo found",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ElideAPIVersions(tt.in); got != tt.want {
+				t.Errorf("ElideAPIVersions() =\n%q\nwant\n%q", got, tt.want)
 			}
 		})
 	}

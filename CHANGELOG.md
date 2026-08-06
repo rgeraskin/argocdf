@@ -16,6 +16,9 @@ All notable changes to this project will be documented in this file.
 - Fix: the dependency probe ArgoCD retries is no longer reported as an error
   A chart with a `dependencies:` section and no committed `charts/` directory logged one ERRO per render on a completely healthy run — the loudest line in a successful run described a step that worked. ArgoCD uses a failed `helm template` as its probe for "dependencies are not vendored yet", then runs `helm dependency build` and templates again, but the non-zero exit is logged before the caller decides it was harmless. The probe is demoted to DEBUG (`--verbose` still shows it), recognised by ArgoCD's own predicate so it cannot drift from what upstream actually retries. A `helm dependency build` that really failed stays at ERROR, and a retry that fails again still surfaces as the application's report error. Library log lines also carry an `argocd/exec` prefix when they describe a subprocess, so it is clear whether to read a tool's stderr or ArgoCD's own code.
 
+- Fix: ArgoCD's `--api-versions` flood no longer buries the log line it belongs to
+  ArgoCD passes one `--api-versions` pair per group/version AND per kind the cluster advertises, then quotes the whole helm command line into the record it logs on failure: 16,000 characters against a cluster advertising 309 of them, of which the last ~180 are the actual failure — unreadable in a terminal, useless to grep. Runs of those pairs now collapse to `--api-versions <309 elided>`. (An error travelling into a PR comment was never affected: ArgoCD strips the list there itself. The log record escapes that because it is written inside the helm wrapper, before the message is rewritten.)
+
 ## 0.5.0
 
 - BREAKING: `--namespace`/`-n` is replaced by `--argocd-namespace`

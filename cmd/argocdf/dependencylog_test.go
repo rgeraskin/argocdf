@@ -207,3 +207,29 @@ func TestLogrusForwarderDemotesRetriedMissingDependency(t *testing.T) {
 		t.Errorf("a dependency build that really failed must stay loud, got %q", got)
 	}
 }
+
+// A 16,000-character line is unreadable wherever it lands - terminal, pager, or
+// GitHub - and the --api-versions list is never the diagnosis. The forwarder
+// shortens it on the way through, at every level (--verbose included).
+func TestLogrusForwarderElidesAPIVersions(t *testing.T) {
+	var flood strings.Builder
+	for i := 0; i < 12; i++ {
+		fmt.Fprintf(&flood, "--api-versions group%d.example.com/v1 ", i)
+	}
+	got := forwardOne(t, log.DebugLevel, &logrus.Entry{
+		Level:   logrus.ErrorLevel,
+		Message: "`helm template . " + flood.String() + "--include-crds` failed exit status 1: Error: boom",
+		Data:    logrus.Fields{argocdExecIDField: "ce5f4"},
+	})
+	if strings.Contains(got, "group7.example.com") {
+		t.Errorf("api-versions list survived into the log line: %q", got)
+	}
+	// The COUNT stays: it is the one informative part, saying whether argocdf
+	// passed the cluster's API set at all.
+	if !strings.Contains(got, "--api-versions <12 elided>") {
+		t.Errorf("line %q, want the elided count", got)
+	}
+	if !strings.Contains(got, "Error: boom") {
+		t.Errorf("line %q lost the actual failure", got)
+	}
+}

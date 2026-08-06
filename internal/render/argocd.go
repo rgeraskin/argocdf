@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -304,6 +305,58 @@ func (r *ArgoCDRenderer) renderSource(
 		return nil, "", err
 	}
 	return manifests, mapSourceType(resp.SourceType), nil
+}
+
+// apiVersionsRun matches a consecutive run of `--api-versions <value>` pairs.
+// Values are group/version[/Kind], so they contain neither whitespace nor a
+// backtick: the run ends at the next unrelated argument (typically --include-crds)
+// rather than eating it, and — because util/exec formats a failure as
+// `<argv>` failed <cause> with the closing backtick flush against the last
+// argument — it stops before that backtick when the run ENDS the argv, which it
+// does whenever an app sets helm.skipCrds (nothing is appended after the pairs).
+// With a bare \S+ the backtick was swallowed and the line then read as though the
+// failure text were part of the quoted command.
+var apiVersionsRun = regexp.MustCompile("(?:--api-versions [^\\s`]+\\s*)+")
+
+// minElidedAPIVersions is where eliding starts paying: a one- or two-entry list
+// is already readable, and replacing it would hide real information to save
+// nothing. A real cluster contributes hundreds.
+const minElidedAPIVersions = 3
+
+// ElideAPIVersions replaces runs of `--api-versions <value>` in an ArgoCD message
+// with their COUNT.
+//
+// ArgoCD passes one --api-versions pair per group/version AND per kind the
+// cluster advertises, so the `helm template` argv it logs (and quotes back in
+// every error) is ~16,000 characters of which the last ~180 are the actual
+// failure. GitHub truncates a PR comment line, terminals wrap it into a screenful,
+// and grep -o becomes useless — while the list itself is never the diagnosis, and
+// is reproducible from the cluster (or removable with --no-api-versions).
+//
+// The count is kept rather than dropped because it is the one informative part:
+// it says whether argocdf passed the cluster's API set at all.
+//
+// This is for LOG records only, and deliberately not applied to the error
+// GenerateManifests returns: ArgoCD strips the list there itself
+// (util/helm/cmd.go:449-455, leaving `<api versions removed>`), so an error
+// reaching a PR comment is already short. The log record is the one that escapes
+// that treatment, because util/exec logs the failure INSIDE the helm wrapper,
+// before it rewrites the message. Wrapping the returned error here as well is the
+// symmetry to refuse: it would be doing upstream's work a second time.
+func ElideAPIVersions(msg string) string {
+	return apiVersionsRun.ReplaceAllStringFunc(msg, func(run string) string {
+		n := strings.Count(run, "--api-versions ")
+		if n < minElidedAPIVersions {
+			return run
+		}
+		elided := fmt.Sprintf("--api-versions <%d elided>", n)
+		// Keep the run's own trailing separator, so the next argument stays
+		// separated (and a run at the very end gains no stray space).
+		if trimmed := strings.TrimRight(run, " \t\n"); len(trimmed) < len(run) {
+			return elided + run[len(trimmed):]
+		}
+		return elided
+	})
 }
 
 // IsRetriedMissingDependencyLog reports whether an ArgoCD log message is the

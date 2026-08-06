@@ -443,15 +443,21 @@ func (h *logrusForwarder) Fire(e *logrus.Entry) error {
 		level = logrus.DebugLevel
 	}
 
+	// Elided unconditionally, --verbose included: ArgoCD quotes the whole helm
+	// argv, and one --api-versions pair per advertised group/version AND kind
+	// makes that ~16,000 characters whose last ~180 are the actual failure. The
+	// list is never the diagnosis and is reproducible from the cluster.
+	msg := render.ElideAPIVersions(e.Message)
+
 	switch level {
 	case logrus.PanicLevel, logrus.FatalLevel, logrus.ErrorLevel:
-		logger.Error(e.Message, args...)
+		logger.Error(msg, args...)
 	case logrus.WarnLevel:
-		logger.Warn(e.Message, args...)
+		logger.Warn(msg, args...)
 	case logrus.InfoLevel:
-		logger.Info(e.Message, args...)
+		logger.Info(msg, args...)
 	default:
-		logger.Debug(e.Message, args...)
+		logger.Debug(msg, args...)
 	}
 	return nil
 }
