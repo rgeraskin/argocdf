@@ -381,39 +381,64 @@ func (a *App) createLintRunner() *lint.Runner {
 //
 // Absence is deliberately NOT fatal at render time: on the base side of a PR that
 // adds the first policy there is legitimately nothing to apply, and both tools
-// treat an empty policy set as a hard error, so the adapters skip a missing
-// directory instead of attaching a spurious lint failure to every application.
-// The cost of that tolerance is that a TYPO reads exactly like "no findings".
-// Checking the working tree closes it: the path a user typed should exist in the
-// checkout they typed it from, whichever branch pairs get rendered later.
+// treat an empty policy set as a hard error, so the adapters skip such a side and
+// SAY so per side (a `not linted: no policies in ...` note) instead of attaching a
+// spurious lint failure to every application. The cost of that tolerance is that a
+// TYPO reads like a side that legitimately has no policies. Checking the working
+// tree closes it: the path a user typed should exist in the checkout they typed it
+// from, whichever branch pairs get rendered later.
+//
+// The check asks the same question the adapters ask - lint.HasPolicies, not "does
+// the directory have entries" - so a directory holding only a .gitkeep or a README
+// is reported here rather than quietly producing a linter that checks nothing.
 func (a *App) warnMissingPolicyDirs() {
-	check := func(flag string, dirs []string) {
+	check := func(flag string, dirs, exts []string) {
 		for _, dir := range dirs {
 			path := dir
 			if !filepath.IsAbs(path) {
 				path = filepath.Join(a.cfg.RepoPath, dir)
 			}
-			// EMPTY counts as absent, because the adapters skip it for the same
-			// reason they skip a missing one — both tools treat an empty policy set
-			// as fatal. Checking only Stat would leave `mkdir -p policies/kyverno`
-			// with nothing in it looking exactly like "policies ran and passed",
-			// which is the hazard this warning exists to close.
-			entries, err := os.ReadDir(path)
-			if err == nil && len(entries) > 0 {
+			// A directory holding no file the tool would LOAD counts as absent, for
+			// the same reason the adapters skip it: `mkdir -p policies/kyverno`, or a
+			// directory holding only a .gitkeep, would otherwise look exactly like
+			// "policies ran and passed".
+			ok, err := lint.HasPolicies(path, exts)
+			if err == nil && ok {
 				continue
 			}
-			reason := "not found in"
-			if err == nil {
-				reason = "empty in"
-			}
-			a.logger.Warn("Lint policy directory "+reason+" the working tree; "+
-				"this linter will report NOTHING for any application unless the "+
-				"directory has policies in the branches being compared",
+			reason := policyDirReason(path, err)
+			// The consequence is stated as what actually happens now: a side without
+			// the directory is REPORTED as not linted, per application. That is also
+			// the healthy shape of a PR adding its first policy, run from a checkout
+			// that already has it — so this reads as information, not as an error.
+			a.logger.Warn("Lint policy directory "+reason+" in the working tree; "+
+				"sides whose branch lacks it are reported as not linted rather than "+
+				"checked, so verify this is the path you meant",
 				"flag", flag, "dir", dir, "resolved", path)
 		}
 	}
-	check("--lint-kyverno", a.cfg.LintKyverno)
-	check("--lint-conftest", a.cfg.LintConftest)
+	check("--lint-kyverno", a.cfg.LintKyverno, lint.KyvernoPolicyExts)
+	check("--lint-conftest", a.cfg.LintConftest, lint.ConftestPolicyExts)
+}
+
+// policyDirReason words why a policy directory is unusable. The four states are
+// distinguished because they need different fixes: a typo, a path that is not a
+// directory at all, one argocdf cannot read, and one that exists but holds nothing
+// the tool would load.
+func policyDirReason(path string, walkErr error) string {
+	info, statErr := os.Stat(path)
+	switch {
+	case statErr != nil && os.IsNotExist(statErr):
+		return "does not exist"
+	case statErr != nil:
+		return "cannot be read"
+	case !info.IsDir():
+		return "is not a directory"
+	case walkErr != nil:
+		return "cannot be read"
+	default:
+		return "holds no policy file"
+	}
 }
 
 // lintSide runs the lint commands for one side of one application.

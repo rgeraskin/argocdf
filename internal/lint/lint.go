@@ -18,9 +18,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -80,8 +82,17 @@ var errLintTimeout = errors.New("lint timeout")
 // a command that FORKS (`tool | filter &`, or any `a; b` compound where the shell
 // does not exec) leaves a descendant holding the inherited stdout pipe, and Wait
 // blocks on that pipe until the descendant exits on its own — a `sleep 60` behind
-// a 10s timeout still costs 60s. WaitDelay closes the pipe and SIGKILLs the
-// process group shortly after cancellation, so the timeout means what it says.
+// a 10s timeout still costs 60s. WaitDelay closes the pipe and kills the command
+// shortly after cancellation, so the timeout bounds ARGOCDF's wall-clock.
+//
+// What it does NOT do is kill a process GROUP: Go kills the process it started, so a
+// descendant that outlived `sh` keeps running with its pipe closed. A command that
+// backgrounds work can therefore still be alive - and still have side effects - after
+// argocdf has reported the timeout and moved on. Bounding argocdf is what this
+// guarantees; reaping the tree would need the command started in its own process
+// group and the group signalled, which is a Unix-only mechanism argocdf does not
+// currently set up.
+//
 // Deliberately small: by the time it applies, the output is already truncated and
 // the run has been reported as timed out.
 const waitDelay = 2 * time.Second
@@ -352,8 +363,16 @@ func (r *Runner) execTool(ctx context.Context, dir, linter string, argv []string
 	// A TIMEOUT surfaces even when stdout has content, which is the one case
 	// where output is not enough to call the run healthy: a truncated report
 	// either fails to parse or — worse — parses into silently FEWER findings,
-	// which reads as "cleaner than reality". The shell path appends the same line
-	// while keeping its stdout; this keeps the two contracts aligned.
+	// which reads as "cleaner than reality".
+	//
+	// The two paths then diverge, deliberately. The shell path keeps its stdout and
+	// appends the timeout line, because each line is an independent finding and
+	// half of them are still true. A built-in's stdout is ONE json document, so a
+	// truncated one is not half a report - it is a document whose findings cannot be
+	// trusted to be all of them. runKyverno/runConftest therefore return the timeout
+	// line ALONE: they discard the partial report rather than publish a count that
+	// might read cleaner than reality. TestExecToolHealthContract pins what this
+	// helper returns; the adapters' own tests pin the discard.
 	if errors.Is(context.Cause(ctx), errLintTimeout) {
 		out.warning = fmt.Sprintf("%s timeout after %s", linter, r.Timeout)
 		return out
@@ -405,13 +424,16 @@ func skippedForNoPolicies(linter, policyDir string) result {
 	}
 }
 
-// resolvePolicyDir returns the absolute policy directory and whether it holds
-// anything. A missing or EMPTY directory reports false rather than an error: on
-// the base side of a PR that adds the first policy there is legitimately nothing
-// to apply, and both tools treat an empty policy set as a hard error, which would
-// otherwise attach a spurious lint failure to every application. Not linting is
-// still reported — as a note, see skippedForNoPolicies — because it changes how
-// the findings on the other side must be read.
+// resolvePolicyDir returns the absolute policy directory and whether it holds any
+// policy the tool would load (see HasPolicies for why that is not "holds
+// anything"). A missing or policy-less directory reports false rather than an
+// error: on the base side of a PR that adds the first policy there is legitimately
+// nothing to apply, and both tools treat an empty policy set as a hard error,
+// which would otherwise attach a spurious lint failure to every application. Not
+// linting is still reported — as a note, see skippedForNoPolicies — because it
+// changes how the findings on the other side must be read. A directory that cannot
+// be read is a third case and returns an error, which the adapters report as a
+// FAILED invocation.
 //
 // A RELATIVE path resolves against the side's worktree, which is what makes each
 // side lint with its own version of the policies. An ABSOLUTE path is used as
@@ -419,17 +441,99 @@ func skippedForNoPolicies(linter, policyDir string) result {
 // set shared outside the repo is a real setup) but it forfeits per-side
 // resolution, so a PR that changes such a policy shows no difference between
 // sides.
-func resolvePolicyDir(worktree, policyDir string) (string, bool) {
+func resolvePolicyDir(worktree, policyDir string, exts []string) (string, bool, error) {
 	dir := policyDir
 	if !filepath.IsAbs(dir) {
 		dir = filepath.Join(worktree, policyDir)
 	}
-	entries, err := os.ReadDir(dir)
-	if err != nil || len(entries) == 0 {
-		return "", false
+	ok, err := HasPolicies(dir, exts)
+	if err != nil {
+		return "", false, err
 	}
-	return dir, true
+	return dir, ok, nil
 }
+
+// Policy file extensions per tool: what each one actually LOADS out of a directory
+// it is handed. kyverno reads yaml (and accepts json); conftest compiles rego and
+// treats everything else as data.
+var (
+	KyvernoPolicyExts  = []string{".yaml", ".yml", ".json"}
+	ConftestPolicyExts = []string{".rego"}
+)
+
+// HasPolicies reports whether dir holds at least one file the tool would load,
+// searching recursively because both tools do.
+//
+// "Has entries" is NOT the same question, and using it made the skip note wrong in
+// ordinary repository layouts: a .gitkeep, a README, an empty child directory or a
+// tool's own test fixtures all make a directory look populated while the tool has
+// nothing to apply. kyverno then exits 0 with no results, which argocdf reported as
+// status=ok - a linter that silently checked nothing, which is the exact failure
+// mode the skip note exists to make visible.
+//
+// A path that cannot serve as a policy directory is an error rather than "no
+// policies": permission denied, or a path that is a regular file, is a setup mistake
+// the user must see, not a side that legitimately has no policies. Absence itself is
+// not an error - that is the PR-adds-the-first-policy shape.
+//
+// The root is resolved through SYMLINKS first, because both tools read through one
+// when handed the path and `policies/kyverno -> ../shared/policies` is an ordinary
+// monorepo layout. filepath.WalkDir never follows a link, root included, so walking
+// the literal path reported a symlinked directory as having no policies - the false
+// note this whole mechanism exists to prevent. Symlinked CHILDREN inside the tree
+// stay unfollowed: that needs cycle detection, and it is a layout neither tool's
+// own docs encourage.
+func HasPolicies(dir string, exts []string) (bool, error) {
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolved
+	} // on error keep the literal path: a missing dir must stay "absent", not "unreadable"
+
+	// WalkDir on a regular file visits it as an ordinary entry and reports no error,
+	// so without this a file where a directory was named produced "no policies"
+	// (or, with a policy-looking name, silently handed the tool a file path).
+	if info, err := os.Stat(dir); err == nil && !info.IsDir() {
+		return false, errNotADirectory
+	}
+
+	found := false
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			// A directory that vanished mid-walk, or one entry we cannot stat, must
+			// not mask policies found elsewhere in the tree.
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if slices.Contains(exts, strings.ToLower(filepath.Ext(path))) {
+			found = true
+			return fs.SkipAll
+		}
+		return nil
+	})
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil // absent: the first-policy shape, not a failure
+		}
+		// The PATH is stripped from what escapes here. A caller reports the
+		// directory the USER spelled (relative, as they typed it), matching every
+		// other line argocdf authors about a linter; the resolved absolute worktree
+		// path is per-run noise that would land in a PR comment.
+		var pathErr *fs.PathError
+		if errors.As(err, &pathErr) {
+			return false, pathErr.Err
+		}
+		return false, err
+	}
+	return found, nil
+}
+
+// errNotADirectory is HasPolicies' verdict on a path that exists but cannot hold
+// policies. Path-free, for the reason above.
+var errNotADirectory = errors.New("not a directory")
 
 // runOne runs one shell command. id identifies it in the warning lines it
 // contributes and is exported to the command as ARGOCDF_LINT_ID; the shell path

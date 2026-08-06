@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"regexp"
 	"reflect"
 	"strings"
 	"testing"
@@ -191,7 +192,10 @@ func TestResolvePolicyDir(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, ok := resolvePolicyDir(worktree, tt.dir)
+			got, ok, err := resolvePolicyDir(worktree, tt.dir, KyvernoPolicyExts)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
 			if ok != tt.wantOK {
 				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
 			}
@@ -427,13 +431,24 @@ func TestFindingBracketCarriesTheLinterIdentity(t *testing.T) {
 	}
 }
 
-// The SHAPES of the lines argocdf authors about a linter, pinned in one place.
-// Two things depend on them beyond readability: the e2e review gate bans them from
-// being pinned as expectations (a lint crash must never become a stored
-// expectation), and it keys on these shapes to do it. A reformat here silently
-// hollows that ban, which is how a crashing adapter would start passing review.
-func TestHealthLineShapes(t *testing.T) {
-	worktree := t.TempDir()
+// healthLine is one shape argocdf authors about a linter itself.
+//
+// failure marks the shapes the e2e review gate must REFUSE to pin: a crashed or
+// unusable linter must never become a stored expectation. The gate enforces that by
+// pattern, in scripts/e2e/review-expected.sh, and TestReviewGateBansEveryFailureShape
+// checks the two against each other - this table is the single list both read, so
+// adding a shape here without a ban there fails a test instead of quietly hollowing
+// the gate (which is exactly what happened when the unusable-directory line landed).
+type healthLine struct {
+	name    string
+	run     func() []string
+	want    string
+	failure bool
+}
+
+// healthLineShapes builds the table against a worktree it populates.
+func healthLineShapes(t *testing.T, worktree string) []healthLine {
+	t.Helper()
 	populated := filepath.Join(worktree, "policies", "kyverno")
 	if err := os.MkdirAll(populated, 0o755); err != nil {
 		t.Fatal(err)
@@ -441,19 +456,19 @@ func TestHealthLineShapes(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(populated, "p.yaml"), []byte("kind: X\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(worktree, "afile"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
-	tests := []struct {
-		name string
-		run  func() []string
-		want string
-	}{
+	return []healthLine{
 		{
 			name: "shell command exits non-zero",
 			run: func() []string {
 				return (&Runner{Commands: []string{"exit 3"}, Timeout: 5 * time.Second}).
 					Lint(context.Background(), Subject{}, "")
 			},
-			want: "[lint#1] exit status 3",
+			want:    "[lint#1] exit status 3",
+			failure: true,
 		},
 		{
 			name: "shell command times out",
@@ -461,7 +476,8 @@ func TestHealthLineShapes(t *testing.T) {
 				return (&Runner{Commands: []string{"sleep 30"}, Timeout: 50 * time.Millisecond}).
 					Lint(context.Background(), Subject{}, "")
 			},
-			want: "[lint#1] timeout after 50ms",
+			want:    "[lint#1] timeout after 50ms",
+			failure: true,
 		},
 		{
 			name: "built-in refuses without a resolved context",
@@ -469,7 +485,20 @@ func TestHealthLineShapes(t *testing.T) {
 				return (&Runner{Kyverno: []string{"policies/kyverno"}}).
 					Lint(context.Background(), Subject{Worktree: worktree}, "")
 			},
-			want: "[lint-kyverno#1] no resolved kube context, refusing to lint against an unknown cluster",
+			want:    "[lint-kyverno#1] no resolved kube context, refusing to lint against an unknown cluster",
+			failure: true,
+		},
+		{
+			// A path that cannot hold policies at all. It names the directory the
+			// USER spelled, not the resolved absolute one: this line reaches PR
+			// comments, where a per-run worktree path is noise.
+			name: "built-in cannot use the policy path",
+			run: func() []string {
+				return (&Runner{Kyverno: []string{"afile"}, KubeContext: "ctx"}).
+					Lint(context.Background(), Subject{Worktree: worktree}, "")
+			},
+			want:    `[lint-kyverno#1] unusable policy directory "afile": not a directory`,
+			failure: true,
 		},
 		{
 			// The ONE health line that keeps its argument: it is about that
@@ -479,10 +508,31 @@ func TestHealthLineShapes(t *testing.T) {
 				return (&Runner{Conftest: []string{"policies/absent"}}).
 					Lint(context.Background(), Subject{Worktree: worktree}, "")
 			},
+			// The one health line that is NOT a failure, and therefore the one the
+			// gate must keep pinnable: case/lint-policy-added pins exactly this.
 			want: `[lint-conftest#1] not linted: no policies in "policies/absent"`,
 		},
+		{
+			// A tool that answered with something unreadable. No subprocess needed:
+			// the parser is the thing that decides.
+			name: "built-in cannot parse the report",
+			run: func() []string {
+				return parseKyvernoReport(identify(kindKyverno, 1), "not json").lines
+			},
+			want:    "[lint-kyverno#1] unparsable report: invalid character 'o' in literal null (expecting 'u')",
+			failure: true,
+		},
 	}
-	for _, tt := range tests {
+}
+
+// The SHAPES of the lines argocdf authors about a linter, pinned byte-exactly.
+// Two things depend on them beyond readability: the e2e review gate bans the failure
+// ones from being pinned as expectations, and it keys on these shapes to do it. A
+// reformat here silently hollows that ban, which is how a crashing adapter would
+// start passing review.
+func TestHealthLineShapes(t *testing.T) {
+	worktree := t.TempDir()
+	for _, tt := range healthLineShapes(t, worktree) {
 		t.Run(tt.name, func(t *testing.T) {
 			got := tt.run()
 			if len(got) != 1 || got[0] != tt.want {
@@ -490,10 +540,164 @@ func TestHealthLineShapes(t *testing.T) {
 			}
 		})
 	}
+}
 
-	// Reported through the same shape, without a report to parse.
-	if got := parseKyvernoReport(identify(kindKyverno, 1), "not json").lines; len(got) != 1 ||
-		!strings.HasPrefix(got[0], "[lint-kyverno#1] unparsable report: ") {
-		t.Errorf("unparsable = %#v, want a [lint-kyverno#1] unparsable report: … line", got)
+// TestReviewGateBansEveryFailureShape mechanizes the "must be kept in step with
+// TestHealthLineShapes" comment in scripts/e2e/review-expected.sh.
+//
+// The gate refuses to pin a lint FAILURE line, so that a crashed or unusable linter
+// cannot become a stored expectation. It does that by pattern, in another language,
+// in another directory - coupled to these shapes by nothing but that comment, which
+// is precisely what a hurried change loses to: the unusable-policy-directory line
+// shipped with no ban, and was caught by review rather than by the suite.
+//
+// So both lists are read here: every failure shape must match at least one ban, and
+// the skip note must match NONE (case/lint-policy-added pins it, and a ban would
+// make that case unpinnable).
+func TestReviewGateBansEveryFailureShape(t *testing.T) {
+	const script = "../../scripts/e2e/review-expected.sh"
+	source, err := os.ReadFile(script)
+	if err != nil {
+		t.Fatalf("cannot read the review gate (%s): %v", script, err)
+	}
+
+	// ban "$name" "$rep" '<ERE>' "<label>"
+	banLine := regexp.MustCompile(`(?m)^\s*ban "\$name" "\$rep" '([^']*)'`)
+	matches := banLine.FindAllStringSubmatch(string(source), -1)
+	if len(matches) == 0 {
+		t.Fatalf("no ban patterns found in %s - has the helper been renamed?", script)
+	}
+	var bans []*regexp.Regexp
+	for _, m := range matches {
+		re, err := regexp.Compile(m[1])
+		if err != nil {
+			// The gate uses grep -E; a pattern Go cannot compile is one this test
+			// cannot check, which must not pass silently.
+			t.Fatalf("ban pattern %q does not compile as a Go regexp: %v", m[1], err)
+		}
+		bans = append(bans, re)
+	}
+
+	for _, tt := range healthLineShapes(t, t.TempDir()) {
+		t.Run(tt.name, func(t *testing.T) {
+			var matched []string
+			for _, re := range bans {
+				if re.MatchString(tt.want) {
+					matched = append(matched, re.String())
+				}
+			}
+			switch {
+			case tt.failure && len(matched) == 0:
+				t.Errorf("no ban in %s matches the failure line %q - a case pinning it would pass review", script, tt.want)
+			case !tt.failure && len(matched) > 0:
+				t.Errorf("line %q is banned by %v, but it is not a failure and is legitimately pinned", tt.want, matched)
+			}
+		})
+	}
+}
+
+// "Has entries" and "has policies" are different questions, and using the first
+// made the skip note wrong in ordinary layouts: a directory holding only a
+// .gitkeep, a README or a nested empty directory looks populated while the tool has
+// nothing to apply — kyverno then exits 0 with no results, which argocdf reported as
+// status=ok, a linter that silently checked nothing.
+func TestHasPolicies(t *testing.T) {
+	root := t.TempDir()
+	write := func(rel, body string) {
+		full := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("yaml/policy.yaml", "kind: X\n")
+	write("nested/sub/deep/policy.yml", "kind: X\n")
+	write("keep-only/.gitkeep", "")
+	write("keep-only/README.md", "notes\n")
+	write("rego/deny.rego", "package x\n")
+	write("mixed/README.md", "notes\n")
+	write("mixed/sub/policy.json", "{}\n")
+	if err := os.MkdirAll(filepath.Join(root, "empty", "child"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write("afile", "x")
+	// `policies/kyverno -> ../shared/policies` is an ordinary monorepo layout, and
+	// both tools read through it when handed the path.
+	if err := os.Symlink(filepath.Join(root, "yaml"), filepath.Join(root, "linked")); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name    string
+		dir     string
+		exts    []string
+		want    bool
+		wantErr bool
+	}{
+		{name: "a yaml policy", dir: "yaml", exts: KyvernoPolicyExts, want: true},
+		// Both tools recurse, so the check must too, or a perfectly good layout is
+		// reported as having no policies.
+		{name: "a policy nested three deep", dir: "nested", exts: KyvernoPolicyExts, want: true},
+		{name: "json counts for kyverno", dir: "mixed", exts: KyvernoPolicyExts, want: true},
+		{name: "only a .gitkeep and a README", dir: "keep-only", exts: KyvernoPolicyExts},
+		{name: "only empty child directories", dir: "empty", exts: KyvernoPolicyExts},
+		// Extensions are per TOOL: the same directory answers differently.
+		{name: "rego is a conftest policy", dir: "rego", exts: ConftestPolicyExts, want: true},
+		{name: "rego is NOT a kyverno policy", dir: "rego", exts: KyvernoPolicyExts},
+		{name: "yaml is NOT a conftest policy", dir: "yaml", exts: ConftestPolicyExts},
+		// Absence is the PR-adds-the-first-policy shape, not a failure.
+		{name: "a missing directory is not an error", dir: "typo", exts: KyvernoPolicyExts},
+		// filepath.WalkDir follows no symlink, root included, so walking the literal
+		// path reported a symlinked policy directory as having none — the false note
+		// this mechanism exists to prevent.
+		{name: "a symlinked directory is followed", dir: "linked", exts: KyvernoPolicyExts, want: true},
+		// A file where a directory was named is a setup mistake, and must not read as
+		// a side that legitimately has no policies.
+		{name: "a regular file is an error, not 'no policies'", dir: "afile", exts: KyvernoPolicyExts, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := HasPolicies(filepath.Join(root, tt.dir), tt.exts)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Errorf("HasPolicies() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// A side whose policy directory cannot be READ is a setup mistake, not a side that
+// legitimately has no policies: it must fail loudly instead of contributing the skip
+// note, which would read as "this branch has no policies yet".
+func TestBuiltinsFailOnUnreadablePolicyDir(t *testing.T) {
+	worktree := t.TempDir()
+	// A regular file where a directory was named: readable, but not a policy tree.
+	if err := os.WriteFile(filepath.Join(worktree, "policies"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// ...and one where the policy PATH itself is a file, which WalkDir happily
+	// visits as an ordinary entry - so this shape used to produce the skip note.
+	if err := os.WriteFile(filepath.Join(worktree, "afile"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, dir := range []string{"policies/kyverno", "afile"} {
+		r := &Runner{Kyverno: []string{dir}, KubeContext: "ctx"}
+		got := r.Lint(context.Background(), Subject{Worktree: worktree}, "")
+		if len(got) != 1 || !strings.Contains(got[0], "unusable policy directory") {
+			t.Fatalf("%s: got %#v, want one unusable-directory failure", dir, got)
+		}
+		// The user-spelled path, and no resolved absolute one leaking into a report.
+		if !strings.Contains(got[0], `"`+dir+`"`) || strings.Contains(got[0], worktree) {
+			t.Errorf("%s: line %q should name the directory as spelled, not the resolved path", dir, got[0])
+		}
+		if strings.Contains(got[0], "not linted: no policies") {
+			t.Errorf("%s: an unusable directory must not report as a side without policies", dir)
+		}
 	}
 }

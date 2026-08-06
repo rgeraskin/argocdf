@@ -35,6 +35,43 @@ func TestWarnMissingPolicyDirs(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// A layout that used to look populated: a directory holding only files no tool
+	// loads. kyverno then exits 0 with no results, which reported status=ok - a
+	// linter that silently checked nothing.
+	keepOnly := filepath.Join(repo, "policies", "keep-only")
+	if err := os.MkdirAll(filepath.Join(keepOnly, "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{".gitkeep", "README.md"} {
+		if err := os.WriteFile(filepath.Join(keepOnly, name), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// ...and one where the policy is nested, which both tools would find.
+	nested := filepath.Join(repo, "policies", "nested")
+	if err := os.MkdirAll(filepath.Join(nested, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nested, "sub", "policy.yaml"), []byte("kind: X\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A symlinked policy directory is a normal monorepo layout and both tools read
+	// through it, so the startup warning must stay SILENT for one - it fired before
+	// HasPolicies resolved the root.
+	if err := os.Symlink(withPolicies, filepath.Join(repo, "policies", "linked")); err != nil {
+		t.Fatal(err)
+	}
+
+	regoOnly := filepath.Join(repo, "policies", "rego-only")
+	if err := os.MkdirAll(regoOnly, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(regoOnly, "deny.rego"), []byte("package x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
 	tests := []struct {
 		name     string
 		kyverno  []string
@@ -48,7 +85,7 @@ func TestWarnMissingPolicyDirs(t *testing.T) {
 		{
 			name:     "missing directory warns",
 			kyverno:  []string{"policies/typo"},
-			wantWarn: "not found in the working tree",
+			wantWarn: "does not exist in the working tree",
 		},
 		{
 			// The gap both reviewers found: `mkdir -p policies/kyverno` with
@@ -56,12 +93,34 @@ func TestWarnMissingPolicyDirs(t *testing.T) {
 			// indistinguishable from "all policies passed".
 			name:     "EMPTY directory warns, because the adapters skip it too",
 			kyverno:  []string{"policies/empty"},
-			wantWarn: "empty in the working tree",
+			wantWarn: "holds no policy file in the working tree",
 		},
 		{
-			name:     "a file where a directory was meant warns",
+			name:     "a file where a directory was meant warns, and says so",
 			conftest: []string{"policies/afile"},
-			wantWarn: "not found in the working tree",
+			wantWarn: "is not a directory in the working tree",
+		},
+		{
+			name:    "a symlinked directory with policies is silent",
+			kyverno: []string{"policies/linked"},
+		},
+		{
+			name:     "a directory holding only a .gitkeep and a README warns",
+			kyverno:  []string{"policies/keep-only"},
+			wantWarn: "holds no policy file in the working tree",
+		},
+		{
+			// The tools recurse, so the check must too - warning here would send a
+			// user chasing a directory that is perfectly fine.
+			name:    "a policy in a subdirectory is found, not warned about",
+			kyverno: []string{"policies/nested"},
+		},
+		{
+			// Extensions are per TOOL: rego is a conftest policy and yaml is not,
+			// so the same directory answers differently for the two flags.
+			name:     "a rego-only directory has no kyverno policies",
+			kyverno:  []string{"policies/rego-only"},
+			wantWarn: "holds no policy file in the working tree",
 		},
 		{
 			name:     "the flag name is named, so the user knows which one to fix",

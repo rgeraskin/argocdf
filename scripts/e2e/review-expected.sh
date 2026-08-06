@@ -272,6 +272,13 @@ for dir in expected/*/; do
   # legitimately pinned RENDER error mentioning an exit status (error-invalid-yaml)
   # passing, and it is why these patterns must be kept in step with
   # TestHealthLineShapes in internal/lint - a reformat there hollows the ban here.
+  #
+  # That "must" is ENFORCED, not just asked for: TestReviewGateBansEveryFailureShape
+  # reads this list out of this file and requires every failure shape in that table
+  # to match one of these patterns - and the one non-failure shape (the skip note,
+  # which case/lint-policy-added pins) to match none. Adding a health line without a
+  # ban here fails that test. It exists because the unusable-policy-directory line
+  # shipped with no ban and review caught it, not the suite.
   # No trailing colon on 'exit status N': a command that dies without stderr
   # produces the bare form.
   ban "$name" "$rep" 'jq: error' "pinned 'jq: error' (lint adapter crash)"
@@ -280,6 +287,8 @@ for dir in expected/*/; do
   ban "$name" "$rep" 'with no report output' "pinned built-in lint adapter failure ('with no report output')"
   ban "$name" "$rep" 'unparsable report' "pinned built-in lint adapter failure ('unparsable report' - the tool's output format changed)"
   ban "$name" "$rep" 'no resolved kube context' "pinned built-in kyverno refusal (no resolved kube context)"
+  ban "$name" "$rep" 'unusable policy directory' \
+    "pinned built-in lint adapter failure ('unusable policy directory' - the path is not a readable directory)"
   ban "$name" "$rep" '(<|&lt;)worktree(>|&gt;)' "normalizer placeholder <worktree> pinned (a report leaked a temp path)"
   ban "$name" "$rep" '(<|&lt;)tempfile(>|&gt;)' "normalizer placeholder <tempfile> pinned (a report leaked a temp path)"
   ban "$name" "$rep" 'panic:' "'panic:' pinned (crash output is never an expectation)"

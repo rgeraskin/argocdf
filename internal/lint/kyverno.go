@@ -48,7 +48,15 @@ type kyvernoReport struct {
 //     pins both halves.
 func (r *Runner) runKyverno(ctx context.Context, id linterID, worktree, policyDir, content string) result {
 
-	dir, ok := resolvePolicyDir(worktree, policyDir)
+	dir, ok, err := resolvePolicyDir(worktree, policyDir, KyvernoPolicyExts)
+	if err != nil {
+		// Unusable (unreadable, or not a directory at all) is a setup mistake, not
+		// a side without policies.
+		return result{
+			lines:  []string{fmt.Sprintf("%s unusable policy directory %q: %v", id.bracket(), policyDir, err)},
+			status: statusFailed,
+		}
+	}
 	if !ok {
 		// No policies on THIS side: the normal shape when a PR adds the first
 		// policy, so the base side has nothing to apply. Handing kyverno an

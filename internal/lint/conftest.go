@@ -37,7 +37,15 @@ type conftestResults []struct {
 // policy makes `kyverno apply` emit nothing at all, silently).
 func (r *Runner) runConftest(ctx context.Context, id linterID, worktree, policyDir, content string) result {
 
-	dir, ok := resolvePolicyDir(worktree, policyDir)
+	dir, ok, err := resolvePolicyDir(worktree, policyDir, ConftestPolicyExts)
+	if err != nil {
+		// Unusable (unreadable, or not a directory at all) is a setup mistake, not
+		// a side without policies.
+		return result{
+			lines:  []string{fmt.Sprintf("%s unusable policy directory %q: %v", id.bracket(), policyDir, err)},
+			status: statusFailed,
+		}
+	}
 	if !ok {
 		// See runKyverno: a side without policies is the PR-adds-a-policy shape,
 		// and an empty directory makes conftest error ("no policies found").
