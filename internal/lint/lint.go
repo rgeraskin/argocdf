@@ -329,11 +329,42 @@ func (r *Runner) execTool(ctx context.Context, dir, label string, argv []string,
 	return out
 }
 
+// skippedForNoPolicies is what a built-in adapter contributes on a side whose
+// policy directory holds nothing: one NOTE, and status skipped.
+//
+// The note exists because silence made the report state something false. A side
+// without policies is not linted, so every finding is labelled with the OTHER side
+// only — and the label contract reads a one-sided finding as "introduced by this
+// change" ([target]) or "fixed by it" ([base]). On the PR that adds the first
+// policy, that turns "pre-existing violations, newly detected" into "this PR
+// introduced N violations", which is the report asserting something untrue rather
+// than merely omitting something. And it misfires exactly when the tolerance is
+// used: with policies on both branches the skip never happens at all.
+//
+// Reported per SIDE rather than as one summary note about the asymmetry, because
+// that is what the fact is: a property of this side, in the same warning list and
+// the same [base]/[target] vocabulary as the findings it qualifies. The comparison
+// then needs no cross-side inference, and the mirror case — a change that DELETES
+// the policies — is covered by the same line without knowing about it.
+//
+// The cost is a warning badge on every affected application when a PR adds a first
+// policy, since ParseWarnings has no severity tier. Accepted: the badge is not a
+// false claim about that application, and the alternative was a report that
+// misattributes its findings.
+func skippedForNoPolicies(label string) result {
+	return result{
+		lines:  []string{label + ": no policies on this side — not linted"},
+		status: statusSkipped,
+	}
+}
+
 // resolvePolicyDir returns the absolute policy directory and whether it holds
 // anything. A missing or EMPTY directory reports false rather than an error: on
 // the base side of a PR that adds the first policy there is legitimately nothing
 // to apply, and both tools treat an empty policy set as a hard error, which would
-// otherwise attach a spurious lint failure to every application.
+// otherwise attach a spurious lint failure to every application. Not linting is
+// still reported — as a note, see skippedForNoPolicies — because it changes how
+// the findings on the other side must be read.
 //
 // A RELATIVE path resolves against the side's worktree, which is what makes each
 // side lint with its own version of the policies. An ABSOLUTE path is used as

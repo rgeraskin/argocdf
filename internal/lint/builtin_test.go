@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -188,12 +189,36 @@ func TestResolvePolicyDir(t *testing.T) {
 	}
 }
 
-// A side with no policies produces no findings AND no warning: it is the normal
-// shape, not a failure, and warning about it would fire on every application.
-func TestBuiltinsSkipSideWithoutPolicies(t *testing.T) {
+// A side with no policies is not a failure - it is the normal shape when a change
+// adds the first policy - but it is not silent either. Silence made the report
+// assert something false: an unlinted side produces findings on the OTHER side
+// only, and a one-sided finding reads as "introduced by this change" when it is
+// really "pre-existing, newly detected". One note per side says so, in the same
+// warning list and the same [base]/[target] vocabulary as the findings.
+func TestBuiltinsNoteSideWithoutPolicies(t *testing.T) {
 	r := &Runner{Kyverno: []string{"policies/kyverno"}, Conftest: []string{"policies/conftest"}, KubeContext: "ctx"}
-	if got := r.Lint(context.Background(), Subject{Worktree: t.TempDir()}, "kind: ConfigMap\n"); got != nil {
-		t.Errorf("Lint() = %#v, want nil", got)
+	got := r.Lint(context.Background(), Subject{Worktree: t.TempDir()}, "kind: ConfigMap\n")
+	want := []string{
+		"lint-kyverno#1 policies/kyverno: no policies on this side — not linted",
+		"lint-conftest#1 policies/conftest: no policies on this side — not linted",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Lint() =\n%#v\nwant\n%#v", got, want)
+	}
+}
+
+// The note is what an invocation CONTRIBUTED, so it counts in lines - while status
+// is what says the linter never ran. Pinned because the pair reads like a
+// contradiction (skipped, yet one line) and is easy to "fix" back to lines=0,
+// which would make a skip indistinguishable from a clean run again.
+func TestSkipNoteIsLoggedAsSkippedWithOneLine(t *testing.T) {
+	r := &Runner{Kyverno: []string{"policies/kyverno"}}
+	lines := lintLogLines(t, r)
+	line := lineWith(t, lines, "linter=kyverno#1")
+	for _, want := range []string{"status=skipped", "lines=1", "INFO"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("log line %q, want %s", line, want)
+		}
 	}
 }
 

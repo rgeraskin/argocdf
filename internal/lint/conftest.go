@@ -42,7 +42,7 @@ func (r *Runner) runConftest(ctx context.Context, name, worktree, policyDir, con
 	if !ok {
 		// See runKyverno: a side without policies is the PR-adds-a-policy shape,
 		// and an empty directory makes conftest error ("no policies found").
-		return result{status: statusSkipped}
+		return skippedForNoPolicies(label)
 	}
 
 	argv := []string{

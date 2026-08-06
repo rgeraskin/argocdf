@@ -54,8 +54,9 @@ func (r *Runner) runKyverno(ctx context.Context, name, worktree, policyDir, cont
 		// No policies on THIS side: the normal shape when a PR adds the first
 		// policy, so the base side has nothing to apply. Handing kyverno an
 		// empty or missing directory makes it error, which would surface as a
-		// spurious lint failure on every app.
-		return result{status: statusSkipped}
+		// spurious lint failure on every app — but the side going unlinted is
+		// reported, because it changes how the other side's findings read.
+		return skippedForNoPolicies(label)
 	}
 
 	// Refused rather than defaulted: kyverno would silently fall back to the
