@@ -19,6 +19,9 @@ All notable changes to this project will be documented in this file.
 - Fix: ArgoCD's `--api-versions` flood no longer buries the log line it belongs to
   ArgoCD passes one `--api-versions` pair per group/version AND per kind the cluster advertises, then quotes the whole helm command line into the record it logs on failure: 16,000 characters against a cluster advertising 309 of them, of which the last ~180 are the actual failure — unreadable in a terminal, useless to grep. Runs of those pairs now collapse to `--api-versions <309 elided>`. (An error travelling into a PR comment was never affected: ArgoCD strips the list there itself. The log record escapes that because it is written inside the helm wrapper, before the message is rewritten.)
 
+- Fix: `--verbose` now actually enables ArgoCD's debug stream
+  0.5.0 advertised `--verbose` as re-emitting everything ArgoCD logs through argocdf's own logger, but only the QUIET path ever set a level: a verbose run stayed at logrus's default, where ArgoCD's debug records were filtered before argocdf could forward them. The level is now set explicitly in both directions, and argocdf's own `ARGOCD_LOG_LEVEL=error` default is undone when a later configuration turns verbosity on — a value you set yourself is never touched.
+
 ## 0.5.0
 
 - BREAKING: `--namespace`/`-n` is replaced by `--argocd-namespace`

@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -231,5 +233,63 @@ func TestLogrusForwarderElidesAPIVersions(t *testing.T) {
 	}
 	if !strings.Contains(got, "Error: boom") {
 		t.Errorf("line %q lost the actual failure", got)
+	}
+}
+
+// --verbose promises the full ArgoCD stream as a debug channel, which requires
+// setting the logrus LEVEL: only quieting it left verbose runs at logrus's own
+// default (Info), where ArgoCD's debug records were dropped before the hook ran.
+// Also pins that the quiet default is undone rather than sticking, which is what a
+// second (verbose) configuration in one process would otherwise inherit.
+func TestConfigureDependencyLoggingLevels(t *testing.T) {
+	t.Setenv("ARGOCD_LOG_LEVEL", "")
+	t.Setenv("ARGOCD_LOG_FORMAT", "")
+	quietedTracer = false
+	t.Cleanup(func() { quietedTracer = false })
+
+	var buf bytes.Buffer
+	logger := log.New(&buf)
+	logger.SetLevel(log.DebugLevel)
+
+	configureDependencyLogging(logger, false)
+	if got := logrus.GetLevel(); got != logrus.ErrorLevel {
+		t.Errorf("quiet logrus level = %v, want error", got)
+	}
+	if got := os.Getenv("ARGOCD_LOG_LEVEL"); got != "error" {
+		t.Errorf("quiet ARGOCD_LOG_LEVEL = %q, want error", got)
+	}
+
+	configureDependencyLogging(logger, true)
+	if got := logrus.GetLevel(); got != logrus.DebugLevel {
+		t.Errorf("verbose logrus level = %v, want debug", got)
+	}
+	// argocdf's own default must not survive into a verbose run.
+	if got := os.Getenv("ARGOCD_LOG_LEVEL"); got != "" {
+		t.Errorf("verbose ARGOCD_LOG_LEVEL = %q, want it cleared", got)
+	}
+
+	// A debug record now reaches the forwarder, which is what the level change buys.
+	buf.Reset()
+	logrus.Debug("argocd-debug-probe")
+	if !strings.Contains(buf.String(), "argocd-debug-probe") {
+		t.Errorf("verbose run dropped an ArgoCD debug record: %q", buf.String())
+	}
+}
+
+// A value the USER set is never overwritten or cleared - only argocdf's own default
+// is undone.
+func TestConfigureDependencyLoggingKeepsUserLogLevel(t *testing.T) {
+	t.Setenv("ARGOCD_LOG_LEVEL", "info")
+	quietedTracer = false
+	t.Cleanup(func() { quietedTracer = false })
+
+	logger := log.New(io.Discard)
+	configureDependencyLogging(logger, false)
+	if got := os.Getenv("ARGOCD_LOG_LEVEL"); got != "info" {
+		t.Errorf("quiet run overwrote the user's value: %q", got)
+	}
+	configureDependencyLogging(logger, true)
+	if got := os.Getenv("ARGOCD_LOG_LEVEL"); got != "info" {
+		t.Errorf("verbose run discarded the user's value: %q", got)
 	}
 }

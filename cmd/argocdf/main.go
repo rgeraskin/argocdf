@@ -392,6 +392,11 @@ func humanizeBytes(n int64) string {
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
+// quietedTracer records that argocdf DEFAULTED ARGOCD_LOG_LEVEL to error, so a
+// later verbose configuration can undo its own default without discarding a value
+// the user set.
+var quietedTracer bool
+
 // argocdExecIDField is the logrus field ArgoCD's util/exec stamps on every record
 // about a subprocess (exec.go:176), and therefore what tells the two sources of
 // the global logrus stream apart. A rename upstream costs the sub-prefix, not
@@ -552,15 +557,30 @@ func configureDependencyLogging(logger *log.Logger, debug bool) {
 		logger: logger.WithPrefix("argocd"),
 		exec:   logger.WithPrefix("argocd/exec"),
 	})
-	if !debug {
+	// Set the level EXPLICITLY in both branches. Only quieting it left --verbose at
+	// logrus's own default (Info), so ArgoCD's DEBUG records were filtered before
+	// the hook could forward them - the full stream --verbose promises never
+	// arrived. It also made reconfiguration sticky: a quiet setup followed by a
+	// verbose one kept the quiet level.
+	if debug {
+		logrus.SetLevel(logrus.DebugLevel)
+	} else {
 		logrus.SetLevel(logrus.ErrorLevel)
 	}
 
 	if os.Getenv(argocommon.EnvLogFormat) == "" {
 		_ = os.Setenv(argocommon.EnvLogFormat, "text")
 	}
-	if !debug && os.Getenv(argocommon.EnvLogLevel) == "" {
+	// The tracer reads its level from the environment, so quieting it means setting
+	// a variable - and undoing that on a later verbose configuration means knowing
+	// whether the value is OURS. A user's own ARGOCD_LOG_LEVEL is never touched.
+	switch {
+	case debug && quietedTracer:
+		_ = os.Unsetenv(argocommon.EnvLogLevel)
+		quietedTracer = false
+	case !debug && os.Getenv(argocommon.EnvLogLevel) == "":
 		_ = os.Setenv(argocommon.EnvLogLevel, "error")
+		quietedTracer = true
 	}
 
 	if debug {
