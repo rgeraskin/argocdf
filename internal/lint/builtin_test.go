@@ -31,9 +31,9 @@ const conftestReportJSON = `[
  {"filename":"","namespace":"other_rules","successes":1}]`
 
 func TestParseKyvernoReport(t *testing.T) {
-	got := parseKyvernoReport("lint-kyverno#1 policies/kyverno", kyvernoReportJSON).lines
+	got := parseKyvernoReport(identify(kindKyverno, 1), kyvernoReportJSON).lines
 	want := []string{
-		"[kyverno/disallow-latest-tag] Deployment/cluster-info-web: container images must be pinned to a tag (':latest' or tag-less images are not allowed)",
+		"[lint-kyverno#1/disallow-latest-tag] Deployment/cluster-info-web: container images must be pinned to a tag (':latest' or tag-less images are not allowed)",
 	}
 	if len(got) != len(want) || (len(got) > 0 && got[0] != want[0]) {
 		t.Errorf("parseKyvernoReport() = %#v, want %#v", got, want)
@@ -52,7 +52,7 @@ func TestParseKyvernoReportLineShape(t *testing.T) {
 		{
 			name:   "warn counts as a finding",
 			report: `{"results":[{"policy":"p","result":"warn","resources":[{"kind":"Pod","name":"x"}],"message":"m"}]}`,
-			want:   []string{"[kyverno/p] Pod/x: m"},
+			want:   []string{"[lint-kyverno#1/p] Pod/x: m"},
 		},
 		{
 			name:   "pass and skip are not findings",
@@ -67,12 +67,12 @@ func TestParseKyvernoReportLineShape(t *testing.T) {
 			// expression simply stops producing findings.
 			name:   "an error IS reported, marked to distinguish setup from manifests",
 			report: `{"results":[{"policy":"p","result":"error","message":"expression 'x' resulted in error: no such key: y"}]}`,
-			want:   []string{"[kyverno/p] ERROR expression 'x' resulted in error: no such key: y"},
+			want:   []string{"[lint-kyverno#1/p] ERROR expression 'x' resulted in error: no such key: y"},
 		},
 		{
 			name:   "an error WITH a resource still names it",
 			report: `{"results":[{"policy":"p","result":"error","resources":[{"kind":"Pod","name":"x"}],"message":"boom"}]}`,
-			want:   []string{"[kyverno/p] ERROR Pod/x: boom"},
+			want:   []string{"[lint-kyverno#1/p] ERROR Pod/x: boom"},
 		},
 		{
 			// SYNTHETIC: kyverno 1.18 emits one resource per result for both
@@ -83,17 +83,17 @@ func TestParseKyvernoReportLineShape(t *testing.T) {
 			// moment any producer groups them.
 			name:   "every resource gets its own line, not just the first",
 			report: `{"results":[{"policy":"p","result":"fail","resources":[{"kind":"Deployment","name":"a"},{"kind":"StatefulSet","name":"b"}],"message":"m"}]}`,
-			want:   []string{"[kyverno/p] Deployment/a: m", "[kyverno/p] StatefulSet/b: m"},
+			want:   []string{"[lint-kyverno#1/p] Deployment/a: m", "[lint-kyverno#1/p] StatefulSet/b: m"},
 		},
 		{
 			name:   "multi-line message folds onto one line, since one line = one warning",
 			report: `{"results":[{"policy":"p","result":"fail","resources":[{"kind":"Pod","name":"x"}],"message":"first\nsecond"}]}`,
-			want:   []string{"[kyverno/p] Pod/x: first second"},
+			want:   []string{"[lint-kyverno#1/p] Pod/x: first second"},
 		},
 		{
 			name:   "no resources: message stands alone rather than naming null/null",
 			report: `{"results":[{"policy":"p","result":"fail","message":"m"}]}`,
-			want:   []string{"[kyverno/p] m"},
+			want:   []string{"[lint-kyverno#1/p] m"},
 		},
 		{
 			name:   "no results at all",
@@ -103,7 +103,7 @@ func TestParseKyvernoReportLineShape(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := parseKyvernoReport("label", tt.report).lines
+			got := parseKyvernoReport(identify(kindKyverno, 1), tt.report).lines
 			if strings.Join(got, "|") != strings.Join(tt.want, "|") {
 				t.Errorf("got %#v, want %#v", got, tt.want)
 			}
@@ -112,9 +112,9 @@ func TestParseKyvernoReportLineShape(t *testing.T) {
 }
 
 func TestParseConftestReport(t *testing.T) {
-	got := parseConftestReport("lint-conftest#1 policies/conftest", conftestReportJSON).lines
+	got := parseConftestReport(identify(kindConftest, 1), conftestReportJSON).lines
 	want := []string{
-		`[conftest/no_plaintext_credentials] ConfigMap/cluster-info-cm: data key "note" must not carry a plaintext credential`,
+		`[lint-conftest#1/no_plaintext_credentials] ConfigMap/cluster-info-cm: data key "note" must not carry a plaintext credential`,
 	}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Errorf("parseConftestReport() = %#v, want %#v", got, want)
@@ -123,8 +123,8 @@ func TestParseConftestReport(t *testing.T) {
 
 func TestParseConftestReportFailuresBeforeWarnings(t *testing.T) {
 	report := `[{"namespace":"ns","failures":[{"msg":"f1"},{"msg":"f2"}],"warnings":[{"msg":"w1"}]}]`
-	got := parseConftestReport("label", report).lines
-	want := []string{"[conftest/ns] f1", "[conftest/ns] f2", "[conftest/ns] w1"}
+	got := parseConftestReport(identify(kindConftest, 1), report).lines
+	want := []string{"[lint-conftest#1/ns] f1", "[lint-conftest#1/ns] f2", "[lint-conftest#1/ns] w1"}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Errorf("got %#v, want %#v", got, want)
 	}
@@ -135,8 +135,21 @@ func TestParseConftestReportFailuresBeforeWarnings(t *testing.T) {
 // It counts as FAILED, not as one finding: the tool exited 0 and said something
 // argocdf cannot read, so the manifests went unchecked.
 func TestParseReportsSurfaceUnparsableOutput(t *testing.T) {
-	for _, parse := range []func(string, string) result{parseKyvernoReport, parseConftestReport} {
-		got := parse("label", "not json at all")
+	// The identity must MATCH the parser: running conftest's parser under a kyverno
+	// identity would mislabel every line the moment this asserted on the bracket.
+	parsers := []struct {
+		kind  string
+		parse func(linterID, string) result
+	}{
+		{kind: kindKyverno, parse: parseKyvernoReport},
+		{kind: kindConftest, parse: parseConftestReport},
+	}
+	for _, p := range parsers {
+		id := identify(p.kind, 1)
+		got := p.parse(id, "not json at all")
+		if !strings.HasPrefix(got.lines[0], id.bracket()) {
+			t.Errorf("line %q does not open with %s", got.lines[0], id.bracket())
+		}
 		if len(got.lines) != 1 || !strings.Contains(got.lines[0], "unparsable report") {
 			t.Errorf("got %#v, want one 'unparsable report' warning", got.lines)
 		}
@@ -199,8 +212,8 @@ func TestBuiltinsNoteSideWithoutPolicies(t *testing.T) {
 	r := &Runner{Kyverno: []string{"policies/kyverno"}, Conftest: []string{"policies/conftest"}, KubeContext: "ctx"}
 	got := r.Lint(context.Background(), Subject{Worktree: t.TempDir()}, "kind: ConfigMap\n")
 	want := []string{
-		"lint-kyverno#1 policies/kyverno: no policies on this side — not linted",
-		"lint-conftest#1 policies/conftest: no policies on this side — not linted",
+		`[lint-kyverno#1] not linted: no policies in "policies/kyverno"`,
+		`[lint-conftest#1] not linted: no policies in "policies/conftest"`,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Lint() =\n%#v\nwant\n%#v", got, want)
@@ -393,5 +406,94 @@ func TestRunOneTimeoutBoundsWallClock(t *testing.T) {
 	}
 	if elapsed > 10*time.Second {
 		t.Errorf("took %s, want the timeout to bound wall-clock", elapsed)
+	}
+}
+
+// A finding's bracket carries the same identity as every other line about that
+// linter - the FLAG - so one grep finds all of it. The ordinal is what keeps two
+// directories of the same tool apart when both hold a policy of the same name: the
+// collision the ordinals exist for, one level in from the flags.
+func TestFindingBracketCarriesTheLinterIdentity(t *testing.T) {
+	report := `{"results":[{"policy":"same-name","result":"fail","resources":[{"kind":"Pod","name":"x"}],"message":"m"}]}`
+
+	first := parseKyvernoReport(identify(kindKyverno, 1), report).lines
+	second := parseKyvernoReport(identify(kindKyverno, 2), report).lines
+
+	if len(first) != 1 || first[0] != "[lint-kyverno#1/same-name] Pod/x: m" {
+		t.Errorf("first dir = %#v, want [lint-kyverno#1/same-name] Pod/x: m", first)
+	}
+	if len(second) != 1 || second[0] != "[lint-kyverno#2/same-name] Pod/x: m" {
+		t.Errorf("second dir = %#v, want [lint-kyverno#2/same-name] Pod/x: m", second)
+	}
+}
+
+// The SHAPES of the lines argocdf authors about a linter, pinned in one place.
+// Two things depend on them beyond readability: the e2e review gate bans them from
+// being pinned as expectations (a lint crash must never become a stored
+// expectation), and it keys on these shapes to do it. A reformat here silently
+// hollows that ban, which is how a crashing adapter would start passing review.
+func TestHealthLineShapes(t *testing.T) {
+	worktree := t.TempDir()
+	populated := filepath.Join(worktree, "policies", "kyverno")
+	if err := os.MkdirAll(populated, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(populated, "p.yaml"), []byte("kind: X\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name string
+		run  func() []string
+		want string
+	}{
+		{
+			name: "shell command exits non-zero",
+			run: func() []string {
+				return (&Runner{Commands: []string{"exit 3"}, Timeout: 5 * time.Second}).
+					Lint(context.Background(), Subject{}, "")
+			},
+			want: "[lint#1] exit status 3",
+		},
+		{
+			name: "shell command times out",
+			run: func() []string {
+				return (&Runner{Commands: []string{"sleep 30"}, Timeout: 50 * time.Millisecond}).
+					Lint(context.Background(), Subject{}, "")
+			},
+			want: "[lint#1] timeout after 50ms",
+		},
+		{
+			name: "built-in refuses without a resolved context",
+			run: func() []string {
+				return (&Runner{Kyverno: []string{"policies/kyverno"}}).
+					Lint(context.Background(), Subject{Worktree: worktree}, "")
+			},
+			want: "[lint-kyverno#1] no resolved kube context, refusing to lint against an unknown cluster",
+		},
+		{
+			// The ONE health line that keeps its argument: it is about that
+			// directory being absent, so naming it is the content of the note.
+			name: "built-in skips a side with no policies",
+			run: func() []string {
+				return (&Runner{Conftest: []string{"policies/absent"}}).
+					Lint(context.Background(), Subject{Worktree: worktree}, "")
+			},
+			want: `[lint-conftest#1] not linted: no policies in "policies/absent"`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.run()
+			if len(got) != 1 || got[0] != tt.want {
+				t.Errorf("got %#v, want [%q]", got, tt.want)
+			}
+		})
+	}
+
+	// Reported through the same shape, without a report to parse.
+	if got := parseKyvernoReport(identify(kindKyverno, 1), "not json").lines; len(got) != 1 ||
+		!strings.HasPrefix(got[0], "[lint-kyverno#1] unparsable report: ") {
+		t.Errorf("unparsable = %#v, want a [lint-kyverno#1] unparsable report: … line", got)
 	}
 }

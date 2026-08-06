@@ -3,10 +3,12 @@ package lint
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -76,7 +78,7 @@ func TestLintFailureIncludesFirstStderrLine(t *testing.T) {
 func TestLintCommandNotFound(t *testing.T) {
 	r := newRunner(`definitely-not-a-real-binary-xyz`)
 	got := r.Lint(context.Background(), Subject{}, "")
-	if len(got) != 1 || !strings.HasPrefix(got[0], "lint#1 ") {
+	if len(got) != 1 || !strings.HasPrefix(got[0], "[lint#1] ") {
 		t.Errorf("expected a single lint error line, got %v", got)
 	}
 }
@@ -132,7 +134,7 @@ func TestLintParentContextCancellation(t *testing.T) {
 	}
 	// Cancellation is not a timeout: it surfaces through the generic error
 	// branch as a lint error line rather than being silently dropped.
-	if len(got) != 1 || strings.Contains(got[0], "timeout") || !strings.HasPrefix(got[0], "lint#1 ") {
+	if len(got) != 1 || strings.Contains(got[0], "timeout") || !strings.HasPrefix(got[0], "[lint#1] ") {
 		t.Errorf("expected a generic lint error line on cancellation, got %v", got)
 	}
 }
@@ -143,7 +145,7 @@ func TestLintParentDeadlineNotMisreportedAsTimeout(t *testing.T) {
 	// The runner's own timeout is far away; only the parent deadline fires.
 	r := &Runner{Commands: []string{`sleep 5`}, Timeout: 10 * time.Second}
 	got := r.Lint(ctx, Subject{}, "")
-	if len(got) != 1 || !strings.HasPrefix(got[0], "lint#1 ") {
+	if len(got) != 1 || !strings.HasPrefix(got[0], "[lint#1] ") {
 		t.Fatalf("expected a single lint error line, got %v", got)
 	}
 	if strings.Contains(got[0], "timeout after") {
@@ -244,27 +246,27 @@ func TestLintLogsOneLinePerInvocation(t *testing.T) {
 	}
 }
 
-// The log value drops the "lint-" the linter= field already implies; the REPORT
-// label keeps the flag spelling, because a PR comment has no log beside it and
-// the label is what a reader would have to type. Pinned together so the pair
-// cannot drift apart.
-func TestLinterNamesKeepFlagSpellingInReportsOnly(t *testing.T) {
+// A REPORT names a linter one way for everything it produces - the FLAG - and the
+// LOG drops the prefix its field name repeats. Two spellings, one per surface, and
+// pinned together so the pair cannot drift into one per line kind.
+func TestLinterIdentityPerSurface(t *testing.T) {
 	tests := []struct {
 		kind       string
 		wantLog    string
 		wantReport string
 	}{
-		{kind: kindCommand, wantLog: "lint#1", wantReport: "lint#1"},
-		{kind: kindKyverno, wantLog: "kyverno#1", wantReport: "lint-kyverno#1"},
-		{kind: kindConftest, wantLog: "conftest#1", wantReport: "lint-conftest#1"},
+		{kind: kindCommand, wantLog: "lint#1", wantReport: "[lint#1]"},
+		{kind: kindKyverno, wantLog: "kyverno#1", wantReport: "[lint-kyverno#1]"},
+		{kind: kindConftest, wantLog: "conftest#1", wantReport: "[lint-conftest#1]"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.kind, func(t *testing.T) {
-			if got := logHandle(tt.kind, 1); got != tt.wantLog {
-				t.Errorf("logHandle(%q, 1) = %q, want %q", tt.kind, got, tt.wantLog)
+			id := identify(tt.kind, 1)
+			if id.handle != tt.wantLog {
+				t.Errorf("log handle = %q, want %q", id.handle, tt.wantLog)
 			}
-			if got := reportLabel(tt.kind, 1); got != tt.wantReport {
-				t.Errorf("reportLabel(%q, 1) = %q, want %q", tt.kind, got, tt.wantReport)
+			if got := id.bracket(); got != tt.wantReport {
+				t.Errorf("report bracket = %q, want %q", got, tt.wantReport)
 			}
 		})
 	}
@@ -286,7 +288,7 @@ func TestRepeatedCommandsGetDistinctOrdinals(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("got %#v, want one failure line per command", got)
 	}
-	if !strings.HasPrefix(got[0], "lint#1 ") || !strings.HasPrefix(got[1], "lint#2 ") {
+	if !strings.HasPrefix(got[0], "[lint#1] ") || !strings.HasPrefix(got[1], "[lint#2] ") {
 		t.Errorf("report labels = %#v, want lint#1 then lint#2", got)
 	}
 }
@@ -452,5 +454,95 @@ func TestDisplayCommandTruncatesAndFlattens(t *testing.T) {
 	}
 	if !strings.HasSuffix(got, "...") {
 		t.Errorf("truncated command should end with ellipsis, got %q", got)
+	}
+}
+
+// ARGOCDF_LINT_ID lets a shell adapter prefix its findings exactly as argocdf
+// prefixes its own lines about the same linter. It is per-INVOCATION, which is the
+// part worth pinning: a value written into the shared Env map would be raced by
+// concurrent application renders and would report one linter's identity under
+// another's.
+func TestLintExportsPerInvocationIdentity(t *testing.T) {
+	r := &Runner{
+		Commands: []string{`echo "id=$ARGOCDF_LINT_ID"`, `echo "id=$ARGOCDF_LINT_ID"`},
+		Timeout:  5 * time.Second,
+		Env:      map[string]string{"ARGOCDF_CONTEXT": "ctx"},
+	}
+	got := r.Lint(context.Background(), Subject{}, "")
+	want := []string{"id=lint#1", "id=lint#2"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("exported identities = %#v, want %#v", got, want)
+	}
+	// The shared map must be untouched, or the next invocation inherits this one's.
+	if _, leaked := r.Env["ARGOCDF_LINT_ID"]; leaked {
+		t.Error("per-invocation value leaked into the shared Env map")
+	}
+}
+
+// The built-in adapters take their identity as data, so a stale ARGOCDF_LINT_ID in
+// the environment cannot influence them — and the value a command sees is always
+// argocdf's, never an inherited one.
+func TestLintIdentityOverridesInheritedValue(t *testing.T) {
+	t.Setenv("ARGOCDF_LINT_ID", "from-the-shell")
+	r := newRunner(`echo "id=$ARGOCDF_LINT_ID"; echo "count=$(env | grep -c '^ARGOCDF_LINT_ID=')"`)
+	got := r.Lint(context.Background(), Subject{}, "")
+	want := []string{"id=lint#1", "count=1"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %#v, want %#v", got, want)
+	}
+}
+
+// Concurrent Lint calls must not see each other's identity.
+//
+// This is the one claim in the per-invocation identity design that no other test
+// exercises: ARGOCDF_LINT_ID is layered over Env per invocation precisely BECAUSE Env
+// is one map shared by every command of the run, and processOneApp lints from
+// --concurrency goroutines at once. A value written into the shared map would race,
+// and the symptom would be a report attributing one linter's findings to another -
+// intermittently, which is exactly what reading the code does not catch. Run under
+// `mise run test-race` for the detector; the assertion below also fails a
+// cross-contamination that happens to win the race deterministically.
+func TestLintConcurrentInvocationsKeepTheirOwnIdentity(t *testing.T) {
+	const apps = 8
+	r := &Runner{
+		// Two commands, so each goroutine exercises both ordinals, and the app name
+		// travels a different channel (Subject) from the identity (env).
+		Commands: []string{`echo "$ARGOCDF_LINT_ID"`, `echo "$ARGOCDF_LINT_ID"`},
+		Timeout:  10 * time.Second,
+		Env:      map[string]string{"ARGOCDF_CONTEXT": "ctx"},
+	}
+
+	type result struct {
+		app   string
+		lines []string
+	}
+	results := make(chan result, apps)
+	var wg sync.WaitGroup
+	for i := 0; i < apps; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			app := fmt.Sprintf("app-%d", i)
+			results <- result{app: app, lines: r.Lint(context.Background(),
+				Subject{App: app, Namespace: "ns", Side: "base"}, "")}
+		}(i)
+	}
+	wg.Wait()
+	close(results)
+
+	seen := 0
+	for got := range results {
+		seen++
+		want := []string{"lint#1", "lint#2"}
+		if !reflect.DeepEqual(got.lines, want) {
+			t.Errorf("%s saw %#v, want %#v", got.app, got.lines, want)
+		}
+	}
+	if seen != apps {
+		t.Errorf("collected %d results, want %d", seen, apps)
+	}
+	// The shared map is still exactly what the caller configured.
+	if !reflect.DeepEqual(r.Env, map[string]string{"ARGOCDF_CONTEXT": "ctx"}) {
+		t.Errorf("shared Env mutated to %#v", r.Env)
 	}
 }

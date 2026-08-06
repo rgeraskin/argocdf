@@ -42,8 +42,11 @@ directive per line, applied to expected/<case>/reports/unified.diff:
 
 A case may also have expected/<case>/same-report-as naming another case: every
 report file of the two must then be byte-identical after each case's own name
-is normalized out. That is what makes "these two cases differ only in the flag
-that selects the implementation" a checked claim instead of a review-time one.
+and each linter's identity are normalized out. That is what makes "these two
+cases differ only in the flag that selects the implementation" a checked claim
+instead of a review-time one - the identity is normalized because it NAMES that
+flag (lint#1 for a --lint command, lint-kyverno#1 for the built-in), so it is
+the one token expected to differ; the findings either side of it are not.
 
 must:/must-not: assert what is present or absent; expect: is what makes a
 report EXHAUSTIVE. Without it an extra application section or an extra
@@ -232,8 +235,15 @@ for dir in expected/*/; do
         fail "$name" "same-report-as $peer: $f exists on one side only"
         continue
       fi
-      if ! diff -q <(sed "s/$name/CASE/g" "$a") <(sed "s/$peer/CASE/g" "$b") >/dev/null 2>&1; then
-        fail "$name" "same-report-as $peer: $f differs beyond the case name (the equivalence claim broke)"
+      # The linter IDENTITY is normalized alongside the case name, because the two
+      # cases legitimately differ there: a shell adapter is lint#N and a built-in
+      # is lint-<tool>#N, and those really are different flags. The claim being
+      # checked is that the FINDINGS and the report structure are the same, not
+      # that the flags were. Everything else stays a byte comparison, so an adapter
+      # losing a finding or a format drifting still fails here.
+      if ! diff -q <(sed -E "s/$name/CASE/g; s/\[lint(-[a-z]+)?#[0-9]+/[LINTER/g" "$a") \
+                   <(sed -E "s/$peer/CASE/g; s/\[lint(-[a-z]+)?#[0-9]+/[LINTER/g" "$b") >/dev/null 2>&1; then
+        fail "$name" "same-report-as $peer: $f differs beyond the case name and linter identity (the equivalence claim broke)"
       fi
     done
   done < "$peer_file"
@@ -253,20 +263,20 @@ for dir in expected/*/; do
     [ -f "$rep$f" ] || fail "$name" "missing expected/$name/reports/$f"
   done
 
-  # Never-pin patterns. The lint rule is scoped to the runner's warning-line
-  # shape (lint "<cmd>": exit status N) so legitimately pinned RENDER errors
-  # that mention an exit status (error-invalid-yaml) still pass — the scope
-  # comes from the lint "<cmd>": prefix. No trailing colon: a lint command
-  # that dies without stderr produces the bare 'exit status N' form.
+  # Never-pin patterns. A lint adapter that CRASHED must never become a stored
+  # expectation - a missing binary, a broken policy, a timeout or a changed report
+  # format would otherwise be pinned as though it were the case's point.
+  #
+  # The scope is the shape argocdf gives lines it authors ITSELF about a linter:
+  # the bracketed identity, then the failure. That prefix is what keeps a
+  # legitimately pinned RENDER error mentioning an exit status (error-invalid-yaml)
+  # passing, and it is why these patterns must be kept in step with
+  # TestHealthLineShapes in internal/lint - a reformat there hollows the ban here.
+  # No trailing colon on 'exit status N': a command that dies without stderr
+  # produces the bare form.
   ban "$name" "$rep" 'jq: error' "pinned 'jq: error' (lint adapter crash)"
-  ban "$name" "$rep" 'lint ("|&#34;)[^"]*("|&#34;): exit status [0-9]+' "pinned lint-adapter failure line ('exit status N' on a lint warning)"
-  # The BUILT-IN adapters (--lint-kyverno/--lint-conftest) have their own warning
-  # vocabulary, prefixed with the flag name and the policy dir instead of a quoted
-  # command. Without these the gate would happily pin a missing kyverno binary, a
-  # broken policy, a timeout or a changed report format - the same hollow pins the
-  # shell rule above exists to stop.
-  ban "$name" "$rep" 'lint-(kyverno|conftest) [^:]*: (exit status [0-9]+|timeout after|signal:)' \
-    "pinned built-in lint adapter failure (exit status/timeout on a --lint-kyverno/--lint-conftest warning)"
+  ban "$name" "$rep" '\[lint(-[a-z]+)?#[0-9]+\] (exit status [0-9]+|timeout after|signal:)' \
+    "pinned lint-adapter failure line (exit status/timeout/signal on a lint warning)"
   ban "$name" "$rep" 'with no report output' "pinned built-in lint adapter failure ('with no report output')"
   ban "$name" "$rep" 'unparsable report' "pinned built-in lint adapter failure ('unparsable report' - the tool's output format changed)"
   ban "$name" "$rep" 'no resolved kube context' "pinned built-in kyverno refusal (no resolved kube context)"

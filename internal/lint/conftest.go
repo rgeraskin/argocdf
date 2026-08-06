@@ -35,14 +35,13 @@ type conftestResults []struct {
 // harmless (they define test_* rules, not deny rules), but tool-specific test
 // manifests are not universally safe (a kyverno-test.yaml beside a kyverno
 // policy makes `kyverno apply` emit nothing at all, silently).
-func (r *Runner) runConftest(ctx context.Context, name, worktree, policyDir, content string) result {
-	label := name + " " + policyDir
+func (r *Runner) runConftest(ctx context.Context, id linterID, worktree, policyDir, content string) result {
 
 	dir, ok := resolvePolicyDir(worktree, policyDir)
 	if !ok {
 		// See runKyverno: a side without policies is the PR-adds-a-policy shape,
 		// and an empty directory makes conftest error ("no policies found").
-		return skippedForNoPolicies(label)
+		return skippedForNoPolicies(id.bracket(), policyDir)
 	}
 
 	argv := []string{
@@ -54,7 +53,7 @@ func (r *Runner) runConftest(ctx context.Context, name, worktree, policyDir, con
 		"-",
 	}
 
-	out := r.execTool(ctx, worktree, label, argv, content)
+	out := r.execTool(ctx, worktree, id.bracket(), argv, content)
 	if out.warning != "" {
 		return result{lines: []string{out.warning}, status: statusFailed}
 	}
@@ -62,18 +61,18 @@ func (r *Runner) runConftest(ctx context.Context, name, worktree, policyDir, con
 		return result{status: statusOK}
 	}
 
-	return parseConftestReport(label, out.stdout)
+	return parseConftestReport(id, out.stdout)
 }
 
 // parseConftestReport turns conftest's JSON output into warning lines. Split from
 // the exec path so the shape conftest actually emits can be pinned without the
 // binary. An unparsable report is FAILED, for the reason parseKyvernoReport
 // documents.
-func parseConftestReport(label, stdout string) result {
+func parseConftestReport(id linterID, stdout string) result {
 	var results conftestResults
 	if err := json.Unmarshal([]byte(stdout), &results); err != nil {
 		return result{
-			lines:  []string{fmt.Sprintf("%s: unparsable report: %v", label, err)},
+			lines:  []string{fmt.Sprintf("%s unparsable report: %v", id.bracket(), err)},
 			status: statusFailed,
 		}
 	}
@@ -82,10 +81,10 @@ func parseConftestReport(label, stdout string) result {
 	var warnings []string
 	for _, entry := range results {
 		for _, failure := range entry.Failures {
-			warnings = append(warnings, fmt.Sprintf("[conftest/%s] %s", entry.Namespace, singleLine(failure.Msg)))
+			warnings = append(warnings, fmt.Sprintf("[%s/%s] %s", id.name, entry.Namespace, singleLine(failure.Msg)))
 		}
 		for _, warning := range entry.Warnings {
-			warnings = append(warnings, fmt.Sprintf("[conftest/%s] %s", entry.Namespace, singleLine(warning.Msg)))
+			warnings = append(warnings, fmt.Sprintf("[%s/%s] %s", id.name, entry.Namespace, singleLine(warning.Msg)))
 		}
 	}
 	return result{lines: warnings, status: statusOK}

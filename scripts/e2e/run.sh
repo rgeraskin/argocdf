@@ -154,6 +154,10 @@ CASE_ARGS=(
   # base side has no policies, is not linted, and says so - the note that keeps its
   # [target]-only finding from reading as "introduced by this change".
   "lint-policy-added:--lint-kyverno policies/kyverno-added"
+  # The same tool twice, which is the only shape where a finding's ORDINAL is the
+  # thing distinguishing it: both invocations are kyverno, so #1/#2 (flag order) is
+  # all that says which directory a finding came from.
+  "lint-two-policy-dirs:--lint-kyverno policies/kyverno --lint-kyverno policies/kyverno-broken"
   # The ONLY case that renders without credentials, carrying the identical fixture to
   # private-chart-bump so the two differ in exactly one flag. It is the end-to-end
   # tripwire for the per-mode chart-cache scope: an anonymous run that SUCCEEDS means

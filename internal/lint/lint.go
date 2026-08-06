@@ -116,7 +116,8 @@ const (
 	kindConftest = "lint-conftest"
 )
 
-// logHandle and reportLabel name the Nth linter of a kind (1-based, flag order).
+// logHandle names the Nth linter of a kind in the LOG (1-based, flag order),
+// dropping the "lint-" prefix that the linter= field name already supplies.
 //
 // The ORDINAL exists because a repeated --lint has no usable identity of its
 // own: its only distinguishing datum is the command text, which is truncated to
@@ -125,11 +126,53 @@ const (
 // policy directory, but they carry the ordinal too — one rule for the whole
 // family beats an exception nobody remembers.
 func logHandle(kind string, n int) string {
-	return fmt.Sprintf("%s#%d", strings.TrimPrefix(kind, "lint-"), n)
+	return ordinal(strings.TrimPrefix(kind, "lint-"), n)
 }
 
-func reportLabel(kind string, n int) string {
-	return fmt.Sprintf("%s#%d", kind, n)
+// ordinal is the one place an identity's "#<n>" is formatted.
+func ordinal(name string, n int) string {
+	return fmt.Sprintf("%s#%d", name, n)
+}
+
+// linterID is one linter's identity in each of the two surfaces it appears in.
+//
+// A REPORT uses one spelling for everything about a linter, name — the FLAG that
+// configured it. A PR comment has no log beside it, so the identity has to be the
+// one a reader would have to type, and that has to hold for a finding as much as
+// for a line about the linter: `grep lint-kyverno#1` then finds everything that
+// linter produced. An earlier split (tool-spelled findings, flag-spelled health
+// lines) made no single grep able to do that, and the distinction it encoded is
+// already carried by the shape of the line.
+//
+// The LOG uses handle, the same identity minus the prefix its field name repeats.
+// Two spellings total, one per surface — not one per line kind.
+type linterID struct {
+	name   string
+	handle string
+}
+
+// bracket is how the identity appears in a report: bracketed, and FIRST after the
+// side label. A warning list mixes three kinds of line, and until they were
+// bracketed only the wording told them apart:
+//
+//	[base] [lint-kyverno#1/require-pinned-images] Deployment/web: images must be pinned
+//	[base] [lint-kyverno#1] not linted: no policies in "policies/kyverno"
+//	[base] resource ConfigMap/cm: duplicate key "a" (using last value)
+//
+// A bracket CONTINUING into a policy is a finding (a rule matched a resource, and
+// the text after it is the tool's). A bracket that ends at the linter is argocdf
+// speaking about the linter itself — timeout, skip, crash — where there is no
+// resource to name. No bracket at all is not lint: it comes from the diff layer,
+// which is why unbracketed health lines were ambiguous with parse warnings.
+//
+// The side label ([base]/[target], added later by diff.LabelSide) stays first:
+// which side a line describes outranks which subsystem produced it.
+func (id linterID) bracket() string { return "[" + id.name + "]" }
+
+func identify(kind string, n int) linterID {
+	// Both spellings are "<something>#<n>"; only the something differs, so the
+	// ordinal is formatted in ONE place and the pair cannot drift apart.
+	return linterID{name: ordinal(kind, n), handle: logHandle(kind, n)}
 }
 
 // Lint runs every configured linter over content, with the subject's worktree as
@@ -150,24 +193,24 @@ func reportLabel(kind string, n int) string {
 func (r *Runner) Lint(ctx context.Context, subject Subject, content string) []string {
 	var warnings []string
 	for i, command := range r.Commands {
-		label := reportLabel(kindCommand, i+1)
-		warnings = append(warnings, r.logged(subject, logHandle(kindCommand, i+1),
+		id := identify(kindCommand, i+1)
+		warnings = append(warnings, r.logged(subject, id.handle,
 			"command", displayCommand(command), func() result {
-				return r.runOne(ctx, label, command, subject.Worktree, content)
+				return r.runOne(ctx, id, command, subject.Worktree, content)
 			})...)
 	}
 	for i, policyDir := range r.Kyverno {
-		label := reportLabel(kindKyverno, i+1)
-		warnings = append(warnings, r.logged(subject, logHandle(kindKyverno, i+1),
+		id := identify(kindKyverno, i+1)
+		warnings = append(warnings, r.logged(subject, id.handle,
 			"policies", policyDir, func() result {
-				return r.runKyverno(ctx, label, subject.Worktree, policyDir, content)
+				return r.runKyverno(ctx, id, subject.Worktree, policyDir, content)
 			})...)
 	}
 	for i, policyDir := range r.Conftest {
-		label := reportLabel(kindConftest, i+1)
-		warnings = append(warnings, r.logged(subject, logHandle(kindConftest, i+1),
+		id := identify(kindConftest, i+1)
+		warnings = append(warnings, r.logged(subject, id.handle,
 			"policies", policyDir, func() result {
-				return r.runConftest(ctx, label, subject.Worktree, policyDir, content)
+				return r.runConftest(ctx, id, subject.Worktree, policyDir, content)
 			})...)
 	}
 	return warnings
@@ -180,7 +223,7 @@ type status string
 
 const (
 	statusOK      status = "ok"      // ran; whatever it emitted is findings
-	statusSkipped status = "skipped" // no policies on this side; never invoked
+	statusSkipped status = "skipped" // no policies for that side; never invoked
 	statusFailed  status = "failed"  // timeout, spawn failure, refusal, unusable report
 )
 
@@ -267,7 +310,7 @@ type toolOutput struct {
 // exit with no report is a real failure and must surface. A non-zero exit WITH a
 // report is normal: both tools exit non-zero precisely because they found
 // something.
-func (r *Runner) execTool(ctx context.Context, dir, label string, argv []string, content string) toolOutput {
+func (r *Runner) execTool(ctx context.Context, dir, linter string, argv []string, content string) toolOutput {
 	cancel := func() {}
 	if r.Timeout > 0 {
 		ctx, cancel = context.WithTimeoutCause(ctx, r.Timeout, errLintTimeout)
@@ -312,7 +355,7 @@ func (r *Runner) execTool(ctx context.Context, dir, label string, argv []string,
 	// which reads as "cleaner than reality". The shell path appends the same line
 	// while keeping its stdout; this keeps the two contracts aligned.
 	if errors.Is(context.Cause(ctx), errLintTimeout) {
-		out.warning = fmt.Sprintf("%s: timeout after %s", label, r.Timeout)
+		out.warning = fmt.Sprintf("%s timeout after %s", linter, r.Timeout)
 		return out
 	}
 
@@ -322,7 +365,7 @@ func (r *Runner) execTool(ctx context.Context, dir, label string, argv []string,
 		return out
 	}
 
-	out.warning = fmt.Sprintf("%s: %v with no report output", label, err)
+	out.warning = fmt.Sprintf("%s %v with no report output", linter, err)
 	if first := firstLine(stderr.String()); first != "" {
 		out.warning += ": " + first
 	}
@@ -351,9 +394,13 @@ func (r *Runner) execTool(ctx context.Context, dir, label string, argv []string,
 // policy, since ParseWarnings has no severity tier. Accepted: the badge is not a
 // false claim about that application, and the alternative was a report that
 // misattributes its findings.
-func skippedForNoPolicies(label string) result {
+func skippedForNoPolicies(linter, policyDir string) result {
+	// Shaped like every other line argocdf authors about a linter - outcome first,
+	// detail after the colon ("timeout after 10s", "exit status 3: ..."). The
+	// directory rides in the detail rather than as a second label, and nothing says
+	// "on this side": the [base]/[target] prefix already does.
 	return result{
-		lines:  []string{label + ": no policies on this side — not linted"},
+		lines:  []string{fmt.Sprintf("%s not linted: no policies in %q", linter, policyDir)},
 		status: statusSkipped,
 	}
 }
@@ -384,10 +431,11 @@ func resolvePolicyDir(worktree, policyDir string) (string, bool) {
 	return dir, true
 }
 
-// runOne runs one shell command. label identifies it in the warning lines it
-// contributes; the shell path can never be skipped, so it ends either ok or
-// failed.
-func (r *Runner) runOne(ctx context.Context, label, command, dir, content string) result {
+// runOne runs one shell command. id identifies it in the warning lines it
+// contributes and is exported to the command as ARGOCDF_LINT_ID; the shell path
+// can never be skipped, so it ends either ok or failed.
+func (r *Runner) runOne(ctx context.Context, id linterID, command, dir, content string) result {
+	label := id.bracket()
 	cancel := func() {}
 	if r.Timeout > 0 {
 		ctx, cancel = context.WithTimeoutCause(ctx, r.Timeout, errLintTimeout)
@@ -397,8 +445,16 @@ func (r *Runner) runOne(ctx context.Context, label, command, dir, content string
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
 	cmd.WaitDelay = waitDelay
 	cmd.Dir = dir
-	// nil (no Env configured) keeps the inherit-everything default.
-	cmd.Env = childEnv(os.Environ(), r.Env)
+	// ARGOCDF_LINT_ID is per-INVOCATION, so it is layered over Env here rather
+	// than living in it: Env is one map shared by every command of the run, and
+	// concurrent renders would race on a per-command value written into it.
+	//
+	// It exists so a shell adapter can prefix its findings exactly as argocdf
+	// prefixes its own lines about the same linter ([lint#2/policy-name]) - the
+	// identity is argocdf's to assign, and a command cannot infer its own position
+	// among the --lint flags. Exported unconditionally, so an adapter may require
+	// it and fail loudly rather than guess.
+	cmd.Env = childEnv(os.Environ(), r.commandEnv(id))
 	cmd.Stdin = strings.NewReader(content)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -411,18 +467,35 @@ func (r *Runner) runOne(ctx context.Context, label, command, dir, content string
 		return result{lines: warnings, status: statusOK}
 	}
 
+	// The COMMAND is not echoed back. The identity already says which --lint this
+	// was, and a reader who needs the text has it in the flag they wrote (the log
+	// line's command= carries only the same truncated prefix). Echoing it cost more
+	// than it gave: it
+	// was truncated to maxDisplayCommand anyway, and it put whatever the command
+	// contained - credentials included - into a PR comment.
 	if errors.Is(context.Cause(ctx), errLintTimeout) {
 		return result{
-			lines: append(warnings,
-				fmt.Sprintf("%s %q: timeout after %s", label, displayCommand(command), r.Timeout)),
+			lines:  append(warnings, fmt.Sprintf("%s timeout after %s", label, r.Timeout)),
 			status: statusFailed,
 		}
 	}
-	msg := fmt.Sprintf("%s %q: %v", label, displayCommand(command), err)
+	msg := fmt.Sprintf("%s %v", label, err)
 	if first := firstLine(stderr.String()); first != "" {
 		msg += ": " + first
 	}
 	return result{lines: append(warnings, msg), status: statusFailed}
+}
+
+// commandEnv is Env plus the variables that differ per invocation. Env itself is
+// never mutated: it is shared across every command and every concurrent
+// application render.
+func (r *Runner) commandEnv(id linterID) map[string]string {
+	env := make(map[string]string, len(r.Env)+1)
+	for k, v := range r.Env {
+		env[k] = v
+	}
+	env["ARGOCDF_LINT_ID"] = id.name
+	return env
 }
 
 // childEnv builds the environment of a lint child process: parent with every
@@ -432,11 +505,11 @@ func (r *Runner) runOne(ctx context.Context, label, command, dir, content string
 // The removal keeps the child's environment single-valued; it is NOT what makes
 // argocdf's value win. exec.Cmd deduplicates Env and keeps the LAST value for
 // each key, so appending alone would already override a stale inherited
-// ARGOCDF_CONTEXT (verified on go1.25 — an earlier version of this comment
-// claimed the opposite, and two code reviews filed a bug against the built-in
-// adapters' KUBECONFIG append on the strength of it). The scrub earns its place
-// by making the slice say exactly what the child will see, which is what the
-// tests below assert against.
+// ARGOCDF_CONTEXT (verified on go1.25). The inverted reading — that an appended
+// entry LOSES to an inherited one — is the easy mistake here, and it turns the
+// built-in adapters' KUBECONFIG append into a bug that is not there. The scrub
+// earns its place by making the slice say exactly what the child will see, which
+// is what the tests below assert against.
 //
 // This is NOT the reason the render engine scrubs HELM_*: there the inherited
 // values win because helm prefers its own HELM_* variables over the XDG_* ones
