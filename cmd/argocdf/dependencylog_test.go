@@ -130,3 +130,80 @@ func TestKlogHandler_EnabledDropsHighVerbosity(t *testing.T) {
 		t.Fatal("Enabled(info) = false, want true")
 	}
 }
+
+// forwardOne runs one logrus record through the forwarder and returns what
+// argocdf's own logger printed. The charm logger's level is a parameter because
+// the demotion's whole effect is what a DEFAULT (info-level) run shows.
+func forwardOne(t *testing.T, level log.Level, e *logrus.Entry) string {
+	t.Helper()
+	var buf bytes.Buffer
+	logger := log.New(&buf)
+	logger.SetLevel(level)
+	h := &logrusForwarder{
+		logger: logger.WithPrefix("argocd"),
+		exec:   logger.WithPrefix("argocd/exec"),
+	}
+	if err := h.Fire(e); err != nil {
+		t.Fatalf("Fire() error: %v", err)
+	}
+	return buf.String()
+}
+
+// The prefix has to say which of the global logrus stream's sources a line came
+// from: a subprocess (read the tool's stderr) or ArgoCD's Go code.
+func TestLogrusForwarderPrefixesSubprocessRecords(t *testing.T) {
+	tests := []struct {
+		name string
+		data logrus.Fields
+		want string
+	}{
+		{name: "a util/exec record", data: logrus.Fields{argocdExecIDField: "ce5f4"}, want: "argocd/exec:"},
+		{name: "anything else", data: nil, want: "argocd:"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := forwardOne(t, log.DebugLevel, &logrus.Entry{
+				Level:   logrus.ErrorLevel,
+				Message: "kustomize build failed",
+				Data:    tt.data,
+			})
+			if !strings.Contains(got, tt.want) {
+				t.Errorf("forwarded line %q, want prefix %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// The expected probe must not reach a default run's stderr, and a real failure
+// must. Both are asserted at the same logger level, because "quiet" here means
+// quiet relative to what else gets through — not a missing record.
+func TestLogrusForwarderDemotesRetriedMissingDependency(t *testing.T) {
+	const probe = "`helm template . --include-crds` failed exit status 1: Error: " +
+		"An error occurred while checking for chart dependencies. You may need to run " +
+		"`helm dependency build` to fetch missing dependencies: " +
+		"found in Chart.yaml, but missing in charts/ directory: argocd-template"
+	const real = "`helm dependency build` failed exit status 1: Error: no cached repo found"
+
+	probeEntry := &logrus.Entry{
+		Level:   logrus.ErrorLevel,
+		Message: probe,
+		Data:    logrus.Fields{argocdExecIDField: "ce5f4"},
+	}
+
+	if got := forwardOne(t, log.InfoLevel, probeEntry); got != "" {
+		t.Errorf("default run printed the expected dependency probe: %q", got)
+	}
+	// Demoted, not dropped: --verbose still shows it, next to the dependency
+	// build that follows.
+	if got := forwardOne(t, log.DebugLevel, probeEntry); !strings.Contains(got, "DEBU") {
+		t.Errorf("verbose run should keep the probe at debug, got %q", got)
+	}
+	got := forwardOne(t, log.InfoLevel, &logrus.Entry{
+		Level:   logrus.ErrorLevel,
+		Message: real,
+		Data:    logrus.Fields{argocdExecIDField: "82c64"},
+	})
+	if !strings.Contains(got, "ERRO") {
+		t.Errorf("a dependency build that really failed must stay loud, got %q", got)
+	}
+}

@@ -30,6 +30,7 @@ import (
 	"github.com/argoproj/argo-cd/v3/reposerver/apiclient"
 	"github.com/argoproj/argo-cd/v3/reposerver/repository"
 	argogit "github.com/argoproj/argo-cd/v3/util/git"
+	argohelm "github.com/argoproj/argo-cd/v3/util/helm"
 	utilio "github.com/argoproj/argo-cd/v3/util/io"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"sigs.k8s.io/yaml"
@@ -303,6 +304,36 @@ func (r *ArgoCDRenderer) renderSource(
 		return nil, "", err
 	}
 	return manifests, mapSourceType(resp.SourceType), nil
+}
+
+// IsRetriedMissingDependencyLog reports whether an ArgoCD log message is the
+// EXPECTED first-attempt failure of an umbrella chart's `helm template`, the one
+// GenerateManifests itself recovers from.
+//
+// ArgoCD uses a failed template run as its PROBE for "dependencies are not
+// vendored yet": repository.GenerateManifests calls helm.Template, and on
+// helm.IsMissingDependencyErr it runs `helm dependency build` and templates again
+// (reposerver/repository/repository.go:1305-1311). The probe is control flow, but
+// util/exec has already logged the non-zero exit at ERROR by the time the caller
+// decides it was harmless (exec.go:270-272) — so every chart with a
+// dependencies: section and no committed charts/ dir produces one ERRO per render
+// on a completely healthy run.
+//
+// The predicate is deliberately ArgoCD's OWN: IsMissingDependencyErr is the
+// function whose true-value triggers the retry, so this cannot drift from what
+// upstream recovers from. Callers demote rather than drop, and nothing is lost if
+// the retry then fails for the same reason: GenerateManifests returns that error,
+// renderBranch wraps it, and processWave logs it at WARN naming the application
+// plus records it as the app's report error — both of which name the app, which
+// this anonymous library line never could.
+//
+// The `helm template` guard keeps a `helm dependency build` failure loud: that is
+// the real failure this expected one is otherwise easy to confuse with.
+func IsRetriedMissingDependencyLog(msg string) bool {
+	if !strings.Contains(msg, "helm template") {
+		return false
+	}
+	return argohelm.IsMissingDependencyErr(errors.New(msg))
 }
 
 // snapshotKustomization captures the kustomization file in dir, if one

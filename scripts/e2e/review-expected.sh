@@ -37,6 +37,9 @@ directive per line, applied to expected/<case>/reports/unified.diff:
                      run.sh at run time (this gate validates the pinned tree
                      offline, and a log is not a pin), for facts a report
                      cannot carry: "this linter was actually invoked"
+  must-not-log:<ERE> pattern must NOT appear in that log, for the absence half:
+                     a line DEMOTED out of the default stream is otherwise only
+                     observed, never falsifiable
   expect:affected=N changed=M [resources=+a,-r,~m] [errors=E]
                      the report's summary block must say EXACTLY this
 
@@ -187,12 +190,12 @@ for dir in expected/*/; do
           fail "$name" "must-not: pattern present in unified.diff: $pat"
         fi
         ;;
-      must-log:*)
-        # Runtime assertion against the fresh run's log; enforced by run.sh,
+      must-log:*|must-not-log:*)
+        # Runtime assertions against the fresh run's log; enforced by run.sh,
         # not here - the gate validates the pinned tree offline and has no log.
         ;;
       *)
-        fail "$name" "$checks:$lineno: unrecognized directive (want must:<ERE>, must-not:<ERE>, expect:<summary> or # comment): $line"
+        fail "$name" "$checks:$lineno: unrecognized directive (want must:<ERE>, must-not:<ERE>, must-log:<ERE>, must-not-log:<ERE>, expect:<summary> or # comment): $line"
         ;;
     esac
   done < "$checks"

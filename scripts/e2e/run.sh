@@ -154,6 +154,13 @@ CASE_ARGS=(
   # base side has no policies, is not linted, and says so - the note that keeps its
   # [target]-only finding from reading as "introduced by this change".
   "lint-policy-added:--lint-kyverno policies/kyverno-added"
+  # --verbose is here for the LOG, not the report (which is unaffected): this is the
+  # only case whose chart declares dependencies, so it is the only one where ArgoCD's
+  # dependency PROBE fires - the failed `helm template` argocdf demotes out of the
+  # default stream. Verbose is what makes the demoted line observable, so the case can
+  # assert both that it is DEBUG-not-ERROR and that the --api-versions flood was
+  # elided from a real 16k-character argv.
+  "classic-dependency-bump:--verbose"
   # The same tool twice, which is the only shape where a finding's ORDINAL is the
   # thing distinguishing it: both invocations are kyverno, so #1/#2 (flag order) is
   # all that says which directory a finding came from.
@@ -348,6 +355,15 @@ for name in "${cases[@]}"; do
           pat=${line#must-log:}
           grep -Eq -- "$pat" "$out/run.log" \
             || mustlog_failure="FAIL (must-log pattern not found in run.log: $pat)"
+          ;;
+        # must-not-log: the absence half. A log-only behavior - a line DEMOTED out of
+        # the default stream, a warning that must not appear - is otherwise only
+        # observed, never falsifiable: must-log can say a quiet line exists somewhere,
+        # not that a loud one is gone.
+        must-not-log:*)
+          pat=${line#must-not-log:}
+          grep -Eq -- "$pat" "$out/run.log" \
+            && mustlog_failure="FAIL (must-not-log pattern FOUND in run.log: $pat)"
           ;;
       esac
     done < "expected/$name/checks.grep"

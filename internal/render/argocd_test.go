@@ -859,3 +859,51 @@ func TestArgoCDRenderer_ExternalValuesRef(t *testing.T) {
 		t.Errorf("manifests do not carry the external ref values:\n%s", result.Manifests)
 	}
 }
+
+// The messages are REAL: captured from argocdf runs against an umbrella chart
+// whose Chart.yaml declares a dependency with no committed charts/ directory —
+// the shape that produces one ERRO per render on a completely healthy run.
+func TestIsRetriedMissingDependencyLog(t *testing.T) {
+	const probe = "`helm template . --name-template applications --namespace argocd " +
+		"--kube-version 1.34.9 --api-versions v1 --api-versions v1/ConfigMap --include-crds` " +
+		"failed exit status 1: Error: An error occurred while checking for chart dependencies. " +
+		"You may need to run `helm dependency build` to fetch missing dependencies: " +
+		"found in Chart.yaml, but missing in charts/ directory: argocd-template"
+
+	tests := []struct {
+		name string
+		msg  string
+		want bool
+	}{
+		{name: "the probe ArgoCD retries", msg: probe, want: true},
+		{
+			// The other marker IsMissingDependencyErr accepts (helm 2-era
+			// requirements.yaml). Pinned so the predicate keeps tracking ArgoCD's
+			// own condition rather than the one string seen in practice.
+			name: "the requirements.yaml marker",
+			msg:  "`helm template .` failed exit status 1: Error: found in requirements.yaml, but missing in charts",
+			want: true,
+		},
+		{
+			// The failure the expected one is easiest to confuse with, and the one
+			// that must stay loud: the dependency build itself could not run.
+			name: "a dependency build that really failed",
+			msg: "`helm dependency build` failed exit status 1: Error: no cached repo found. " +
+				"(try 'helm repo update'): open /tmp/x/index.yaml: no such file or directory",
+			want: false,
+		},
+		{
+			name: "an unrelated template failure",
+			msg:  "`helm template .` failed exit status 1: Error: template: chart/templates/x.yaml:3:11: nil pointer evaluating interface {}.foo",
+			want: false,
+		},
+		{name: "empty", msg: "", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsRetriedMissingDependencyLog(tt.msg); got != tt.want {
+				t.Errorf("IsRetriedMissingDependencyLog() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

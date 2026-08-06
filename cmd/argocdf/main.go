@@ -25,6 +25,7 @@ import (
 
 	"github.com/rgeraskin/argocdf/internal/app"
 	"github.com/rgeraskin/argocdf/internal/config"
+	"github.com/rgeraskin/argocdf/internal/render"
 	"github.com/rgeraskin/argocdf/internal/rendercache"
 )
 
@@ -391,11 +392,25 @@ func humanizeBytes(n int64) string {
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
+// argocdExecIDField is the logrus field ArgoCD's util/exec stamps on every record
+// about a subprocess (exec.go:176), and therefore what tells the two sources of
+// the global logrus stream apart. A rename upstream costs the sub-prefix, not
+// correctness: records simply fall back to the plain "argocd" one.
+const argocdExecIDField = "execID"
+
 // logrusForwarder is a logrus hook that re-emits every record through
 // argocdf's own logger, so dependency output carries the same timestamped
 // format and a source prefix instead of logrus's own formatting.
+//
+// ArgoCD's global logrus is ONE stream carrying several sources, so the prefix is
+// chosen per record rather than baked into a single logger: records from
+// util/exec (a subprocess argocdf's engine shelled out to — helm, kustomize, git)
+// carry an execID field and go out under "argocd/exec", everything else under
+// "argocd". Which of the two a line came from is the first thing a reader needs:
+// one means "look at the tool's stderr", the other "look at ArgoCD's Go code".
 type logrusForwarder struct {
 	logger *log.Logger
+	exec   *log.Logger
 }
 
 func (h *logrusForwarder) Levels() []logrus.Level { return logrus.AllLevels }
@@ -410,15 +425,33 @@ func (h *logrusForwarder) Fire(e *logrus.Entry) error {
 	for _, k := range keys {
 		args = append(args, k, e.Data[k])
 	}
-	switch e.Level {
+
+	// nil exec falls back rather than panicking: this is a logging path, and a
+	// partially-built forwarder must not be able to kill the process.
+	logger := h.logger
+	if _, fromExec := e.Data[argocdExecIDField]; fromExec && h.exec != nil {
+		logger = h.exec
+	}
+
+	// An umbrella chart's first `helm template` FAILS by design and ArgoCD
+	// retries it after a dependency build, so this record is expected on a
+	// healthy render — demoted, never dropped, and only for the exact condition
+	// upstream recovers from. See render.IsRetriedMissingDependencyLog for why
+	// nothing is lost when the retry fails too.
+	level := e.Level
+	if level <= logrus.ErrorLevel && render.IsRetriedMissingDependencyLog(e.Message) {
+		level = logrus.DebugLevel
+	}
+
+	switch level {
 	case logrus.PanicLevel, logrus.FatalLevel, logrus.ErrorLevel:
-		h.logger.Error(e.Message, args...)
+		logger.Error(e.Message, args...)
 	case logrus.WarnLevel:
-		h.logger.Warn(e.Message, args...)
+		logger.Warn(e.Message, args...)
 	case logrus.InfoLevel:
-		h.logger.Info(e.Message, args...)
+		logger.Info(e.Message, args...)
 	default:
-		h.logger.Debug(e.Message, args...)
+		logger.Debug(e.Message, args...)
 	}
 	return nil
 }
@@ -509,7 +542,10 @@ func configureDependencyLogging(logger *log.Logger, debug bool) {
 	// Replace, don't stack: a second configuration (tests, library-style
 	// reuse) must not leave two forwarders duplicating every argocd line.
 	logrus.StandardLogger().ReplaceHooks(make(logrus.LevelHooks))
-	logrus.AddHook(&logrusForwarder{logger: logger.WithPrefix("argocd")})
+	logrus.AddHook(&logrusForwarder{
+		logger: logger.WithPrefix("argocd"),
+		exec:   logger.WithPrefix("argocd/exec"),
+	})
 	if !debug {
 		logrus.SetLevel(logrus.ErrorLevel)
 	}
