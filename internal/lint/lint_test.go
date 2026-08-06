@@ -1,6 +1,7 @@
 package lint
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -8,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/charmbracelet/log"
 )
 
 func newRunner(commands ...string) *Runner {
@@ -16,7 +19,7 @@ func newRunner(commands ...string) *Runner {
 
 func TestLintCollectsStdoutLines(t *testing.T) {
 	r := newRunner(`echo one; echo two`)
-	got := r.Lint(context.Background(), "", "")
+	got := r.Lint(context.Background(), Subject{}, "")
 	if len(got) != 2 || got[0] != "one" || got[1] != "two" {
 		t.Errorf("expected [one two], got %v", got)
 	}
@@ -24,7 +27,7 @@ func TestLintCollectsStdoutLines(t *testing.T) {
 
 func TestLintPipesContentToStdin(t *testing.T) {
 	r := newRunner(`cat`)
-	got := r.Lint(context.Background(), "", "kind: ConfigMap\nkind: Secret\n")
+	got := r.Lint(context.Background(), Subject{}, "kind: ConfigMap\nkind: Secret\n")
 	if len(got) != 2 || got[0] != "kind: ConfigMap" || got[1] != "kind: Secret" {
 		t.Errorf("stdin content not piped through, got %v", got)
 	}
@@ -32,14 +35,14 @@ func TestLintPipesContentToStdin(t *testing.T) {
 
 func TestLintNoOutputMeansNoWarnings(t *testing.T) {
 	r := newRunner(`true`)
-	if got := r.Lint(context.Background(), "", "input"); got != nil {
+	if got := r.Lint(context.Background(), Subject{}, "input"); got != nil {
 		t.Errorf("expected no warnings, got %v", got)
 	}
 }
 
 func TestLintSkipsBlankLines(t *testing.T) {
 	r := newRunner("printf 'one\\n\\n  \\ntwo\\n'")
-	got := r.Lint(context.Background(), "", "")
+	got := r.Lint(context.Background(), Subject{}, "")
 	if len(got) != 2 || got[0] != "one" || got[1] != "two" {
 		t.Errorf("blank lines should be dropped, got %v", got)
 	}
@@ -47,7 +50,7 @@ func TestLintSkipsBlankLines(t *testing.T) {
 
 func TestLintKeepsOutputOnFailure(t *testing.T) {
 	r := newRunner(`echo finding; exit 3`)
-	got := r.Lint(context.Background(), "", "")
+	got := r.Lint(context.Background(), Subject{}, "")
 	if len(got) != 2 {
 		t.Fatalf("expected finding + error line, got %v", got)
 	}
@@ -61,7 +64,7 @@ func TestLintKeepsOutputOnFailure(t *testing.T) {
 
 func TestLintFailureIncludesFirstStderrLine(t *testing.T) {
 	r := newRunner(`echo err1 >&2; echo err2 >&2; exit 1`)
-	got := r.Lint(context.Background(), "", "")
+	got := r.Lint(context.Background(), Subject{}, "")
 	if len(got) != 1 {
 		t.Fatalf("expected one error line, got %v", got)
 	}
@@ -72,8 +75,8 @@ func TestLintFailureIncludesFirstStderrLine(t *testing.T) {
 
 func TestLintCommandNotFound(t *testing.T) {
 	r := newRunner(`definitely-not-a-real-binary-xyz`)
-	got := r.Lint(context.Background(), "", "")
-	if len(got) != 1 || !strings.HasPrefix(got[0], "lint ") {
+	got := r.Lint(context.Background(), Subject{}, "")
+	if len(got) != 1 || !strings.HasPrefix(got[0], "lint#1 ") {
 		t.Errorf("expected a single lint error line, got %v", got)
 	}
 }
@@ -81,7 +84,7 @@ func TestLintCommandNotFound(t *testing.T) {
 func TestLintTimeout(t *testing.T) {
 	r := &Runner{Commands: []string{`sleep 30`}, Timeout: 100 * time.Millisecond}
 	start := time.Now()
-	got := r.Lint(context.Background(), "", "")
+	got := r.Lint(context.Background(), Subject{}, "")
 	// The guaranteed bound is Timeout + waitDelay, not Timeout: cancellation
 	// SIGKILLs only sh, and whether that also kills the `sleep` holding the
 	// stdout pipe depends on the shell — bash execs a single simple command
@@ -99,7 +102,7 @@ func TestLintTimeout(t *testing.T) {
 
 func TestLintTimeoutKeepsPartialOutput(t *testing.T) {
 	r := &Runner{Commands: []string{`echo early-finding; sleep 5`}, Timeout: 200 * time.Millisecond}
-	got := r.Lint(context.Background(), "", "")
+	got := r.Lint(context.Background(), Subject{}, "")
 	if len(got) != 2 || got[0] != "early-finding" || !strings.Contains(got[1], "timeout after") {
 		t.Errorf("expected partial output + timeout line, got %v", got)
 	}
@@ -107,7 +110,7 @@ func TestLintTimeoutKeepsPartialOutput(t *testing.T) {
 
 func TestLintZeroTimeoutMeansNoLimit(t *testing.T) {
 	r := &Runner{Commands: []string{`sleep 0.2; echo done`}, Timeout: 0}
-	got := r.Lint(context.Background(), "", "")
+	got := r.Lint(context.Background(), Subject{}, "")
 	if len(got) != 1 || got[0] != "done" {
 		t.Errorf("zero timeout should not kill the command, got %v", got)
 	}
@@ -121,7 +124,7 @@ func TestLintParentContextCancellation(t *testing.T) {
 	}()
 	r := newRunner(`sleep 30`)
 	start := time.Now()
-	got := r.Lint(ctx, "", "")
+	got := r.Lint(ctx, Subject{}, "")
 	// Bounded by cancellation + waitDelay, for the shell-dependent reason spelled
 	// out in TestLintTimeout.
 	if elapsed := time.Since(start); elapsed > 10*time.Second {
@@ -129,7 +132,7 @@ func TestLintParentContextCancellation(t *testing.T) {
 	}
 	// Cancellation is not a timeout: it surfaces through the generic error
 	// branch as a lint error line rather than being silently dropped.
-	if len(got) != 1 || strings.Contains(got[0], "timeout") || !strings.HasPrefix(got[0], "lint ") {
+	if len(got) != 1 || strings.Contains(got[0], "timeout") || !strings.HasPrefix(got[0], "lint#1 ") {
 		t.Errorf("expected a generic lint error line on cancellation, got %v", got)
 	}
 }
@@ -139,8 +142,8 @@ func TestLintParentDeadlineNotMisreportedAsTimeout(t *testing.T) {
 	defer cancel()
 	// The runner's own timeout is far away; only the parent deadline fires.
 	r := &Runner{Commands: []string{`sleep 5`}, Timeout: 10 * time.Second}
-	got := r.Lint(ctx, "", "")
-	if len(got) != 1 || !strings.HasPrefix(got[0], "lint ") {
+	got := r.Lint(ctx, Subject{}, "")
+	if len(got) != 1 || !strings.HasPrefix(got[0], "lint#1 ") {
 		t.Fatalf("expected a single lint error line, got %v", got)
 	}
 	if strings.Contains(got[0], "timeout after") {
@@ -154,7 +157,7 @@ func TestLintRunsInGivenDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := newRunner(`cat policy-note.txt`)
-	got := r.Lint(context.Background(), dir, "")
+	got := r.Lint(context.Background(), Subject{Worktree: dir}, "")
 	if len(got) != 1 || got[0] != "from-dir" {
 		t.Errorf("command should run with dir as working directory, got %v", got)
 	}
@@ -162,9 +165,150 @@ func TestLintRunsInGivenDir(t *testing.T) {
 
 func TestLintMultipleCommandsRunInOrder(t *testing.T) {
 	r := newRunner(`echo first`, `echo second`)
-	got := r.Lint(context.Background(), "", "")
+	got := r.Lint(context.Background(), Subject{}, "")
 	if len(got) != 2 || got[0] != "first" || got[1] != "second" {
 		t.Errorf("expected commands to run in order, got %v", got)
+	}
+}
+
+// lintLogLines runs one Lint call against a captured logger and returns the
+// non-empty log lines it produced.
+func lintLogLines(t *testing.T, r *Runner) []string {
+	t.Helper()
+	var buf bytes.Buffer
+	r.Logger = log.New(&buf)
+	r.Lint(context.Background(), Subject{App: "web", Side: "base"}, "")
+	return nonEmptyLines(buf.String())
+}
+
+// lineWith returns the single log line containing want, failing if there is not
+// exactly one.
+func lineWith(t *testing.T, lines []string, want string) string {
+	t.Helper()
+	var found []string
+	for _, line := range lines {
+		if strings.Contains(line, want) {
+			found = append(found, line)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("found %d lines containing %q, want exactly 1: %#v", len(found), want, lines)
+	}
+	return found[0]
+}
+
+// One line per INVOCATION, each attributable and each saying how it ended. This
+// is the log's whole job: a report cannot distinguish a linter that ran and found
+// nothing from one that was skipped or died, because all three leave it identical.
+func TestLintLogsOneLinePerInvocation(t *testing.T) {
+	r := &Runner{
+		Commands: []string{`echo finding`, `exit 3`},
+		Kyverno:  []string{"policies/absent"}, // no such dir in the (empty) worktree
+		Timeout:  5 * time.Second,
+	}
+	lines := lintLogLines(t, r)
+	if len(lines) != 3 {
+		t.Fatalf("got %d log lines, want one per invocation: %#v", len(lines), lines)
+	}
+
+	tests := []struct {
+		handle     string
+		wantStatus string
+		wantLevel  string
+	}{
+		// Ordinals are per KIND and follow flag order, so the two --lint commands
+		// are #1 and #2 while the first --lint-kyverno is #1 again.
+		{handle: "linter=lint#1", wantStatus: "status=ok", wantLevel: "INFO"},
+		{handle: "linter=lint#2", wantStatus: "status=failed", wantLevel: "WARN"},
+		{handle: "linter=kyverno#1", wantStatus: "status=skipped", wantLevel: "INFO"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.handle, func(t *testing.T) {
+			line := lineWith(t, lines, tt.handle)
+			if !strings.Contains(line, "Linted") {
+				t.Errorf("line %q does not carry the Linted message", line)
+			}
+			if !strings.Contains(line, "app=web") || !strings.Contains(line, "side=base") {
+				t.Errorf("line %q is not attributable to an app and side", line)
+			}
+			if !strings.Contains(line, tt.wantStatus) {
+				t.Errorf("line %q, want %s", line, tt.wantStatus)
+			}
+			// A failed invocation means this side was NOT linted; the only other
+			// trace is one warning line among the findings, which reads like a
+			// finding. It must not arrive at the same level as a clean run.
+			if !strings.Contains(line, tt.wantLevel) {
+				t.Errorf("line %q, want level %s", line, tt.wantLevel)
+			}
+		})
+	}
+}
+
+// The log value drops the "lint-" the linter= field already implies; the REPORT
+// label keeps the flag spelling, because a PR comment has no log beside it and
+// the label is what a reader would have to type. Pinned together so the pair
+// cannot drift apart.
+func TestLinterNamesKeepFlagSpellingInReportsOnly(t *testing.T) {
+	tests := []struct {
+		kind       string
+		wantLog    string
+		wantReport string
+	}{
+		{kind: kindCommand, wantLog: "lint#1", wantReport: "lint#1"},
+		{kind: kindKyverno, wantLog: "kyverno#1", wantReport: "lint-kyverno#1"},
+		{kind: kindConftest, wantLog: "conftest#1", wantReport: "lint-conftest#1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.kind, func(t *testing.T) {
+			if got := logHandle(tt.kind, 1); got != tt.wantLog {
+				t.Errorf("logHandle(%q, 1) = %q, want %q", tt.kind, got, tt.wantLog)
+			}
+			if got := reportLabel(tt.kind, 1); got != tt.wantReport {
+				t.Errorf("reportLabel(%q, 1) = %q, want %q", tt.kind, got, tt.wantReport)
+			}
+		})
+	}
+}
+
+// A repeated --lint has no identity but its ordinal: the command text is
+// truncated to maxDisplayCommand, so two commands differing only past that cut
+// would otherwise be indistinguishable in both the log and the report.
+func TestRepeatedCommandsGetDistinctOrdinals(t *testing.T) {
+	shared := strings.Repeat("x", maxDisplayCommand)
+	r := &Runner{
+		Commands: []string{
+			"echo " + shared + " first >&2; exit 1",
+			"echo " + shared + " second >&2; exit 1",
+		},
+		Timeout: 5 * time.Second,
+	}
+	got := r.Lint(context.Background(), Subject{}, "")
+	if len(got) != 2 {
+		t.Fatalf("got %#v, want one failure line per command", got)
+	}
+	if !strings.HasPrefix(got[0], "lint#1 ") || !strings.HasPrefix(got[1], "lint#2 ") {
+		t.Errorf("report labels = %#v, want lint#1 then lint#2", got)
+	}
+}
+
+// Durations are rounded for reading, but not so far that the headroom below
+// --lint-timeout stops being visible: whole seconds would print a 9.6s success as
+// 10s, indistinguishable from a 10s timeout.
+func TestRoundDuration(t *testing.T) {
+	tests := []struct {
+		in   time.Duration
+		want time.Duration
+	}{
+		{in: 0, want: 0},
+		{in: 47*time.Millisecond + 400*time.Microsecond, want: 47 * time.Millisecond},
+		{in: 1898 * time.Millisecond, want: 1900 * time.Millisecond},
+		{in: 10009 * time.Millisecond, want: 10 * time.Second},
+		{in: 9600 * time.Millisecond, want: 9600 * time.Millisecond},
+	}
+	for _, tt := range tests {
+		if got := RoundDuration(tt.in); got != tt.want {
+			t.Errorf("RoundDuration(%s) = %s, want %s", tt.in, got, tt.want)
+		}
 	}
 }
 
@@ -273,7 +417,7 @@ func TestLintExportsEnvToCommand(t *testing.T) {
 		},
 	}
 
-	got := r.Lint(context.Background(), "", "")
+	got := r.Lint(context.Background(), Subject{}, "")
 	want := []string{
 		"context=argocdf-context",
 		"kubeconfig=/a/config:/b/config",
@@ -291,7 +435,7 @@ func TestLintWithoutEnvInheritsParent(t *testing.T) {
 	t.Setenv("ARGOCDF_CONTEXT", "shell-context")
 
 	r := newRunner(`echo "context=$ARGOCDF_CONTEXT"`)
-	got := r.Lint(context.Background(), "", "")
+	got := r.Lint(context.Background(), Subject{}, "")
 	if len(got) != 1 || got[0] != "context=shell-context" {
 		t.Errorf("expected the inherited value to reach the command, got %v", got)
 	}

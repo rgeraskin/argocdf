@@ -46,8 +46,8 @@ type kyvernoReport struct {
 //     over such a kind simply does not run and the report still reads clean — so
 //     the README tells users to apply CRDs first, and case/lint-unmappable-kind
 //     pins both halves.
-func (r *Runner) runKyverno(ctx context.Context, worktree, policyDir, content string) []string {
-	label := "lint-kyverno " + policyDir
+func (r *Runner) runKyverno(ctx context.Context, name, worktree, policyDir, content string) result {
+	label := name + " " + policyDir
 
 	dir, ok := resolvePolicyDir(worktree, policyDir)
 	if !ok {
@@ -55,13 +55,17 @@ func (r *Runner) runKyverno(ctx context.Context, worktree, policyDir, content st
 		// policy, so the base side has nothing to apply. Handing kyverno an
 		// empty or missing directory makes it error, which would surface as a
 		// spurious lint failure on every app.
-		return nil
+		return result{status: statusSkipped}
 	}
 
 	// Refused rather than defaulted: kyverno would silently fall back to the
-	// ambient context and lint the wrong cluster.
+	// ambient context and lint the wrong cluster. FAILED, not skipped: the
+	// manifests went unchecked for a reason the user must fix.
 	if r.KubeContext == "" {
-		return []string{fmt.Sprintf("%s: no resolved kube context, refusing to lint against an unknown cluster", label)}
+		return result{
+			lines:  []string{fmt.Sprintf("%s: no resolved kube context, refusing to lint against an unknown cluster", label)},
+			status: statusFailed,
+		}
 	}
 
 	argv := []string{
@@ -76,12 +80,12 @@ func (r *Runner) runKyverno(ctx context.Context, worktree, policyDir, content st
 
 	out := r.execTool(ctx, worktree, label, argv, content)
 	if out.warning != "" {
-		return []string{out.warning}
+		return result{lines: []string{out.warning}, status: statusFailed}
 	}
 	if out.stdout == "" {
 		// Exit 0 with no report: nothing the policies match. Legitimately
 		// common — a report full of ConfigMaps matches no workload policy.
-		return nil
+		return result{status: statusOK}
 	}
 
 	return parseKyvernoReport(label, out.stdout)
@@ -90,16 +94,23 @@ func (r *Runner) runKyverno(ctx context.Context, worktree, policyDir, content st
 // parseKyvernoReport turns a kyverno policy report into warning lines. Split from
 // the exec path so the shape kyverno actually emits can be pinned without a
 // cluster or the binary.
-func parseKyvernoReport(label, stdout string) []string {
+//
+// An unparsable report is FAILED: kyverno exited 0 and said something argocdf
+// cannot read, so the manifests are unchecked even though a line was produced.
+func parseKyvernoReport(label, stdout string) result {
 	var report kyvernoReport
 	if err := json.Unmarshal([]byte(stdout), &report); err != nil {
-		return []string{fmt.Sprintf("%s: unparsable report: %v", label, err)}
+		return result{
+			lines:  []string{fmt.Sprintf("%s: unparsable report: %v", label, err)},
+			status: statusFailed,
+		}
 	}
 
+	// entry, not result: `result` is the invocation-outcome type in this package.
 	var warnings []string
-	for _, result := range report.Results {
+	for _, entry := range report.Results {
 		var marker string
-		switch result.Result {
+		switch entry.Result {
 		case "fail", "warn":
 		case "error":
 			// An `error` is kyverno failing to EVALUATE, not a resource failing a
@@ -117,9 +128,9 @@ func parseKyvernoReport(label, stdout string) []string {
 			continue
 		}
 
-		msg := singleLine(result.Message)
-		if len(result.Resources) == 0 {
-			warnings = append(warnings, fmt.Sprintf("[kyverno/%s] %s%s", result.Policy, marker, msg))
+		msg := singleLine(entry.Message)
+		if len(entry.Resources) == 0 {
+			warnings = append(warnings, fmt.Sprintf("[kyverno/%s] %s%s", entry.Policy, marker, msg))
 			continue
 		}
 		// One line PER resource. kyverno 1.18 happens to emit a single resource per
@@ -129,12 +140,12 @@ func parseKyvernoReport(label, stdout string) []string {
 		// producer — a future kyverno, or another tool writing the same schema —
 		// groups them. Per-resource lines also match how every other finding in the
 		// report reads: one resource, one line, greppable by Kind/name.
-		for _, res := range result.Resources {
+		for _, res := range entry.Resources {
 			warnings = append(warnings, fmt.Sprintf("[kyverno/%s] %s%s/%s: %s",
-				result.Policy, marker, res.Kind, res.Name, msg))
+				entry.Policy, marker, res.Kind, res.Name, msg))
 		}
 	}
-	return warnings
+	return result{lines: warnings, status: statusOK}
 }
 
 // singleLine folds a policy message onto one line: every stdout line becomes a

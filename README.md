@@ -309,7 +309,17 @@ argocdf runs the tool itself and parses its report, so there is no shell pipelin
 - `[target]`-only — this change **introduces** the violation
 - both sides — pre-existing, untouched by this change
 
-The exit code is the only health signal: stdout lines are always reported as warnings, and a spawn failure, timeout, or exit ≠ 0 adds one non-fatal `lint "<command>": ...` warning line. That warning echoes a truncated prefix of the command, so don't embed secrets in the command text — pass them via the environment or files instead. Tools like kyverno and conftest exit non-zero when policies fail (normal operation), so end the pipeline in an adapter — typically `jq`, which also normalizes any tool's output to line-per-finding.
+The exit code is the only health signal: stdout lines are always reported as warnings, and a spawn failure, timeout, or exit ≠ 0 adds one non-fatal `lint#1 "<command>": ...` warning line. That warning echoes a truncated prefix of the command, so don't embed secrets in the command text — pass them via the environment or files instead. The `#1` is the linter's ordinal in flag order, which is what tells two repeated `--lint` commands apart when the truncated prefix cannot. Tools like kyverno and conftest exit non-zero when policies fail (normal operation), so end the pipeline in an adapter — typically `jq`, which also normalizes any tool's output to line-per-finding.
+
+Each invocation also logs one line, because the report cannot tell three outcomes apart — a linter that ran and found nothing, one skipped for want of policies, and one that died all leave it looking clean:
+
+```
+INFO Linted app=web side=base   linter=lint#1     command=scripts/lint.sh      status=ok      lines=0 duration=1.9s
+INFO Linted app=web side=base   linter=conftest#1 policies=policies/conftest   status=skipped lines=1 duration=0s
+WARN Linted app=web side=target linter=kyverno#1  policies=policies/kyverno    status=failed  lines=1 duration=10s
+```
+
+`status` is the field to check: `ok` means the tool ran (whatever it printed is findings), `skipped` that a built-in adapter had no policies on that side (a `--lint` command is never skipped — argocdf cannot know what it would have needed), and `failed` that this side was **not** linted — which is why it is a `WARN`. `lines` counts everything the invocation contributed, findings and its own failure line alike, so it can never stand in for `status`. A `status=failed` with `duration` at your `--lint-timeout` is the timeout: raise it (`ARGOCDF_LINT_TIMEOUT=60s`) — `kyverno apply --cluster` pays for API discovery per invocation, which costs far more against a remote cluster than from inside one.
 
 Lint commands inherit argocdf's environment plus two variables naming the cluster argocdf is diffing, so a cluster-aware adapter (`kyverno apply --cluster`, `kubectl apply --dry-run=server`) can validate against exactly that cluster instead of whatever the invoking shell happens to point at: **`ARGOCDF_CONTEXT`** is the resolved kube context (`--context` when given, otherwise the kubeconfig's `current-context` — no fallback logic needed in the adapter) and **`ARGOCDF_KUBECONFIG`** is the kubeconfig argocdf itself read (`--kubeconfig`, else `$KUBECONFIG`, else `~/.kube/config`; it may be a `:`-separated list, passed verbatim). Neither is ever exported empty: a value argocdf cannot resolve is simply absent.
 

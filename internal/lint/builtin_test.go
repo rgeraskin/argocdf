@@ -30,7 +30,7 @@ const conftestReportJSON = `[
  {"filename":"","namespace":"other_rules","successes":1}]`
 
 func TestParseKyvernoReport(t *testing.T) {
-	got := parseKyvernoReport("lint-kyverno policies/kyverno", kyvernoReportJSON)
+	got := parseKyvernoReport("lint-kyverno#1 policies/kyverno", kyvernoReportJSON).lines
 	want := []string{
 		"[kyverno/disallow-latest-tag] Deployment/cluster-info-web: container images must be pinned to a tag (':latest' or tag-less images are not allowed)",
 	}
@@ -102,7 +102,7 @@ func TestParseKyvernoReportLineShape(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := parseKyvernoReport("label", tt.report)
+			got := parseKyvernoReport("label", tt.report).lines
 			if strings.Join(got, "|") != strings.Join(tt.want, "|") {
 				t.Errorf("got %#v, want %#v", got, tt.want)
 			}
@@ -111,7 +111,7 @@ func TestParseKyvernoReportLineShape(t *testing.T) {
 }
 
 func TestParseConftestReport(t *testing.T) {
-	got := parseConftestReport("lint-conftest policies/conftest", conftestReportJSON)
+	got := parseConftestReport("lint-conftest#1 policies/conftest", conftestReportJSON).lines
 	want := []string{
 		`[conftest/no_plaintext_credentials] ConfigMap/cluster-info-cm: data key "note" must not carry a plaintext credential`,
 	}
@@ -122,7 +122,7 @@ func TestParseConftestReport(t *testing.T) {
 
 func TestParseConftestReportFailuresBeforeWarnings(t *testing.T) {
 	report := `[{"namespace":"ns","failures":[{"msg":"f1"},{"msg":"f2"}],"warnings":[{"msg":"w1"}]}]`
-	got := parseConftestReport("label", report)
+	got := parseConftestReport("label", report).lines
 	want := []string{"[conftest/ns] f1", "[conftest/ns] f2", "[conftest/ns] w1"}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Errorf("got %#v, want %#v", got, want)
@@ -131,11 +131,16 @@ func TestParseConftestReportFailuresBeforeWarnings(t *testing.T) {
 
 // Unparsable output must surface rather than be swallowed: it means the tool
 // changed its contract, which would otherwise look exactly like "no findings".
+// It counts as FAILED, not as one finding: the tool exited 0 and said something
+// argocdf cannot read, so the manifests went unchecked.
 func TestParseReportsSurfaceUnparsableOutput(t *testing.T) {
-	for _, parse := range []func(string, string) []string{parseKyvernoReport, parseConftestReport} {
+	for _, parse := range []func(string, string) result{parseKyvernoReport, parseConftestReport} {
 		got := parse("label", "not json at all")
-		if len(got) != 1 || !strings.Contains(got[0], "unparsable report") {
-			t.Errorf("got %#v, want one 'unparsable report' warning", got)
+		if len(got.lines) != 1 || !strings.Contains(got.lines[0], "unparsable report") {
+			t.Errorf("got %#v, want one 'unparsable report' warning", got.lines)
+		}
+		if got.status != statusFailed {
+			t.Errorf("status = %q, want %q", got.status, statusFailed)
 		}
 	}
 }
@@ -187,7 +192,7 @@ func TestResolvePolicyDir(t *testing.T) {
 // shape, not a failure, and warning about it would fire on every application.
 func TestBuiltinsSkipSideWithoutPolicies(t *testing.T) {
 	r := &Runner{Kyverno: []string{"policies/kyverno"}, Conftest: []string{"policies/conftest"}, KubeContext: "ctx"}
-	if got := r.Lint(context.Background(), t.TempDir(), "kind: ConfigMap\n"); got != nil {
+	if got := r.Lint(context.Background(), Subject{Worktree: t.TempDir()}, "kind: ConfigMap\n"); got != nil {
 		t.Errorf("Lint() = %#v, want nil", got)
 	}
 }
@@ -206,7 +211,7 @@ func TestKyvernoRefusesWithoutKubeContext(t *testing.T) {
 	}
 
 	r := &Runner{Kyverno: []string{"policies/kyverno"}} // no KubeContext
-	got := r.Lint(context.Background(), worktree, "kind: ConfigMap\n")
+	got := r.Lint(context.Background(), Subject{Worktree: worktree}, "kind: ConfigMap\n")
 	if len(got) != 1 || !strings.Contains(got[0], "no resolved kube context") {
 		t.Fatalf("got %#v, want one refusal warning", got)
 	}
@@ -355,7 +360,7 @@ func TestRunOneTimeoutBoundsWallClock(t *testing.T) {
 	r := &Runner{Commands: []string{`printf 'partial\n'; sleep 30`}, Timeout: 100 * time.Millisecond}
 
 	start := time.Now()
-	warnings := r.Lint(context.Background(), "", "")
+	warnings := r.Lint(context.Background(), Subject{}, "")
 	elapsed := time.Since(start)
 
 	if len(warnings) == 0 || !strings.Contains(warnings[len(warnings)-1], "timeout after 100ms") {

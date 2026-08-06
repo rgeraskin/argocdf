@@ -51,13 +51,15 @@ type Runner struct {
 	// Timeout bounds each command invocation.
 	Timeout time.Duration
 
-	// Logger, when set, records one INFO line per linter invocation - which
-	// linter ran, against what, how long it took, and how many lines it
-	// produced. It is the only signal that separates "ran and found nothing"
-	// from "was never invoked": both leave the REPORT identical, since empty
-	// tool output at exit 0 is a legitimate no-findings result by contract.
-	// The e2e suite asserts on these lines (must-log: in checks.grep) for
-	// exactly that distinction. Nil disables the logging.
+	// Logger, when set, records one line per linter invocation - which linter
+	// ran, against what, how it ENDED, how long it took and how many lines it
+	// produced. It is the only signal that separates the three outcomes a
+	// report cannot tell apart, because all three leave it identical: a linter
+	// that ran and found nothing, one that was skipped for want of policies,
+	// and one that died. Empty tool output at exit 0 is a legitimate
+	// no-findings result by contract, so neither the findings nor their count
+	// can carry that distinction - only status can. The e2e suite asserts on
+	// these lines (must-log: in checks.grep). Nil disables the logging.
 	Logger *log.Logger
 
 	// Env holds variables exported to every command on top of argocdf's own
@@ -84,55 +86,165 @@ var errLintTimeout = errors.New("lint timeout")
 // the run has been reported as timed out.
 const waitDelay = 2 * time.Second
 
-// Lint runs every command with content on stdin and dir as the working
-// directory (empty = inherit), and returns the collected warning lines. Lint
-// is never fatal: stdout lines are kept even when the command fails, and a
-// failure (spawn error, timeout, exit != 0) appends one self-identifying
+// Subject identifies what one Lint call is linting: an application, one SIDE of
+// it, and the ephemeral worktree that side is checked out in. App and Side are
+// carried for the log only — they are what makes an invocation line attributable
+// when --concurrency renders several applications at once.
+//
+// Deliberately not named Target: "target" already means the target SIDE
+// throughout argocdf (diff.SideTarget, side=target in these very log lines), and
+// one term must not mean two things.
+type Subject struct {
+	App string
+	// Namespace disambiguates App: with apps-in-any-namespace, team-a/web and
+	// team-b/web are different applications with the same name, and a line naming
+	// only the name is not attributable to either.
+	Namespace string
+	Side      string
+	Worktree  string
+}
+
+// The three linter kinds, named by the FLAG that configures each. Every linter
+// has two spellings of its identity and the mapping between them is mechanical:
+// the REPORT label is the flag name (a reader of a PR comment has no log beside
+// it, so the label must match what someone would have to type), while the LOG
+// value drops the "lint-" prefix, which the linter= field name already supplies.
+// The bare --lint flag has nothing to strip, so its two spellings coincide.
+const (
+	kindCommand  = "lint"
+	kindKyverno  = "lint-kyverno"
+	kindConftest = "lint-conftest"
+)
+
+// logHandle and reportLabel name the Nth linter of a kind (1-based, flag order).
+//
+// The ORDINAL exists because a repeated --lint has no usable identity of its
+// own: its only distinguishing datum is the command text, which is truncated to
+// maxDisplayCommand and can therefore collide between two commands that differ
+// only past that cut. Built-in adapters are identified well enough by their
+// policy directory, but they carry the ordinal too — one rule for the whole
+// family beats an exception nobody remembers.
+func logHandle(kind string, n int) string {
+	return fmt.Sprintf("%s#%d", strings.TrimPrefix(kind, "lint-"), n)
+}
+
+func reportLabel(kind string, n int) string {
+	return fmt.Sprintf("%s#%d", kind, n)
+}
+
+// Lint runs every configured linter over content, with the subject's worktree as
+// the working directory (empty = inherit), and returns the collected warning
+// lines. Lint is never fatal: stdout lines are kept even when a command fails,
+// and a failure (spawn error, timeout, exit != 0) appends one self-identifying
 // warning line instead of returning an error.
 //
-// dir is the side's ephemeral worktree, so repo-relative paths in the command
-// (e.g. a policy directory) resolve to that side's version of the files.
+// The worktree is the side's ephemeral checkout, so repo-relative paths in the
+// command (e.g. a policy directory) resolve to that side's version of the files.
 // Commands see argocdf's own environment with Env layered on top.
 //
 // Linters run in a FIXED order — shell commands first, then kyverno, then
 // conftest, each in the order given — because that order is visible in the
 // report and therefore part of what expectations pin. pflag cannot preserve the
 // interleaving of different flags on the command line, so an order has to be
-// chosen rather than inferred.
-func (r *Runner) Lint(ctx context.Context, dir, content string) []string {
+// chosen rather than inferred. The ordinals follow that same order.
+func (r *Runner) Lint(ctx context.Context, subject Subject, content string) []string {
 	var warnings []string
-	for _, command := range r.Commands {
-		warnings = append(warnings, r.logged("lint", displayCommand(command), func() []string {
-			return r.runOne(ctx, command, dir, content)
-		})...)
+	for i, command := range r.Commands {
+		label := reportLabel(kindCommand, i+1)
+		warnings = append(warnings, r.logged(subject, logHandle(kindCommand, i+1),
+			"command", displayCommand(command), func() result {
+				return r.runOne(ctx, label, command, subject.Worktree, content)
+			})...)
 	}
-	for _, policyDir := range r.Kyverno {
-		warnings = append(warnings, r.logged("lint-kyverno", policyDir, func() []string {
-			return r.runKyverno(ctx, dir, policyDir, content)
-		})...)
+	for i, policyDir := range r.Kyverno {
+		label := reportLabel(kindKyverno, i+1)
+		warnings = append(warnings, r.logged(subject, logHandle(kindKyverno, i+1),
+			"policies", policyDir, func() result {
+				return r.runKyverno(ctx, label, subject.Worktree, policyDir, content)
+			})...)
 	}
-	for _, policyDir := range r.Conftest {
-		warnings = append(warnings, r.logged("lint-conftest", policyDir, func() []string {
-			return r.runConftest(ctx, dir, policyDir, content)
-		})...)
+	for i, policyDir := range r.Conftest {
+		label := reportLabel(kindConftest, i+1)
+		warnings = append(warnings, r.logged(subject, logHandle(kindConftest, i+1),
+			"policies", policyDir, func() result {
+				return r.runConftest(ctx, label, subject.Worktree, policyDir, content)
+			})...)
 	}
 	return warnings
 }
 
-// logged runs one linter invocation and records it at INFO (see Runner.Logger).
-// lines counts every line the invocation contributed - findings AND failure
-// warnings alike - because the log's job is proving the invocation happened
-// and what it emitted, not classifying the output.
-func (r *Runner) logged(linter, target string, run func() []string) []string {
+// status is how one invocation ENDED. The three values are not derivable from
+// the output: a skipped linter and a clean one both contribute zero lines, and a
+// failed one contributes exactly one — indistinguishable from a single finding.
+type status string
+
+const (
+	statusOK      status = "ok"      // ran; whatever it emitted is findings
+	statusSkipped status = "skipped" // no policies on this side; never invoked
+	statusFailed  status = "failed"  // timeout, spawn failure, refusal, unusable report
+)
+
+// result is one invocation's contributed lines plus how it ended.
+type result struct {
+	lines  []string
+	status status
+}
+
+// logged runs one linter invocation and records it (see Runner.Logger).
+//
+// lines counts every line the invocation contributed — findings, skip notes and
+// failure warnings alike — because the log's job is proving what the invocation
+// emitted, not classifying it; status is what classifies. detailKey/detailValue
+// carry the identity of what the linter was pointed at: a command for the shell
+// path, a policy directory for the built-ins. They are named per kind rather
+// than sharing one key, because a single "target=" would sit next to "side=
+// target" in every line and mean something else entirely.
+//
+// A failed invocation is logged at WARN: it means this side was NOT linted, and
+// the only other trace is one warning line among an application's findings,
+// which is easy to miss and easy to read as a finding.
+func (r *Runner) logged(
+	subject Subject,
+	linter, detailKey, detailValue string,
+	run func() result,
+) []string {
 	start := time.Now()
-	out := run()
-	if r.Logger != nil {
-		r.Logger.Info("Lint invocation finished",
-			"linter", linter, "target", target,
-			"lines", len(out),
-			"duration", time.Since(start).Round(time.Millisecond))
+	res := run()
+	if r.Logger == nil {
+		return res.lines
 	}
-	return out
+	fields := []any{
+		"app", subject.App, "namespace", subject.Namespace, "side", subject.Side,
+		"linter", linter, detailKey, detailValue,
+		"status", string(res.status),
+		"lines", len(res.lines),
+		"duration", RoundDuration(time.Since(start)),
+	}
+	if res.status == statusFailed {
+		r.Logger.Warn("Linted", fields...)
+	} else {
+		r.Logger.Info("Linted", fields...)
+	}
+	return res.lines
+}
+
+// RoundDuration rounds a lint duration for logging: milliseconds below a second,
+// tenths of a second above it.
+//
+// Coarser than it used to be, and safe to coarsen only because status now says
+// whether the budget was hit. While the duration was the ONLY hint at that, the
+// millisecond tail was load-bearing — 10.009s against a 10s --lint-timeout was
+// how a timeout announced itself. Rounding to whole seconds would still be wrong:
+// a 9.6s success would print as 10s, erasing the headroom reading that the field
+// exists for.
+//
+// Exported so the per-side aggregate in internal/app rounds identically; one
+// rule for lint durations, not one per call site.
+func RoundDuration(d time.Duration) time.Duration {
+	if d < time.Second {
+		return d.Round(time.Millisecond)
+	}
+	return d.Round(100 * time.Millisecond)
 }
 
 // Configured reports whether the runner has any linter to run.
@@ -241,7 +353,10 @@ func resolvePolicyDir(worktree, policyDir string) (string, bool) {
 	return dir, true
 }
 
-func (r *Runner) runOne(ctx context.Context, command, dir, content string) []string {
+// runOne runs one shell command. label identifies it in the warning lines it
+// contributes; the shell path can never be skipped, so it ends either ok or
+// failed.
+func (r *Runner) runOne(ctx context.Context, label, command, dir, content string) result {
 	cancel := func() {}
 	if r.Timeout > 0 {
 		ctx, cancel = context.WithTimeoutCause(ctx, r.Timeout, errLintTimeout)
@@ -262,18 +377,21 @@ func (r *Runner) runOne(ctx context.Context, command, dir, content string) []str
 
 	warnings := nonEmptyLines(stdout.String())
 	if err == nil {
-		return warnings
+		return result{lines: warnings, status: statusOK}
 	}
 
 	if errors.Is(context.Cause(ctx), errLintTimeout) {
-		return append(warnings,
-			fmt.Sprintf("lint %q: timeout after %s", displayCommand(command), r.Timeout))
+		return result{
+			lines: append(warnings,
+				fmt.Sprintf("%s %q: timeout after %s", label, displayCommand(command), r.Timeout)),
+			status: statusFailed,
+		}
 	}
-	msg := fmt.Sprintf("lint %q: %v", displayCommand(command), err)
+	msg := fmt.Sprintf("%s %q: %v", label, displayCommand(command), err)
 	if first := firstLine(stderr.String()); first != "" {
 		msg += ": " + first
 	}
-	return append(warnings, msg)
+	return result{lines: append(warnings, msg), status: statusFailed}
 }
 
 // childEnv builds the environment of a lint child process: parent with every

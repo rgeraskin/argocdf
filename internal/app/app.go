@@ -416,17 +416,21 @@ func (a *App) warnMissingPolicyDirs() {
 	check("--lint-conftest", a.cfg.LintConftest)
 }
 
-// lintSide runs the lint commands for one side of one application and logs how
-// long they took at INFO. The duration is the diagnostic that a bare
-// "--lint-timeout" warning lacks: it distinguishes a genuinely slow or hung
-// adapter from contention between concurrent invocations, and shows the headroom
-// left when nothing timed out.
-func (a *App) lintSide(ctx context.Context, appName, side, worktree, rendered string) []string {
+// lintSide runs the lint commands for one side of one application.
+//
+// The per-side totals are logged at DEBUG, not INFO, because they are almost
+// entirely DERIVED: the runner logs one line per invocation carrying the same app
+// and side plus which linter ran and how it ended, and findings here is just the
+// sum of those lines. The only thing this line adds is the wall-clock including
+// the runner's own overhead, which is a profiling detail. Keeping it at INFO
+// would print the derived sum next to the facts it was summed from, and the sum
+// is the AMBIGUOUS one — findings=0 cannot say whether a linter ran.
+func (a *App) lintSide(ctx context.Context, appName, namespace, side, worktree, rendered string) []string {
 	start := time.Now()
-	warnings := a.linter.Lint(ctx, worktree, rendered)
-	a.logger.Info("Linted rendered manifests",
-		"app", appName, "side", side,
-		"duration", time.Since(start).Round(time.Millisecond),
+	warnings := a.linter.Lint(ctx, lint.Subject{App: appName, Namespace: namespace, Side: side, Worktree: worktree}, rendered)
+	a.logger.Debug("Lint totals",
+		"app", appName, "namespace", namespace, "side", side,
+		"duration", lint.RoundDuration(time.Since(start)),
 		"findings", len(warnings))
 	return warnings
 }
@@ -1294,11 +1298,11 @@ func (a *App) processOneApp(ctx context.Context, queuedApp *diff.QueuedApp) (*ty
 	if a.linter != nil {
 		if appDiff.RenderedOld != "" {
 			diffResult.ParseWarnings = append(diffResult.ParseWarnings,
-				diff.LabelSide(diff.SideBase, a.lintSide(ctx, appDiff.Name, diff.SideBase, a.baseWorktree, appDiff.RenderedOld))...)
+				diff.LabelSide(diff.SideBase, a.lintSide(ctx, appDiff.Name, appDiff.Namespace, diff.SideBase, a.baseWorktree, appDiff.RenderedOld))...)
 		}
 		if appDiff.RenderedNew != "" {
 			diffResult.ParseWarnings = append(diffResult.ParseWarnings,
-				diff.LabelSide(diff.SideTarget, a.lintSide(ctx, appDiff.Name, diff.SideTarget, a.targetWorktree, appDiff.RenderedNew))...)
+				diff.LabelSide(diff.SideTarget, a.lintSide(ctx, appDiff.Name, appDiff.Namespace, diff.SideTarget, a.targetWorktree, appDiff.RenderedNew))...)
 		}
 	}
 

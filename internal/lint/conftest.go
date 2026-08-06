@@ -35,14 +35,14 @@ type conftestResults []struct {
 // harmless (they define test_* rules, not deny rules), but tool-specific test
 // manifests are not universally safe (a kyverno-test.yaml beside a kyverno
 // policy makes `kyverno apply` emit nothing at all, silently).
-func (r *Runner) runConftest(ctx context.Context, worktree, policyDir, content string) []string {
-	label := "lint-conftest " + policyDir
+func (r *Runner) runConftest(ctx context.Context, name, worktree, policyDir, content string) result {
+	label := name + " " + policyDir
 
 	dir, ok := resolvePolicyDir(worktree, policyDir)
 	if !ok {
 		// See runKyverno: a side without policies is the PR-adds-a-policy shape,
 		// and an empty directory makes conftest error ("no policies found").
-		return nil
+		return result{status: statusSkipped}
 	}
 
 	argv := []string{
@@ -56,10 +56,10 @@ func (r *Runner) runConftest(ctx context.Context, worktree, policyDir, content s
 
 	out := r.execTool(ctx, worktree, label, argv, content)
 	if out.warning != "" {
-		return []string{out.warning}
+		return result{lines: []string{out.warning}, status: statusFailed}
 	}
 	if out.stdout == "" {
-		return nil
+		return result{status: statusOK}
 	}
 
 	return parseConftestReport(label, out.stdout)
@@ -67,21 +67,26 @@ func (r *Runner) runConftest(ctx context.Context, worktree, policyDir, content s
 
 // parseConftestReport turns conftest's JSON output into warning lines. Split from
 // the exec path so the shape conftest actually emits can be pinned without the
-// binary.
-func parseConftestReport(label, stdout string) []string {
+// binary. An unparsable report is FAILED, for the reason parseKyvernoReport
+// documents.
+func parseConftestReport(label, stdout string) result {
 	var results conftestResults
 	if err := json.Unmarshal([]byte(stdout), &results); err != nil {
-		return []string{fmt.Sprintf("%s: unparsable report: %v", label, err)}
+		return result{
+			lines:  []string{fmt.Sprintf("%s: unparsable report: %v", label, err)},
+			status: statusFailed,
+		}
 	}
 
+	// entry, not result: `result` is the invocation-outcome type in this package.
 	var warnings []string
-	for _, result := range results {
-		for _, failure := range result.Failures {
-			warnings = append(warnings, fmt.Sprintf("[conftest/%s] %s", result.Namespace, singleLine(failure.Msg)))
+	for _, entry := range results {
+		for _, failure := range entry.Failures {
+			warnings = append(warnings, fmt.Sprintf("[conftest/%s] %s", entry.Namespace, singleLine(failure.Msg)))
 		}
-		for _, warning := range result.Warnings {
-			warnings = append(warnings, fmt.Sprintf("[conftest/%s] %s", result.Namespace, singleLine(warning.Msg)))
+		for _, warning := range entry.Warnings {
+			warnings = append(warnings, fmt.Sprintf("[conftest/%s] %s", entry.Namespace, singleLine(warning.Msg)))
 		}
 	}
-	return warnings
+	return result{lines: warnings, status: statusOK}
 }

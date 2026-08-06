@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"os"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/rgeraskin/argocdf/internal/cluster"
 	"github.com/rgeraskin/argocdf/internal/config"
+	"github.com/rgeraskin/argocdf/internal/lint"
 )
 
 // TestCreateRendererErrorReturnsUntypedNil pins the interface-nil
@@ -509,5 +511,50 @@ func TestCreateRenderCacheRespectsLayers(t *testing.T) {
 		if (cache == nil) != tc.wantNil {
 			t.Errorf("--no-cache=%s: cache nil = %v, want %v", tc.noCache, cache == nil, tc.wantNil)
 		}
+	}
+}
+
+// TestLintSideAttribution pins the App-to-RUNNER half of the invocation line.
+//
+// The lint package's own tests all construct a Subject directly, so they would pass
+// unchanged if lintSide handed the runner empty strings — and the symptom would be
+// silent: every log line still appears, just no longer attributable to an
+// application or a side, which is precisely what those fields exist for when
+// --concurrency renders several applications at once. This is the same hazard
+// TestCreateLintRunnerWiring covers for the kube context, one layer up.
+//
+// It also pins the per-side aggregate at DEBUG: at INFO it would print a derived
+// sum (and the ambiguous one) beside the facts it was summed from.
+func TestLintSideAttribution(t *testing.T) {
+	var buf bytes.Buffer
+	logger := log.New(&buf)
+	logger.SetLevel(log.InfoLevel)
+
+	worktree := t.TempDir()
+	a := &App{
+		cfg:    &config.Config{},
+		logger: logger,
+		linter: &lint.Runner{
+			Commands: []string{`echo "cwd=$(pwd)"`},
+			Timeout:  5 * time.Second,
+			Logger:   logger,
+		},
+	}
+
+	warnings := a.lintSide(context.Background(), "web-app", "team-a", "target", worktree, "kind: ConfigMap\n")
+
+	out := buf.String()
+	for _, want := range []string{"Linted", "app=web-app", "namespace=team-a", "side=target", "linter=lint#1", "status=ok"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log %q is missing %s", out, want)
+		}
+	}
+	// DEBUG, so an INFO-level logger must not show it.
+	if strings.Contains(out, "Lint totals") {
+		t.Errorf("per-side aggregate reached INFO: %q", out)
+	}
+	// The worktree is what makes each side lint with its own copy of the files.
+	if len(warnings) != 1 || !strings.HasSuffix(warnings[0], filepath.Base(worktree)) {
+		t.Errorf("command ran in %#v, want the side's worktree %q", warnings, worktree)
 	}
 }

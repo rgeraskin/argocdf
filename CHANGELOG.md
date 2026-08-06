@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.5.1
+
+- Each lint invocation logs one line, saying how it ENDED
+  A report cannot tell three outcomes apart: a linter that ran and found nothing, one skipped because that side has no policies, and one that died. Empty output at exit 0 is a legitimate no-findings result by contract, and a failed invocation contributes exactly one line — indistinguishable from a single finding. So a kyverno that timed out logged `lines=1` on its invocation and `findings=1` in the side's totals, and both read like a single policy violation while the side had gone entirely unchecked. Every invocation now logs `status=ok|skipped|failed` next to which linter ran, what it was pointed at, its line count and its duration, and `status=failed` logs at WARN because it means that side was NOT linted. The per-side aggregate drops to DEBUG — its count is just the sum of those lines, and the ambiguous half of the pair. Each linter also carries a 1-based ordinal in flag order — `lint#2` in the report, `kyverno#1` in the log's `linter=` field — which is the only thing that tells two repeated `--lint` commands apart once their command text is truncated. Both lines also name the application's `namespace`: with apps-in-any-namespace, `team-a/web` and `team-b/web` are different applications with the same name, so `app=web` alone is attributable to neither.
+
 ## 0.5.0
 
 - BREAKING: `--namespace`/`-n` is replaced by `--argocd-namespace`
