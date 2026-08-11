@@ -1177,6 +1177,9 @@ func (a *App) processApplications(ctx context.Context, apps []cluster.Applicatio
 		a.logger.Info("Render cache", "hits", a.cacheHits.Load(), "misses", a.cacheMisses.Load())
 	}
 
+	// Lint LAST, over the results that survived discovery - see lintResults.
+	a.lintResults(ctx, resultSlice)
+
 	return resultSlice, nil
 }
 
@@ -1225,6 +1228,82 @@ func (a *App) processWave(ctx context.Context, wave []*diff.QueuedApp) []*types.
 	wg.Wait()
 
 	return out
+}
+
+// lintResults lints every application's FINAL rendered manifests, after the
+// discovery queue has drained.
+//
+// Linting used to sit inside processOneApp, next to the render it consumes, which
+// is the wrong place: an application can be rendered MORE THAN ONCE. A child
+// queued from the cluster listing is re-queued with its parent's git spec once
+// the parent's catalog reveals a spec change (RequeueProcessed), and the later
+// AppDiff REPLACES the earlier one in results - deliberately, because the earlier
+// one rendered a base side the parent did not manage. Linting per render therefore
+// linted manifests the report goes on to discard: a full policy run per superseded
+// render (~30s of `kyverno apply --cluster` for one app, multiplied by
+// --concurrency across a wave), and a status the report could not account for -
+// a superseded invocation that TIMED OUT logged WARN status=failed while no
+// warning line existed anywhere in the report, because the discarded AppDiff took
+// its ParseWarnings with it. Here every application is linted exactly once, on the
+// manifests the report actually shows.
+//
+// Lint findings join ParseWarnings under the same [base]/[target] labels: a
+// [base]-only finding was fixed by the change under review, [target]-only was
+// introduced, both = pre-existing. Each side's command runs in that side's
+// worktree, so repo-relative paths (a policy directory) resolve to the files as of
+// that branch - which is why this can run after rendering at all: the worktrees
+// live for the whole run, and RenderedOld/RenderedNew are held on the AppDiff.
+//
+// Concurrency mirrors processWave, and for the same reason: cluster-aware adapters
+// (kyverno apply --cluster, kubectl --dry-run=server) pay an API discovery per
+// invocation, so the tail is contention rather than tool speed. Each goroutine
+// appends to its OWN application's ParseWarnings - distinct AppDiffs hold distinct
+// ManifestSetDiffs - and builds its lines locally before the single append, so the
+// slice is never written concurrently.
+func (a *App) lintResults(ctx context.Context, results []*types.AppDiff) {
+	if a.linter == nil {
+		return
+	}
+
+	concurrency := a.cfg.Concurrency
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	if concurrency > len(results) {
+		concurrency = len(results)
+	}
+
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, concurrency)
+	for _, r := range results {
+		// An application that failed to render carries no ManifestSetDiff, and
+		// has nothing to lint - its error is already the report's finding.
+		diffResult, ok := r.DiffResult.(*diff.ManifestSetDiff)
+		if !ok || diffResult == nil {
+			continue
+		}
+
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(r *types.AppDiff, d *diff.ManifestSetDiff) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			// Sides with an empty render (a new or deleted application) are
+			// skipped: there are no manifests to hand a policy tool.
+			var warnings []string
+			if r.RenderedOld != "" {
+				warnings = append(warnings,
+					diff.LabelSide(diff.SideBase, a.lintSide(ctx, r.Name, r.Namespace, diff.SideBase, a.baseWorktree, r.RenderedOld))...)
+			}
+			if r.RenderedNew != "" {
+				warnings = append(warnings,
+					diff.LabelSide(diff.SideTarget, a.lintSide(ctx, r.Name, r.Namespace, diff.SideTarget, a.targetWorktree, r.RenderedNew))...)
+			}
+			d.ParseWarnings = append(d.ParseWarnings, warnings...)
+		}(r, diffResult)
+	}
+	wg.Wait()
 }
 
 // processOneApp processes a single application and returns its diff.
@@ -1310,27 +1389,9 @@ func (a *App) processOneApp(ctx context.Context, queuedApp *diff.QueuedApp) (*ty
 		return nil, fmt.Errorf("failed to compute diff: %w", err)
 	}
 
-	// Lint each side's rendered manifests. Lint findings join ParseWarnings
-	// under the same [base]/[target] labels: a [base]-only finding was fixed by
-	// the change under review, [target]-only was introduced, both = pre-existing.
-	// Each side's command runs in that side's worktree, so repo-relative paths
-	// (e.g. a policy directory) resolve to the files as of that branch.
-	// Timing is logged per app and side: cluster-aware adapters (kyverno apply
-	// --cluster, kubectl --dry-run=server) pay for an API round trip per
-	// invocation, and --concurrency runs several at once, so a --lint-timeout
-	// warning is usually contention rather than a broken tool. Without this
-	// number the only signal is the timeout itself, which names no cause.
-	if a.linter != nil {
-		if appDiff.RenderedOld != "" {
-			diffResult.ParseWarnings = append(diffResult.ParseWarnings,
-				diff.LabelSide(diff.SideBase, a.lintSide(ctx, appDiff.Name, appDiff.Namespace, diff.SideBase, a.baseWorktree, appDiff.RenderedOld))...)
-		}
-		if appDiff.RenderedNew != "" {
-			diffResult.ParseWarnings = append(diffResult.ParseWarnings,
-				diff.LabelSide(diff.SideTarget, a.lintSide(ctx, appDiff.Name, appDiff.Namespace, diff.SideTarget, a.targetWorktree, appDiff.RenderedNew))...)
-		}
-	}
-
+	// NOT linted here: an application can be rendered more than once, and only
+	// its LAST render reaches the report. See App.lintResults, which runs once the
+	// discovery queue has drained.
 	appDiff.DiffResult = diffResult
 
 	return appDiff, nil

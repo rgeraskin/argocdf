@@ -22,6 +22,9 @@ All notable changes to this project will be documented in this file.
 - Fix: `--verbose` now actually enables ArgoCD's debug stream
   0.5.0 advertised `--verbose` as re-emitting everything ArgoCD logs through argocdf's own logger, but only the QUIET path ever set a level: a verbose run stayed at logrus's default, where ArgoCD's debug records were filtered before argocdf could forward them. The level is now set explicitly in both directions, and argocdf's own `ARGOCD_LOG_LEVEL=error` default is undone when a later configuration turns verbosity on — a value you set yourself is never touched.
 
+- Fix: an application rendered twice is linted once
+  An application can be rendered more than once: a child queued from the cluster listing is re-rendered with the git spec its parent's catalog supplies, and that later result replaces the earlier one — deliberately, since the earlier one rendered a base side the parent did not manage. Linting sat inside the render, so the discarded render was linted too, and its findings were thrown away with it. With a cluster-aware adapter that is the most expensive thing in the run: a second `kyverno apply --cluster` per side of every re-rendered application, tens of seconds each, multiplied by `--concurrency`. It also produced a log line the report could not account for — a superseded invocation that timed out logged `status=failed` at WARN while no warning line existed anywhere in the report, because the discarded result took its warnings with it. Linting now runs once per application, after discovery settles, on the manifests the report actually shows.
+
 ## 0.5.0
 
 - BREAKING: `--namespace`/`-n` is replaced by `--argocd-namespace`

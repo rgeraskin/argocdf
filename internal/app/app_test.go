@@ -1019,6 +1019,121 @@ func TestProcessApplicationsWaveBarrier(t *testing.T) {
 	}
 }
 
+// TestLintRunsOncePerReportedSide pins that linting follows the REPORT, not the
+// renders: an application rendered twice is linted once.
+//
+// It reuses the wave-barrier hierarchy because that is the shape where it matters
+// - "child" renders prematurely with its cluster spec, then again with the git
+// spec its parent's catalog supplies, and the second AppDiff replaces the first.
+// While lint sat inside processOneApp, both renders were linted: a full policy run
+// on manifests the report then discarded, and - when that discarded invocation
+// failed or timed out - a WARN in the log with no warning line anywhere in the
+// report to explain it.
+//
+// The count is asserted against the sides the RESULTS carry rather than a literal,
+// because that is the actual invariant (one invocation per reported side) and it
+// cannot drift as the fixture gains apps. Under the old behavior the child alone
+// contributes two extra invocations, so this fails by 2.
+func TestLintRunsOncePerReportedSide(t *testing.T) {
+	logger := log.New(nil)
+	logger.SetLevel(log.FatalLevel)
+
+	// Every invocation drops one file naming the revision it was handed, so
+	// invocations can be counted independently of the warnings that SURVIVE in the
+	// report - which is the whole point: a superseded invocation's warnings are
+	// discarded with its AppDiff, so counting report lines could never catch it.
+	callDir := t.TempDir()
+	cmd := fmt.Sprintf(
+		`rev=$(grep -o 'revision: [a-z-]*' | head -1); f=$(mktemp %s/call.XXXXXX); printf '%%s' "$rev" > "$f"; printf '%%s\n' "$rev"`,
+		callDir)
+
+	cfg := &config.Config{Concurrency: 4, MaxDepth: 5}
+	// Real directories, unlike the wave-barrier test's fake paths: a lint command
+	// runs WITH the side's worktree as its working directory, so a nonexistent one
+	// fails to spawn and every invocation would be a failure warning instead.
+	fake := &fakeRenderer{baseWorktree: t.TempDir(), targetWorktree: t.TempDir()}
+
+	a := &App{
+		factory:        NewFactory(cfg, logger),
+		cfg:            cfg,
+		logger:         logger,
+		renderer:       fake,
+		differ:         diff.NewManifestDiffer(),
+		discoverer:     diff.NewAppDiscoverer(),
+		baseWorktree:   fake.baseWorktree,
+		targetWorktree: fake.targetWorktree,
+		linter: &lint.Runner{
+			Commands: []string{cmd},
+			Timeout:  30 * time.Second,
+			Logger:   logger,
+		},
+	}
+
+	clusterSpec := func() cluster.ApplicationSpec {
+		return cluster.ApplicationSpec{
+			Source: &cluster.ApplicationSource{
+				RepoURL:        "https://example.com/org/repo.git",
+				Chart:          "dummy",
+				TargetRevision: "cluster",
+			},
+		}
+	}
+	parent := cluster.Application{Spec: clusterSpec()}
+	parent.Name = "parent"
+	parent.Namespace = "argocd"
+	child := cluster.Application{Spec: clusterSpec()}
+	child.Name = "child"
+	child.Namespace = "argocd"
+
+	diffs, err := a.processApplications(context.Background(), []cluster.Application{parent, child})
+	if err != nil {
+		t.Fatalf("processApplications() error: %v", err)
+	}
+
+	// The child must really have been rendered twice, or this test proves nothing.
+	fake.mu.Lock()
+	childRenders := 0
+	for _, c := range fake.calls {
+		if c.app == "child" {
+			childRenders++
+		}
+	}
+	fake.mu.Unlock()
+	if childRenders < 4 {
+		t.Fatalf("child rendered %d times, want 4 - the requeue this test exists for did not happen", childRenders)
+	}
+
+	wantSides := 0
+	for _, d := range diffs {
+		if d.RenderedOld != "" {
+			wantSides++
+		}
+		if d.RenderedNew != "" {
+			wantSides++
+		}
+	}
+	entries, err := os.ReadDir(callDir)
+	if err != nil {
+		t.Fatalf("reading call dir: %v", err)
+	}
+	if len(entries) != wantSides {
+		t.Errorf("lint ran %d times, want %d (one per side present in the report); a superseded render was linted",
+			len(entries), wantSides)
+	}
+
+	// And it linted the FINAL manifests: the stale cluster-spec render must not
+	// have reached a linter at all.
+	for _, e := range entries {
+		body, readErr := os.ReadFile(filepath.Join(callDir, e.Name()))
+		if readErr != nil {
+			t.Fatalf("reading call file: %v", readErr)
+		}
+		if strings.Contains(string(body), "revision: cluster") {
+			t.Errorf("a linter was handed the superseded cluster-spec render (%q)", body)
+		}
+	}
+}
+
 // newChildFakeRenderer simulates a parent app that adds a brand-new child
 // Application on the target branch. Rendering the new child against the base
 // worktree fails hard — mimicking helm erroring on a values file that exists
@@ -1510,12 +1625,16 @@ func lintWorktrees(t *testing.T) (base, target string) {
 	return base, target
 }
 
-// TestProcessOneAppLintsBothSides pins the lint contract: each side's rendered
+// TestLintResultsLintsBothSides pins the lint contract: each side's rendered
 // manifests are piped to the lint command, its stdout lines land in
 // ParseWarnings under the side's [base]/[target] label, and the command runs
 // with that side's worktree as its working directory (so repo-relative policy
 // paths resolve to the side's version of the files).
-func TestProcessOneAppLintsBothSides(t *testing.T) {
+//
+// Driven through lintResults rather than processOneApp: lint follows the REPORT,
+// not the render, so an app rendered twice is linted once (see
+// TestLintRunsOncePerReportedSide).
+func TestLintResultsLintsBothSides(t *testing.T) {
 	logger := log.New(nil)
 	logger.SetLevel(log.FatalLevel)
 
@@ -1550,6 +1669,7 @@ func TestProcessOneAppLintsBothSides(t *testing.T) {
 	if err != nil {
 		t.Fatalf("processOneApp() error: %v", err)
 	}
+	a.lintResults(context.Background(), []*types.AppDiff{appDiff})
 
 	setDiff, ok := appDiff.DiffResult.(*diff.ManifestSetDiff)
 	if !ok {
@@ -1571,9 +1691,81 @@ func TestProcessOneAppLintsBothSides(t *testing.T) {
 	}
 }
 
-// TestProcessOneAppLintSkipsEmptyBase verifies that a newly-discovered app
+// TestLintResultsSkipsUnrenderableResults pins the guard that keeps an
+// application whose render FAILED out of the linter: processWave turns a render
+// error into an AppDiff carrying only Error, with no DiffResult, so there is no
+// ParseWarnings to attach a finding to and nothing meaningful to lint.
+//
+// The errored result deliberately carries NON-EMPTY rendered strings, which a real
+// render failure would not. That is what makes this a pin on the guard rather than
+// on emptiness: were the type assertion dropped, the empty-render checks would not
+// save it - it would lint, and then panic attaching the warnings.
+//
+// A DiffResult of some OTHER type is covered too. Nothing produces one today, but
+// the field is `any`, so the assertion is the only thing standing between a future
+// differ and a panic in the lint phase.
+func TestLintResultsSkipsUnrenderableResults(t *testing.T) {
+	logger := log.New(nil)
+	logger.SetLevel(log.FatalLevel)
+
+	callDir := t.TempDir()
+	worktree := t.TempDir()
+	cmd := fmt.Sprintf(`f=$(mktemp %s/call.XXXXXX); cat > "$f"; echo linted`, callDir)
+
+	cfg := &config.Config{Concurrency: 4, MaxDepth: 5}
+	a := &App{
+		cfg:            cfg,
+		logger:         logger,
+		baseWorktree:   worktree,
+		targetWorktree: worktree,
+		linter: &lint.Runner{
+			Commands: []string{cmd},
+			Timeout:  5 * time.Second,
+			Logger:   logger,
+		},
+	}
+
+	healthy := &types.AppDiff{
+		Name: "healthy", Namespace: "argocd",
+		RenderedNew: "kind: ConfigMap\n",
+		DiffResult:  &diff.ManifestSetDiff{},
+	}
+	errored := &types.AppDiff{
+		Name: "errored", Namespace: "argocd",
+		RenderedOld: "kind: ConfigMap\n",
+		RenderedNew: "kind: ConfigMap\n",
+		Error:       errors.New("failed to render base branch"),
+	}
+	foreign := &types.AppDiff{
+		Name: "foreign", Namespace: "argocd",
+		RenderedNew: "kind: ConfigMap\n",
+		DiffResult:  "not a *diff.ManifestSetDiff",
+	}
+
+	a.lintResults(context.Background(), []*types.AppDiff{healthy, errored, foreign})
+
+	// Exactly one invocation: the healthy app's target side. Asserting the count
+	// rather than "no panic" is what rules out linting the other two - a spurious
+	// run on either would be silent, its findings having nowhere to land.
+	entries, err := os.ReadDir(callDir)
+	if err != nil {
+		t.Fatalf("reading call dir: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("lint ran %d times, want 1 (only the app with a diff result)", len(entries))
+	}
+
+	// And the healthy app really was linted, so the count above cannot pass by
+	// linting nothing at all.
+	setDiff := healthy.DiffResult.(*diff.ManifestSetDiff)
+	if len(setDiff.ParseWarnings) != 1 || setDiff.ParseWarnings[0] != "[target] linted" {
+		t.Errorf("healthy ParseWarnings = %v, want [[target] linted]", setDiff.ParseWarnings)
+	}
+}
+
+// TestLintResultsSkipsEmptyBase verifies that a newly-discovered app
 // (no base render) is linted on the target side only.
-func TestProcessOneAppLintSkipsEmptyBase(t *testing.T) {
+func TestLintResultsSkipsEmptyBase(t *testing.T) {
 	logger := log.New(nil)
 	logger.SetLevel(log.FatalLevel)
 
@@ -1609,6 +1801,7 @@ func TestProcessOneAppLintSkipsEmptyBase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("processOneApp() error: %v", err)
 	}
+	a.lintResults(context.Background(), []*types.AppDiff{appDiff})
 
 	setDiff := appDiff.DiffResult.(*diff.ManifestSetDiff)
 	if len(setDiff.ParseWarnings) != 1 || setDiff.ParseWarnings[0] != "[target] revision: target-rev" {
@@ -1638,9 +1831,9 @@ func (f *emptySideRenderer) RenderApplication(
 	}, nil
 }
 
-// TestProcessOneAppLintSkipsEmptyTarget verifies that a deleted app (empty
+// TestLintResultsSkipsEmptyTarget verifies that a deleted app (empty
 // target render) is linted on the base side only.
-func TestProcessOneAppLintSkipsEmptyTarget(t *testing.T) {
+func TestLintResultsSkipsEmptyTarget(t *testing.T) {
 	logger := log.New(nil)
 	logger.SetLevel(log.FatalLevel)
 
@@ -1675,6 +1868,7 @@ func TestProcessOneAppLintSkipsEmptyTarget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("processOneApp() error: %v", err)
 	}
+	a.lintResults(context.Background(), []*types.AppDiff{appDiff})
 
 	setDiff := appDiff.DiffResult.(*diff.ManifestSetDiff)
 	if len(setDiff.ParseWarnings) != 1 || setDiff.ParseWarnings[0] != "[base] revision: base-rev" {
