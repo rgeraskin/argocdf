@@ -51,12 +51,37 @@ if [ "${E2E_PUSH_YES:-}" != "1" ]; then
   esac
 fi
 
+# The cut point is named EXPLICITLY (--onto master "$b~1") rather than inferred
+# from the merge-base, because master's history gets REWRITTEN here - a squashed
+# review commit, a re-dated series - and a plain `git rebase master "$b"` cannot
+# survive that: the old master commits stop being ancestors of the new master, the
+# merge-base collapses back to origin/master, and rebase tries to replay the whole
+# stale master chain on top of a master that already carries its content. Every
+# case branch then conflicts, on content identical to what is already there.
+#
+# The trade is that --onto would SILENTLY DROP a second own commit instead of
+# letting the invariant check below catch it, so that check has to happen FIRST -
+# and it cannot use the merge-base either, for the same reason. What it uses is the
+# base's TREE: the base of a legitimate case branch is a former master tip, and a
+# history rewrite preserves trees even as it renames commits, so the tree is still
+# in master's history afterwards. A branch carrying its own second commit has a
+# base tree that was never a master tree, and fails here.
+master_trees=$(git log --format=%T master)
 for b in $branches; do
-  git rebase -q master "$b" >/dev/null 2>&1 \
+  printf '%s\n' "$master_trees" | grep -qFx "$(git rev-parse "$b~1^{tree}")" \
+    || { echo "ERROR: $b is not one commit off a master revision (own history, or an unknown base) - recreate the branch"; exit 1; }
+done
+
+for b in $branches; do
+  git rebase -q --onto master "$b~1" "$b" >/dev/null 2>&1 \
     || { git rebase --abort 2>/dev/null; echo "ERROR: rebase conflict on $b - resolve or recreate the branch first"; git checkout -q master; exit 1; }
 done
 git checkout -q master
 
+# The RESULT check. The pre-rebase one above rules out a branch with own history;
+# this one rules out what the rebase itself can do to a valid branch - a case commit
+# whose change is already on master replays EMPTY, and rebase drops it, leaving a
+# branch zero commits off master that would publish as a case with no change.
 tip=$(git rev-parse master)
 for b in $branches; do
   [ "$(git rev-parse "$b~1")" = "$tip" ] && [ "$(git rev-list --count master.."$b")" = "1" ] \
