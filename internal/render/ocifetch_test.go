@@ -115,7 +115,7 @@ func TestFetchOCIArtifactClientInputs(t *testing.T) {
 	}
 	imagePaths := utilio.NewRandomizedTempPaths(t.TempDir())
 
-	dir, cleanup, err := fetchOCIArtifact(context.Background(), &opts, ociTestApp(), ociSource("6.7.0"), imagePaths)
+	dir, gotDigest, cleanup, err := fetchOCIArtifact(context.Background(), &opts, ociTestApp(), ociSource("6.7.0"), imagePaths)
 	if err != nil {
 		t.Fatalf("fetchOCIArtifact() error: %v", err)
 	}
@@ -148,6 +148,12 @@ func TestFetchOCIArtifactClientInputs(t *testing.T) {
 	if dir != fake.extractedDir {
 		t.Errorf("dir = %q, want the extraction %q", dir, fake.extractedDir)
 	}
+	// The RESOLVED digest is returned, not the tag: it is what ArgoCD hands
+	// GenerateManifests as the revision for an OCI source, so it is what
+	// ARGOCD_APP_REVISION* reports.
+	if gotDigest != fake.digest {
+		t.Errorf("digest = %q, want the resolved %q", gotDigest, fake.digest)
+	}
 
 	if fake.closed {
 		t.Error("extraction closed before cleanup")
@@ -163,7 +169,7 @@ func TestFetchOCIArtifactBareRepoWithoutCredentialSource(t *testing.T) {
 	var gotRepo *argoappv1.Repository
 	stubNewOCIClient(t, fake, &gotRepo, nil)
 
-	_, cleanup, err := fetchOCIArtifact(
+	_, _, cleanup, err := fetchOCIArtifact(
 		context.Background(), &RenderOptions{}, ociTestApp(), ociSource("6.7.0"),
 		utilio.NewRandomizedTempPaths(t.TempDir()))
 	if err != nil {
@@ -179,7 +185,7 @@ func TestFetchOCIArtifactBareRepoWithoutCredentialSource(t *testing.T) {
 func TestFetchOCIArtifactResolutionFailureIsLoud(t *testing.T) {
 	stubNewOCIClient(t, &fakeOCIClient{}, nil, nil)
 
-	_, _, err := fetchOCIArtifact(
+	_, _, _, err := fetchOCIArtifact(
 		context.Background(),
 		&RenderOptions{ResolveRepo: func(_ context.Context, _, _ string) (*argoappv1.Repository, error) {
 			return nil, errors.New("cluster unreachable")
@@ -204,7 +210,7 @@ func TestFetchOCIArtifactErrorsCarryContext(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			stubNewOCIClient(t, tt.client, nil, nil)
 
-			_, _, err := fetchOCIArtifact(
+			_, _, _, err := fetchOCIArtifact(
 				context.Background(), &RenderOptions{}, ociTestApp(), ociSource("6.7.0"),
 				utilio.NewRandomizedTempPaths(t.TempDir()))
 			if err == nil {
@@ -235,7 +241,7 @@ func TestFetchOCIArtifactClientConstructionFailure(t *testing.T) {
 	}
 	t.Cleanup(func() { newOCIClient = original })
 
-	_, _, err := fetchOCIArtifact(
+	_, _, _, err := fetchOCIArtifact(
 		context.Background(), &RenderOptions{}, ociTestApp(), ociSource("6.7.0"),
 		utilio.NewRandomizedTempPaths(t.TempDir()))
 	if err == nil || !strings.Contains(err.Error(), "invalid reference") {
@@ -250,7 +256,7 @@ func TestFetchOCIArtifactCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, _, err := fetchOCIArtifact(ctx, &RenderOptions{}, ociTestApp(), ociSource("6.7.0"),
+	_, _, _, err := fetchOCIArtifact(ctx, &RenderOptions{}, ociTestApp(), ociSource("6.7.0"),
 		utilio.NewRandomizedTempPaths(t.TempDir()))
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want context.Canceled", err)

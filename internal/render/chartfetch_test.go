@@ -11,6 +11,7 @@ import (
 	"time"
 
 	argoappv1 "github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
+	argohelm "github.com/argoproj/argo-cd/v3/util/helm"
 	utilio "github.com/argoproj/argo-cd/v3/util/io"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -24,11 +25,20 @@ type extractCall struct {
 }
 
 // fakeChartClient records ExtractChart calls and serves a pre-made directory.
+// tags/index serve constraint resolution; a test that leaves them empty is
+// asserting on a source whose revision needs no resolution.
 type fakeChartClient struct {
 	extractedDir string
 	err          error
 	calls        []extractCall
 	closed       bool
+
+	tags      []string
+	tagsErr   error
+	index     *argohelm.Index
+	indexErr  error
+	tagsCalls int
+	idxCalls  int
 }
 
 func (f *fakeChartClient) ExtractChart(chart, version string, passCredentials bool, _ int64, _ bool) (string, utilio.Closer, error) {
@@ -40,6 +50,22 @@ func (f *fakeChartClient) ExtractChart(chart, version string, passCredentials bo
 		f.closed = true
 		return nil
 	}), nil
+}
+
+func (f *fakeChartClient) GetTags(_ string, _ bool) ([]string, error) {
+	f.tagsCalls++
+	return f.tags, f.tagsErr
+}
+
+func (f *fakeChartClient) GetIndex(_ bool, _ int64) (*argohelm.Index, error) {
+	f.idxCalls++
+	if f.indexErr != nil {
+		return nil, f.indexErr
+	}
+	if f.index != nil {
+		return f.index, nil
+	}
+	return &argohelm.Index{}, nil
 }
 
 // stubNewChartClient swaps the chart-client constructor for the test,
@@ -103,7 +129,7 @@ func TestFetchRemoteChart_ClientInputs(t *testing.T) {
 	source := chartSource("1.2.3")
 	source.Helm = &cluster.ApplicationSourceHelm{PassCredentials: true}
 
-	dir, cached, cleanup, err := fetchRemoteChart(context.Background(), &opts, chartTestApp(), source)
+	dir, _, cached, cleanup, err := fetchRemoteChart(context.Background(), &opts, chartTestApp(), source)
 	if err != nil {
 		t.Fatalf("fetchRemoteChart() error: %v", err)
 	}
@@ -131,7 +157,7 @@ func TestFetchRemoteChart_SchemeLessURLHeuristic(t *testing.T) {
 	stubNewChartClient(t, fake, nil, &gotEnableOCI)
 
 	opts := RenderOptions{}
-	_, _, cleanup, err := fetchRemoteChart(context.Background(), &opts, chartTestApp(), chartSource("1.2.3"))
+	_, _, _, cleanup, err := fetchRemoteChart(context.Background(), &opts, chartTestApp(), chartSource("1.2.3"))
 	if err != nil {
 		t.Fatalf("fetchRemoteChart() error: %v", err)
 	}
@@ -171,7 +197,7 @@ func TestFetchRemoteChart_RegistryAuthFileStripsLogin(t *testing.T) {
 			}, nil
 		},
 	}
-	_, _, cleanup, err := fetchRemoteChart(context.Background(), &opts, chartTestApp(), chartSource("1.2.3"))
+	_, _, _, cleanup, err := fetchRemoteChart(context.Background(), &opts, chartTestApp(), chartSource("1.2.3"))
 	if err != nil {
 		t.Fatalf("fetchRemoteChart() error: %v", err)
 	}
@@ -206,7 +232,7 @@ func TestFetchRemoteChart_NoAuthFilePassesCredsThrough(t *testing.T) {
 			return &argoappv1.Repository{Repo: repoURL, EnableOCI: true, Username: "u", Password: "p"}, nil
 		},
 	}
-	_, _, cleanup, err := fetchRemoteChart(context.Background(), &opts, chartTestApp(), chartSource("1.2.3"))
+	_, _, _, cleanup, err := fetchRemoteChart(context.Background(), &opts, chartTestApp(), chartSource("1.2.3"))
 	if err != nil {
 		t.Fatalf("fetchRemoteChart() error: %v", err)
 	}
@@ -250,7 +276,7 @@ func TestFetchRemoteChart_LocalModeStripsClientLogin(t *testing.T) {
 			return &argoappv1.Repository{Repo: repoURL, EnableOCI: true, Username: "u", Password: "p"}, nil
 		},
 	}
-	_, _, cleanup, err := fetchRemoteChart(context.Background(), &opts, chartTestApp(), chartSource("1.2.3"))
+	_, _, _, cleanup, err := fetchRemoteChart(context.Background(), &opts, chartTestApp(), chartSource("1.2.3"))
 	if err != nil {
 		t.Fatalf("fetchRemoteChart() error: %v", err)
 	}
@@ -273,7 +299,7 @@ func TestFetchRemoteChart_CachePublishAndHit(t *testing.T) {
 	source := chartSource("1.2.3")
 
 	// Miss: fetches, publishes into the cache, closes the extraction.
-	dir, cached, cleanup, err := fetchRemoteChart(context.Background(), &opts, chartTestApp(), source)
+	dir, _, cached, cleanup, err := fetchRemoteChart(context.Background(), &opts, chartTestApp(), source)
 	if err != nil {
 		t.Fatalf("fetchRemoteChart() error: %v", err)
 	}
@@ -290,7 +316,7 @@ func TestFetchRemoteChart_CachePublishAndHit(t *testing.T) {
 	}
 
 	// Hit: served from the cache, the client is never called again.
-	dir2, cached2, cleanup2, err := fetchRemoteChart(context.Background(), &opts, chartTestApp(), source)
+	dir2, _, cached2, cleanup2, err := fetchRemoteChart(context.Background(), &opts, chartTestApp(), source)
 	if err != nil {
 		t.Fatalf("fetchRemoteChart() second call error: %v", err)
 	}
@@ -331,12 +357,12 @@ func TestFetchRemoteChart_CredentialScopedDirsDoNotShare(t *testing.T) {
 	// requested under the LOCAL one. Neither fetch is allowed to fail, but nothing
 	// else is asserted until both have run: the load-bearing check is the CALL COUNT,
 	// and it should be what speaks when this breaks.
-	dir, cached, cleanup, err := fetchRemoteChart(context.Background(), &clusterOpts, chartTestApp(), source)
+	dir, _, cached, cleanup, err := fetchRemoteChart(context.Background(), &clusterOpts, chartTestApp(), source)
 	if err != nil {
 		t.Fatalf("cluster-scope fetch: %v", err)
 	}
 	cleanup()
-	dir2, cached2, cleanup2, err := fetchRemoteChart(context.Background(), &localOpts, chartTestApp(), source)
+	dir2, _, cached2, cleanup2, err := fetchRemoteChart(context.Background(), &localOpts, chartTestApp(), source)
 	if err != nil {
 		t.Fatalf("local-scope fetch: %v", err)
 	}
@@ -377,7 +403,7 @@ func TestFetchRemoteChart_UnpinnedSkipsCache(t *testing.T) {
 	stubNewChartClient(t, fake, nil, nil)
 
 	opts := RenderOptions{ChartCacheDir: cacheBase}
-	dir, cached, cleanup, err := fetchRemoteChart(context.Background(), &opts, chartTestApp(), chartSource("HEAD"))
+	dir, _, cached, cleanup, err := fetchRemoteChart(context.Background(), &opts, chartTestApp(), chartSource("HEAD"))
 	if err != nil {
 		t.Fatalf("fetchRemoteChart() error: %v", err)
 	}
@@ -402,7 +428,7 @@ func TestFetchRemoteChart_ErrorWrapsChartAndRepo(t *testing.T) {
 	stubNewChartClient(t, fake, nil, nil)
 
 	opts := RenderOptions{}
-	_, _, _, err := fetchRemoteChart(context.Background(), &opts, chartTestApp(), chartSource("1.2.3"))
+	_, _, _, _, err := fetchRemoteChart(context.Background(), &opts, chartTestApp(), chartSource("1.2.3"))
 	if err == nil {
 		t.Fatal("fetchRemoteChart() = nil error, want fetch failure")
 	}
@@ -453,7 +479,7 @@ func TestFetchRemoteChart_PublishFailureServesExtracted(t *testing.T) {
 	}
 
 	opts := RenderOptions{ChartCacheDir: blocker}
-	dir, cached, cleanup, err := fetchRemoteChart(context.Background(), &opts, chartTestApp(), chartSource("1.2.3"))
+	dir, _, cached, cleanup, err := fetchRemoteChart(context.Background(), &opts, chartTestApp(), chartSource("1.2.3"))
 	if err != nil {
 		t.Fatalf("fetchRemoteChart() error: %v", err)
 	}
@@ -477,7 +503,7 @@ func TestFetchRemoteChart_ContextCancelled(t *testing.T) {
 	cancel()
 
 	opts := RenderOptions{}
-	_, _, _, err := fetchRemoteChart(ctx, &opts, chartTestApp(), chartSource("1.2.3"))
+	_, _, _, _, err := fetchRemoteChart(ctx, &opts, chartTestApp(), chartSource("1.2.3"))
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("fetchRemoteChart() error = %v, want context.Canceled", err)
 	}
@@ -493,6 +519,16 @@ type blockingChartClient struct {
 	release chan struct{}
 	dir     string
 	closed  chan struct{}
+}
+
+// The resolution methods are unreachable here: the cancellation tests use an
+// exact version, which resolves without touching the registry.
+func (b *blockingChartClient) GetTags(string, bool) ([]string, error) {
+	return nil, errors.New("GetTags must not be called for an exact version")
+}
+
+func (b *blockingChartClient) GetIndex(bool, int64) (*argohelm.Index, error) {
+	return nil, errors.New("GetIndex must not be called for an exact version")
 }
 
 func (b *blockingChartClient) ExtractChart(string, string, bool, int64, bool) (string, utilio.Closer, error) {
@@ -520,7 +556,7 @@ func TestFetchRemoteChart_InFlightCancellation(t *testing.T) {
 	}()
 
 	opts := RenderOptions{}
-	_, _, _, err := fetchRemoteChart(ctx, &opts, chartTestApp(), chartSource("1.2.3"))
+	_, _, _, _, err := fetchRemoteChart(ctx, &opts, chartTestApp(), chartSource("1.2.3"))
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("fetchRemoteChart() error = %v, want context.Canceled while the fetch is in flight", err)
 	}
@@ -549,7 +585,7 @@ func TestFetchRemoteChart_ResolveErrorIsLoud(t *testing.T) {
 			return nil, errors.New("token exchange failed")
 		},
 	}
-	_, _, _, err := fetchRemoteChart(context.Background(), &opts, chartTestApp(), chartSource("1.2.3"))
+	_, _, _, _, err := fetchRemoteChart(context.Background(), &opts, chartTestApp(), chartSource("1.2.3"))
 	if err == nil || !strings.Contains(err.Error(), "token exchange failed") {
 		t.Errorf("fetchRemoteChart() error = %v, want the credential resolution root cause", err)
 	}

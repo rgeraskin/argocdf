@@ -90,6 +90,12 @@ func noopOCIEventHandlers() argooci.EventHandlers {
 // directory through ArgoCD's OCI client. The returned cleanup removes the
 // extraction (the pulled tarball stays in imagePaths for the rest of the run).
 //
+// digest is the resolved artifact digest — what ArgoCD hands GenerateManifests
+// as the revision for an OCI source, and therefore what ARGOCD_APP_REVISION*
+// must report. It is the artifact's content identity, which is what a template
+// substituting the revision into an image tag actually wants; the git commit that
+// happened to reference it is not.
+//
 // Unlike remote charts this is NOT wrapped in a persistent cross-run cache. The
 // tarball write is not atomic (ArgoCD's saveCompressedImageToPath tars straight
 // onto the cache path), so a run killed mid-pull would leave a truncated file
@@ -103,21 +109,21 @@ func fetchOCIArtifact(
 	app *cluster.Application,
 	source *cluster.ApplicationSource,
 	imagePaths utilio.TempPaths,
-) (dir string, cleanup func(), err error) {
+) (dir, digest string, cleanup func(), err error) {
 	select {
 	case <-ctx.Done():
-		return "", nil, ctx.Err()
+		return "", "", nil, ctx.Err()
 	default:
 	}
 
 	repo, err := resolveRepoOrBare(ctx, opts, app.Spec.Project, source.RepoURL)
 	if err != nil {
-		return "", nil, err
+		return "", "", nil, err
 	}
 
 	client, err := newOCIClient(repo, imagePaths)
 	if err != nil {
-		return "", nil, &ociFetchError{repoURL: source.RepoURL, revision: source.TargetRevision, cause: err}
+		return "", "", nil, &ociFetchError{repoURL: source.RepoURL, revision: source.TargetRevision, cause: err}
 	}
 
 	// noCache=true: argocdf wires no tags cache, so the flag cannot change the
@@ -126,20 +132,20 @@ func fetchOCIArtifact(
 	// username/password, unstripped: OCI artifacts authenticate through ORAS
 	// directly, never through the helm registry config the chart path strips
 	// credentials for (see registryAuthFile).
-	digest, err := client.ResolveRevision(ctx, source.TargetRevision, true)
+	digest, err = client.ResolveRevision(ctx, source.TargetRevision, true)
 	if err != nil {
-		return "", nil, &ociFetchError{repoURL: source.RepoURL, revision: source.TargetRevision, cause: err}
+		return "", "", nil, &ociFetchError{repoURL: source.RepoURL, revision: source.TargetRevision, cause: err}
 	}
 
 	extracted, closer, err := client.Extract(ctx, digest)
 	if err != nil {
 		if ctx.Err() != nil {
-			return "", nil, ctx.Err()
+			return "", "", nil, ctx.Err()
 		}
-		return "", nil, &ociFetchError{repoURL: source.RepoURL, revision: source.TargetRevision, cause: err}
+		return "", "", nil, &ociFetchError{repoURL: source.RepoURL, revision: source.TargetRevision, cause: err}
 	}
 
-	return extracted, func() { _ = closer.Close() }, nil
+	return extracted, digest, func() { _ = closer.Close() }, nil
 }
 
 // ociFetchError reports a failed OCI artifact fetch with per-run temp paths

@@ -11,6 +11,7 @@ import (
 	argoappv1 "github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
 	argohelm "github.com/argoproj/argo-cd/v3/util/helm"
 	utilio "github.com/argoproj/argo-cd/v3/util/io"
+	argoversions "github.com/argoproj/argo-cd/v3/util/versions"
 
 	"github.com/rgeraskin/argocdf/internal/cluster"
 )
@@ -19,10 +20,20 @@ import (
 // default (ARGOCD_HELM_MANIFEST_MAX_EXTRACTED_SIZE=1G).
 const maxExtractedChartSize = 1 << 30
 
+// maxHelmIndexSize bounds a helm repository index download, mirroring the
+// repo-server default (ARGOCD_REPO_SERVER_HELM_MANIFEST_MAX_INDEX_SIZE=1G). It
+// is only read when a chart source's target revision is a CONSTRAINT, which is
+// the only case that needs the index at all.
+const maxHelmIndexSize = 1 << 30
+
 // chartClient is the slice of ArgoCD's util/helm.Client that chart fetching
 // uses — an interface seam so tests can stub the network away.
 type chartClient interface {
 	ExtractChart(chart string, version string, passCredentials bool, manifestMaxExtractedSize int64, disableManifestMaxExtractedSize bool) (string, utilio.Closer, error)
+	// GetTags and GetIndex serve constraint resolution (resolveChartRevision):
+	// an OCI chart repository lists tags, a classic one serves an index.
+	GetTags(chart string, noCache bool) ([]string, error)
+	GetIndex(noCache bool, maxIndexSize int64) (*argohelm.Index, error)
 }
 
 // newChartClient builds ArgoCD's chart client — the repo-server's own
@@ -64,6 +75,44 @@ func isOCIChartRepo(repoURL string) bool {
 	return strings.HasPrefix(repoURL, "oci://") || !strings.Contains(repoURL, "://")
 }
 
+// resolveChartRevision returns the chart version ArgoCD's repo-server would
+// resolve a chart source's target revision to: the revision itself when it names
+// a version, otherwise the maximum published version satisfying it as a semver
+// constraint. It mirrors newHelmClientResolveRevision's revision half
+// (repository.go:2618-2647) and delegates both decisions to ArgoCD's own
+// util/versions, so "is this a version" and "which version wins" cannot drift.
+//
+// The resolved version is what feeds ARGOCD_APP_REVISION* and what the pull is
+// pinned to — one resolution, as upstream does it, rather than one for the label
+// and another inside helm.
+//
+// noCache=true because argocdf wires no index cache; the flag says so rather
+// than implying one.
+func resolveChartRevision(client chartClient, chart, revision string, enableOCI bool) (string, error) {
+	if argoversions.IsVersion(revision) {
+		return revision, nil
+	}
+	var tags []string
+	if enableOCI {
+		t, err := client.GetTags(chart, true)
+		if err != nil {
+			return "", fmt.Errorf("unable to get tags: %w", err)
+		}
+		tags = t
+	} else {
+		index, err := client.GetIndex(true, maxHelmIndexSize)
+		if err != nil {
+			return "", err
+		}
+		entries, err := index.GetEntries(chart)
+		if err != nil {
+			return "", err
+		}
+		tags = entries.Tags()
+	}
+	return argoversions.MaxVersion(revision, tags)
+}
+
 // fetchRemoteChart materializes a source's remote chart as a local unpacked
 // directory through ArgoCD's chart client, wrapped in argocdf's persistent
 // chart cache (pinned versions only; a hit skips fetching — and auth —
@@ -71,23 +120,34 @@ func isOCIChartRepo(repoURL string) bool {
 // SHARED persistent cache (callers that mutate the chart must copy it first).
 // The returned cleanup must be called when the chart directory is no longer
 // needed; for cached charts it is a no-op.
-func fetchRemoteChart(ctx context.Context, opts *RenderOptions, app *cluster.Application, source *cluster.ApplicationSource) (dir string, cached bool, cleanup func(), err error) {
+//
+// revision is the RESOLVED chart version — what ArgoCD hands GenerateManifests
+// for a chart source, and therefore what ARGOCD_APP_REVISION* must report. It is
+// not the git commit: a chart's content has nothing to do with the commit that
+// referenced it, and using the commit made every app substituting
+// $ARGOCD_APP_REVISION into its helm values differ between two sides that pull
+// the SAME pinned chart.
+func fetchRemoteChart(ctx context.Context, opts *RenderOptions, app *cluster.Application, source *cluster.ApplicationSource) (dir, revision string, cached bool, cleanup func(), err error) {
 	cacheDir, chartDir, hit, cacheEnabled := chartCacheDecision(
 		opts.ChartCacheDir, source.RepoURL, source.Chart, source.TargetRevision, dirExists,
 	)
 	if cacheEnabled && hit {
-		return chartDir, true, func() {}, nil
+		// A hit means the revision passed IsImmutableChartVersion, i.e. one
+		// exact version — which is what ArgoCD's resolution returns unchanged.
+		// So the build-env label needs no client here, and the hit keeps
+		// skipping the registry (and auth) entirely.
+		return chartDir, source.TargetRevision, true, func() {}, nil
 	}
 
 	select {
 	case <-ctx.Done():
-		return "", false, nil, ctx.Err()
+		return "", "", false, nil, ctx.Err()
 	default:
 	}
 
 	repo, err := resolveRepoOrBare(ctx, opts, app.Spec.Project, source.RepoURL)
 	if err != nil {
-		return "", false, nil, err
+		return "", "", false, nil, err
 	}
 	// The resolved repo's EnableOCI is authoritative; the scheme-less URL
 	// heuristic stays as the fallback for unconfigured repos.
@@ -107,7 +167,7 @@ func fetchRemoteChart(ctx context.Context, opts *RenderOptions, app *cluster.App
 		auth := opts.registryAuth
 		if auth != nil {
 			if err := auth.Ensure(repo.Repo, repo.Username, repo.Password); err != nil {
-				return "", false, nil, fmt.Errorf("failed to record registry credentials for %s: %w", source.RepoURL, err)
+				return "", "", false, nil, fmt.Errorf("failed to record registry credentials for %s: %w", source.RepoURL, err)
 			}
 		}
 		if auth != nil || opts.HelmRegistryConfig != "" {
@@ -122,6 +182,26 @@ func fetchRemoteChart(ctx context.Context, opts *RenderOptions, app *cluster.App
 	if version == "HEAD" {
 		version = "" // like empty, HEAD means "latest" for chart sources
 	}
+	// Resolve the revision the way the repo-server does, and pull THAT: the
+	// version is both the pin for `helm pull --version` and the value of
+	// ARGOCD_APP_REVISION*, so resolving once is what keeps the label and the
+	// pulled chart from disagreeing.
+	//
+	// An UNRESOLVABLE revision is not fatal here, and that is deliberate: the
+	// two shapes that reach it are argocdf's own "HEAD/empty means latest" (a
+	// documented deviation — upstream's resolution rejects both, since neither
+	// is a version or a semver constraint) and a genuine registry failure, which
+	// the pull below reports loudly a moment later against the same registry.
+	// Failing the render here would turn the first case, which renders today,
+	// into an error while adding nothing to the second. The fallback keeps the
+	// pull exactly as it was and labels the build env with what the application
+	// DECLARED — never with the git commit, which is the bug being fixed.
+	resolved, resolveErr := resolveChartRevision(client, source.Chart, source.TargetRevision, enableOCI)
+	if resolveErr == nil {
+		version = resolved
+	} else {
+		resolved = source.TargetRevision
+	}
 	// --pass-credentials comes from the application source, exactly as the
 	// repo-server passes it to ExtractChart (reposerver/repository.go:423-427).
 	passCredentials := source.Helm != nil && source.Helm.PassCredentials
@@ -129,9 +209,9 @@ func fetchRemoteChart(ctx context.Context, opts *RenderOptions, app *cluster.App
 	extracted, closer, err := extractChartInterruptible(ctx, client, source.Chart, version, passCredentials)
 	if err != nil {
 		if ctx.Err() != nil {
-			return "", false, nil, ctx.Err()
+			return "", "", false, nil, ctx.Err()
 		}
-		return "", false, nil, &chartFetchError{
+		return "", "", false, nil, &chartFetchError{
 			chart:   source.Chart,
 			repoURL: source.RepoURL,
 			cause:   err,
@@ -140,11 +220,11 @@ func fetchRemoteChart(ctx context.Context, opts *RenderOptions, app *cluster.App
 
 	if cacheEnabled && publishChartToCache(extracted, cacheDir, chartDir) {
 		_ = closer.Close()
-		return chartDir, true, func() {}, nil
+		return chartDir, resolved, true, func() {}, nil
 	}
 	// Cache disabled (or publishing failed): serve the extracted directory
 	// directly so rendering stays functional; cleanup removes it.
-	return extracted, false, func() { _ = closer.Close() }, nil
+	return extracted, resolved, false, func() { _ = closer.Close() }, nil
 }
 
 // argoTempPathRe matches the per-run temp directories ArgoCD's own fetchers

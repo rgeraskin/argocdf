@@ -187,9 +187,11 @@ func (r *ArgoCDRenderer) Cleanup() {
 }
 
 // RenderApplication renders all sources of an application via ArgoCD's
-// GenerateManifests and concatenates the results as multi-doc YAML. revision
-// is the commit being rendered; it feeds the ARGOCD_APP_REVISION* build-env
-// variables exactly as the repo-server would.
+// GenerateManifests and concatenates the results as multi-doc YAML. revision is
+// the commit being rendered; it feeds the ARGOCD_APP_REVISION* build-env
+// variables for sources that come FROM that commit — see sourceRevision in
+// renderSource for the remote-source cases, where the repo-server labels the
+// render with the resolved chart version or artifact digest instead.
 func (r *ArgoCDRenderer) RenderApplication(ctx context.Context, app *cluster.Application, repoPath, revision string) (*RenderResult, error) {
 	sources := app.Spec.GetSources()
 	if len(sources) == 0 {
@@ -254,7 +256,16 @@ func (r *ArgoCDRenderer) renderSource(
 	refSources map[string]*argoappv1.RefTarget,
 	tempPaths utilio.TempPaths,
 ) ([]byte, types.SourceType, error) {
-	var appPath, repoRoot string
+	// sourceRevision is what GenerateManifests is handed as the revision, and
+	// therefore what ARGOCD_APP_REVISION/_SHORT/_SHORT_8 report to a helm
+	// values/parameter substitution. ArgoCD resolves it PER SOURCE
+	// (runRepoOperation passes what the source's own client resolved): the commit
+	// for a git source, the resolved chart version for a chart, the digest for an
+	// OCI artifact. Handing a remote source the git commit — as argocdf did until
+	// this became per-source — mislabelled the render and made two sides pulling
+	// the SAME pinned chart differ, because the commit is the one input that
+	// always changes between them.
+	var appPath, repoRoot, sourceRevision string
 	switch {
 	case source.IsOCI():
 		// OCI-artifact source (ArgoCD 3.1+): the artifact IS the app. The
@@ -271,7 +282,7 @@ func (r *ArgoCDRenderer) renderSource(
 		// ArgoCD fails instead of quietly normalizing the prefix away (the
 		// chart client trims oci:// because helm re-adds it, which used to make
 		// both spellings render the same chart and report "no changes").
-		artifactDir, cleanupArtifact, err := fetchOCIArtifact(ctx, &r.opts, app, source, r.ociImagePaths())
+		artifactDir, digest, cleanupArtifact, err := fetchOCIArtifact(ctx, &r.opts, app, source, r.ociImagePaths())
 		if err != nil {
 			return nil, "", err
 		}
@@ -281,15 +292,17 @@ func (r *ArgoCDRenderer) renderSource(
 			return nil, "", fmt.Errorf("invalid source path %q: %w", source.Path, err)
 		}
 		repoRoot = artifactDir
+		sourceRevision = digest
 	case source.Chart != "":
 		// Remote chart: ArgoCD's repo-server fetches charts BEFORE calling
 		// GenerateManifests, so argocdf does the same — through ArgoCD's own
 		// chart client, wrapped in the persistent chart cache.
-		chartDir, cached, cleanupChart, err := fetchRemoteChart(ctx, &r.opts, app, source)
+		chartDir, chartVersion, cached, cleanupChart, err := fetchRemoteChart(ctx, &r.opts, app, source)
 		if err != nil {
 			return nil, "", err
 		}
 		defer cleanupChart()
+		sourceRevision = chartVersion
 		if cached {
 			// GenerateManifests may build dependencies INTO appPath (charts/,
 			// Chart.lock, its skip marker). The persistent cache must stay a
@@ -312,6 +325,7 @@ func (r *ArgoCDRenderer) renderSource(
 			return nil, "", fmt.Errorf("invalid source path %q: %w", source.Path, err)
 		}
 		repoRoot = repoPath
+		sourceRevision = revision
 	}
 
 	q, err := r.buildManifestRequest(ctx, app, source, refSources)
@@ -351,7 +365,7 @@ func (r *ArgoCDRenderer) renderSource(
 		}
 		defer func() { err = errors.Join(err, restoreKustomization()) }()
 		return repository.GenerateManifests(
-			ctx, appPath, repoRoot, revision, q,
+			ctx, appPath, repoRoot, sourceRevision, q,
 			false, // isLocal=false gives the ISOLATED temp helm home (XDG_*, HELM_CONFIG_HOME)
 			argogit.NoopCredsStore{},
 			maxCombinedDirectoryManifestsSize,
