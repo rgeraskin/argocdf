@@ -8,6 +8,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 >
 > Release dates are the GitHub release's publication date (UTC).
 
+## [Unreleased]
+
+### Added
+
+- `oci://` artifact sources render
+
+  ArgoCD 3.1 made an OCI registry a source type in its own right: `repoURL: oci://ghcr.io/org/my-chart` with a tag or digest as `targetRevision`, no `chart:` field, and the pulled artifact itself is the application — `path` then selects a directory INSIDE it. argocdf now renders those, through ArgoCD's own OCI client (revision-to-digest resolution including semver constraints, ORAS pull, content-layer and media-type validation, size-bounded extraction), so an app on the artifact spelling appears in reports instead of failing. Registry credentials come from repository secrets of `type: oci` in `--repo-creds cluster`. Artifacts are pulled once per run and shared by both diff sides; a revision the registry can re-point (a floating tag, a constraint) bypasses the render cache, the same soundness rule pinned chart versions already get. `e2e/case/oci-artifact-bump` pins the spelling end to end.
+
+### Fixed
+
+- Adding `oci://` to a Helm chart source is no longer reported as no change
+
+  ArgoCD tests the `oci://` prefix BEFORE it looks at `chart:`, so writing `repoURL: oci://ghcr.io/org` next to `chart: my-chart` does not add a redundant scheme — it retypes the source, `chart:` stops being read, and ArgoCD resolves the tag against the repoURL itself, which usually fails. argocdf normalized the prefix away (its chart client trims `oci://` because `helm pull` re-adds it), so both spellings pulled the same chart and the report said "No changes" about a change that breaks the application in ArgoCD. The dispatch order is now upstream's in the renderer and in the render-cache key alike, so such a source renders — or fails — as ArgoCD does. Two smaller parity fixes came with it: a source that is both a `$ref` and an `oci://` artifact is no longer skipped as ref-only, and an `oci://` URL is never handed to `git clone`.
+
 ## [0.6.0] - 2026-08-12
 
 ### Changed

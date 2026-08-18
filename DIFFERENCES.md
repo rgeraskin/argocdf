@@ -237,6 +237,7 @@ Through 0.4.x argocdf rendered with its own `exec.Command("helm"|"kustomize")` p
 | **Manifest generation**    | ArgoCD's `reposerver/repository.GenerateManifests`, in-process        | Own helm/kustomize exec | Exact render parity, structurally: option translation, build-env, source dispatch cannot drift (~85MB binary) |
 | **Repository credentials** | ArgoCD's `util/db` + `util/settings` (`--repo-creds=cluster`)         | Own secret parsing      | Zero drift in secret parsing, URL matching, and credential-template resolution                                |
 | **Chart downloads**        | ArgoCD's `util/helm.Client.ExtractChart` behind argocdf's chart cache | Own helm pull           | Repo-server parity: OCI dispatch, TLS/proxy handling for free (registry auth rides an isolated config file)   |
+| **OCI artifact downloads** | ArgoCD's `util/oci.Client` (resolve revision → ORAS pull → unpack)    | Own ORAS pull           | Same reason, plus the content-layer rules and media-type gating are upstream's — see §17                       |
 | **Git Operations**         | `exec.Command("git", ...)`, ephemeral worktrees                       | gitops-engine / go-git  | argocdf owns the two-sided checkout model; no version mismatch concerns                                       |
 | **Manifest Diffing**       | Custom recursive comparison                                           | gitops-engine diff      | gitops-engine diffs desired-vs-LIVE state; argocdf diffs branch-vs-branch, a different problem                |
 | **URL Normalization**      | `git.NormalizeRepoURL()`                                              | ArgoCD has similar      | Small utility, consolidated in git package                                                                    |
@@ -294,6 +295,32 @@ metadata:
 ```
 
 Semantics (ArgoCD's, verified against v3.3.11's resolver and a live controller): entries are `;`-separated, a leading `/` is repo-root-relative, everything else is joined to that *source's* path, and globs go through `filepath.Match` — which does not cross `/`. Omitting `.` silently stops the application from reacting to its own directory. `e2e/case/kustomize-relative-base` pins the behavior end to end.
+
+## 17. OCI Sources (`oci://`)
+
+An OCI registry can back an application in TWO unrelated ways, and the `oci://` scheme is what tells them apart. Getting this backwards is easy — the two spellings look like the same source with a cosmetic difference — so argocdf keeps ArgoCD's dispatch ORDER rather than its own reading of the URL:
+
+```yaml
+# Helm-OCI CHART source (ArgoCD 2.x onward)   # OCI-ARTIFACT source (ArgoCD 3.1+)
+source:                                       source:
+  repoURL: ghcr.io/org      # scheme-LESS       repoURL: oci://ghcr.io/org/mychart
+  chart: mychart            # separate field    targetRevision: 1.4.2   # a tag or digest
+  targetRevision: 1.4.2                        path: manifests/prod    # INSIDE the artifact
+```
+
+`ApplicationSource.IsOCI()` is a plain `oci://` prefix test, and `runRepoOperation` tests it BEFORE `IsHelm()` (`repository.go:342`). So adding the scheme to a working chart source does not clean up a redundancy — it retypes the source, `chart:` stops being read, and ArgoCD resolves `targetRevision` as a tag on the repoURL itself. Helm-OCI chart repositories are stored scheme-less on purpose (`IsHelmOciRepo` requires an empty `url.Parse` host; `repository.go:1126` trims the prefix with that comment).
+
+| Aspect                        | ArgoCD                                                                            | argocdf                                                                                                                        |
+|-------------------------------|-----------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------|
+| **Dispatch order**            | `IsOCI()` before `IsHelm()`: an `oci://` URL with `chart:` renders as an artifact | ✅ Same order, and the render-cache key follows it — so `oci://` + `chart:` cannot be served from the chart spelling's entry     |
+| **Revision resolution**       | `util/oci` resolves a tag, digest or semver CONSTRAINT to a digest                 | ✅ Same client, same call                                                                                                       |
+| **Content layer**             | exactly one layer of an allowed media type; provenance layers skipped             | ✅ Same client — media types are upstream's defaults, not an argocdf flag (`render.DefaultOCILayerMediaTypes`)                  |
+| **Registry auth**             | `Repository.GetOCICreds()` (repository secrets of `type: oci`), ORAS directly      | ✅ Same, and credentials are NOT stripped here — that strip belongs to the helm chart path's registry-config workaround         |
+| **Artifact caching**          | per-repo-server tarball cache, lifetime of the pod                                | per-RUN only: shared by both diff sides, then removed. No cross-run cache — upstream's tarball write is not atomic (see below)  |
+| **`ARGOCD_APP_REVISION`**     | the resolved digest (for charts, the resolved chart version)                       | ⚠️ the git commit of the side being rendered — one value per app, as for remote charts                                          |
+| **Out-of-bounds symlinks**    | `CheckOutOfBoundsSymlinks` over the extracted tree                                | ❌ not checked — argocdf checks no materialized source (worktree, chart, artifact); a uniform pre-existing gap, not an OCI one   |
+
+The artifact tarball is NOT persisted across runs the way pulled charts are. ArgoCD's `saveCompressedImageToPath` tars straight onto the cache path, so a run killed mid-pull would leave a truncated file that later runs would serve as a valid artifact; the chart cache avoids that with a staging directory and an atomic rename, which is only possible because argocdf drives that extraction itself. Repeat runs are served by the RENDER cache instead, which never re-enters the fetch path — and an artifact whose revision is a floating tag or a constraint BYPASSES that cache, the same soundness rule pinned chart versions get (`render.IsImmutableOCIRevision`).
 
 ## References
 

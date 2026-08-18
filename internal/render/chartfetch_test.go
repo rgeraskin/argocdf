@@ -620,8 +620,8 @@ func TestRedactChartTempPaths(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := redactChartTempPaths(tt.in); got != tt.want {
-				t.Errorf("redactChartTempPaths()\n got: %s\nwant: %s", got, tt.want)
+			if got := redactArgoTempPaths(tt.in); got != tt.want {
+				t.Errorf("redactArgoTempPaths()\n got: %s\nwant: %s", got, tt.want)
 			}
 		})
 	}

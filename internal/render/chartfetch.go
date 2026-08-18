@@ -147,11 +147,12 @@ func fetchRemoteChart(ctx context.Context, opts *RenderOptions, app *cluster.App
 	return extracted, false, func() { _ = closer.Close() }, nil
 }
 
-// chartTempPathRe matches the temp directory ArgoCD's chart client creates for a
-// pull: os.TempDir() plus a UUID, which it passes to `helm pull --destination`.
-// argocdf never sees that path (files.CreateTempDir is called inside ExtractChart),
-// so it can only be recognized by shape.
-var chartTempPathRe = regexp.MustCompile(
+// argoTempPathRe matches the per-run temp directories ArgoCD's own fetchers
+// create: os.TempDir() plus a UUID — what the chart client passes to
+// `helm pull --destination`, and what the OCI client extracts an artifact into.
+// argocdf never sees those paths (files.CreateTempDir is called inside
+// ExtractChart / Extract), so they can only be recognized by shape.
+var argoTempPathRe = regexp.MustCompile(
 	`[^ \x60"]*/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
 
 // chartFetchError reports a failed chart fetch with per-run temp paths redacted,
@@ -168,20 +169,20 @@ type chartFetchError struct {
 
 func (e *chartFetchError) Error() string {
 	return fmt.Sprintf("failed to fetch helm chart %s from %s: %s",
-		e.chart, e.repoURL, redactChartTempPaths(e.cause.Error()))
+		e.chart, e.repoURL, redactArgoTempPaths(e.cause.Error()))
 }
 
 func (e *chartFetchError) Unwrap() error { return e.cause }
 
-// redactChartTempPaths replaces those paths with a stable token.
+// redactArgoTempPaths replaces those paths with a stable token.
 //
 // A failed pull surfaces helm's whole argv, temp destination included, and that
 // lands verbatim in a report - which for argocdf usually means a PR comment. The
 // path is deleted by the time anyone reads it, so it carries no diagnostic value,
 // and leaving it in makes every re-run rewrite the comment with a new path. The
 // registry URL, the chart, the version and the underlying error all survive.
-func redactChartTempPaths(msg string) string {
-	return chartTempPathRe.ReplaceAllString(msg, "(temp dir)")
+func redactArgoTempPaths(msg string) string {
+	return argoTempPathRe.ReplaceAllString(msg, "(temp dir)")
 }
 
 // extractChartInterruptible runs ExtractChart in a goroutine so cancellation

@@ -680,3 +680,107 @@ func TestComputeKeyRepoCredsInstance(t *testing.T) {
 		t.Error("instance keying is not deterministic")
 	}
 }
+
+// ociInput builds an OCI-artifact KeyInput (oci:// repoURL, no chart field) at
+// the given target revision. ResolveTree is deliberately nil: nothing in the
+// local repository takes part in an artifact's identity, so needing a resolver
+// would mean the source fell through to a git-source branch.
+func ociInput(revision, srcPath string) KeyInput {
+	return KeyInput{
+		AppName:   "oci-app",
+		Namespace: "argocd",
+		Spec: &cluster.ApplicationSpec{
+			Source: &cluster.ApplicationSource{
+				RepoURL:        "oci://ghcr.io/acme/artifactchart",
+				TargetRevision: revision,
+				Path:           srcPath,
+			},
+		},
+		KubeVersion: "1.29.0",
+		Commit:      "deadbeef",
+	}
+}
+
+// TestComputeKeyOCIArtifactIdentity pins what an OCI-artifact source's key is
+// made of. Before OCI artifacts were recognized, such a source fell through to
+// the kustomize/directory branch and hashed the local commit's ROOT TREE — a key
+// describing a repository the render never reads, which also made the key
+// require a resolver it should not need.
+func TestComputeKeyOCIArtifactIdentity(t *testing.T) {
+	base := mustKey(t, ociInput("6.7.0", ""))
+
+	if mustKey(t, ociInput("6.7.1", "")) == base {
+		t.Error("bumping the artifact revision did not change the key")
+	}
+	if mustKey(t, ociInput("6.7.0", "manifests/prod")) == base {
+		t.Error("rendering a different path INSIDE the artifact did not change the key")
+	}
+
+	otherRepo := ociInput("6.7.0", "")
+	src := *otherRepo.Spec.Source
+	src.RepoURL = "oci://ghcr.io/acme/otherchart"
+	spec := *otherRepo.Spec
+	spec.Source = &src
+	otherRepo.Spec = &spec
+	if mustKey(t, otherRepo) == base {
+		t.Error("a different artifact repository shares a key")
+	}
+
+	if mustKey(t, ociInput("6.7.0", "")) != base {
+		t.Error("artifact keying is not deterministic")
+	}
+}
+
+// TestComputeKeyMutableOCIRevisionBypasses is the artifact half of the
+// immutability rule the remote-chart branch already enforces: a revision ArgoCD
+// resolves against the registry's mutable tag list can point at different bytes
+// on a later run, so it must never be cached.
+func TestComputeKeyMutableOCIRevisionBypasses(t *testing.T) {
+	for _, rev := range []string{"", "latest", "HEAD", "*", "^6.0.0", "~6.7", "6.x", "6.7", ">=6.0.0", "main"} {
+		if _, ok := ComputeKey(ociInput(rev, "")); ok {
+			t.Errorf("revision %q: ComputeKey ok = true, want bypass (a floating tag is not content)", rev)
+		}
+	}
+	// Exact version tags and digests name fixed content.
+	for _, rev := range []string{
+		"6.7.0", "v6.7.0", "0.3.1-rc.1", "6.7.0+build.7",
+		"sha256:c1e2d0d3f4a5b6978899aabbccddeeff00112233445566778899aabbccddeeff",
+	} {
+		mustKey(t, ociInput(rev, ""))
+	}
+}
+
+// TestComputeKeyOCIWinsOverTheChartField mirrors the renderer's dispatch order
+// (render.renderSource, itself mirroring repository.go:342): an oci:// URL that
+// ALSO carries chart: renders as an artifact, so it must be keyed as one. Keying
+// it as a chart would describe a render that never happens — and would let the
+// two spellings of a "same" source share an entry, which is exactly how the
+// scheme change looked like a no-op.
+func TestComputeKeyOCIWinsOverTheChartField(t *testing.T) {
+	withChart := func(chart string) KeyInput {
+		in := ociInput("6.7.0", "")
+		src := *in.Spec.Source
+		src.RepoURL = "oci://ghcr.io/acme"
+		src.Chart = chart
+		spec := *in.Spec
+		spec.Source = &src
+		in.Spec = &spec
+		return in
+	}
+
+	// The spec itself is hashed, so two different chart names differ regardless;
+	// what this pins is that neither needs a resolver (the chart branch would
+	// accept that too) AND that a MUTABLE revision on such a source bypasses via
+	// the OCI rule rather than being keyed.
+	mustKey(t, withChart("artifactchart"))
+
+	floating := withChart("artifactchart")
+	src := *floating.Spec.Source
+	src.TargetRevision = "latest"
+	spec := *floating.Spec
+	spec.Source = &src
+	floating.Spec = &spec
+	if _, ok := ComputeKey(floating); ok {
+		t.Error("an oci:// source at a floating tag was keyed; the chart branch claimed it before the artifact branch")
+	}
+}

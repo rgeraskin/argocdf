@@ -72,10 +72,15 @@ func chartDepMutex(chartPath string) *sync.Mutex {
 
 // isPureRef reports whether a source is used ONLY as a ref and produces no
 // manifests. ArgoCD's IsRef() is simply Ref != "", but a source may legitimately
-// both render manifests (via Path/Chart) AND be referenced by other sources. Only
-// a source with a Ref and neither Path nor Chart is skipped from rendering.
+// both render manifests (via Path/Chart/an oci:// artifact) AND be referenced by
+// other sources. Only a source with a Ref and none of those is skipped from
+// rendering.
+//
+// The IsOCI exclusion is upstream's own: an OCI-artifact source renders from the
+// artifact ROOT, so an empty Path is normal there and would otherwise read as
+// "ref only" (repository.go:591 spells the same carve-out).
 func isPureRef(source cluster.ApplicationSource) bool {
-	return source.Ref != "" && source.Path == "" && source.Chart == ""
+	return source.Ref != "" && source.Path == "" && source.Chart == "" && !source.IsOCI()
 }
 
 // ArgoCDRenderer renders applications through ArgoCD's repo-server code.
@@ -88,6 +93,12 @@ type ArgoCDRenderer struct {
 	// restoreHelmEnv undoes the process-global helm env mutation made at
 	// construction (isolateHelmEnv). Run by Cleanup.
 	restoreHelmEnv func()
+	// ociPaths memoizes pulled OCI artifact tarballs for the whole run, keyed
+	// by registry URL + digest — the repo-server's shared s.ociPaths, scoped to
+	// one argocdf run instead of a server lifetime, so both sides of a diff
+	// pull an artifact once. ociPathsRoot is its directory, removed by Cleanup.
+	ociPaths     utilio.TempPaths
+	ociPathsRoot string
 }
 
 // NewArgoCDRenderer creates a renderer backed by reposerver's GenerateManifests.
@@ -129,8 +140,28 @@ func NewArgoCDRenderer(opts RenderOptions) (*ArgoCDRenderer, error) {
 	}
 	r.restoreHelmEnv = isolateHelmEnv(registryConfig)
 
+	// The artifact tarball registry is created eagerly (one empty directory per
+	// run) so no render path has to synchronize its construction.
+	ociRoot, err := os.MkdirTemp("", "argocdf-oci-")
+	if err != nil {
+		r.Cleanup()
+		return nil, fmt.Errorf("failed to create temp dir for oci artifacts: %w", err)
+	}
+	r.ociPathsRoot = ociRoot
+	r.ociPaths = utilio.NewRandomizedTempPaths(ociRoot)
+
 	r.opts = opts
 	return r, nil
+}
+
+// ociImagePaths returns the run's artifact tarball registry. A renderer built
+// as a zero value (unit tests that never call NewArgoCDRenderer) gets a
+// throwaway registry under the system temp dir instead of a nil one.
+func (r *ArgoCDRenderer) ociImagePaths() utilio.TempPaths {
+	if r.ociPaths != nil {
+		return r.ociPaths
+	}
+	return utilio.NewRandomizedTempPaths(os.TempDir())
 }
 
 // Cleanup restores the pre-construction helm environment and removes the
@@ -147,6 +178,11 @@ func (r *ArgoCDRenderer) Cleanup() {
 	}
 	if r.ownedRegistryAuth != nil {
 		r.ownedRegistryAuth.Remove()
+	}
+	if r.ociPathsRoot != "" {
+		_ = SafeRemoveAll(r.ociPathsRoot)
+		r.ociPathsRoot = ""
+		r.ociPaths = nil
 	}
 }
 
@@ -219,7 +255,33 @@ func (r *ArgoCDRenderer) renderSource(
 	tempPaths utilio.TempPaths,
 ) ([]byte, types.SourceType, error) {
 	var appPath, repoRoot string
-	if source.Chart != "" {
+	switch {
+	case source.IsOCI():
+		// OCI-artifact source (ArgoCD 3.1+): the artifact IS the app. The
+		// repo-server resolves TargetRevision to a digest, pulls the artifact,
+		// unpacks its single content layer and renders source.Path INSIDE the
+		// extracted tree (repository.go:377-414) — ordinary source-type sniffing
+		// then decides helm/kustomize/directory from what is in there.
+		//
+		// This case is FIRST because upstream's dispatch is (repository.go:342):
+		// IsOCI() is tested before IsHelm(), so an oci:// URL carrying a chart:
+		// field renders as an artifact and the chart: field is never read. That
+		// looks like a redundant-scheme cleanup in a PR and is a source-type
+		// change; keeping the order identical is what makes argocdf fail where
+		// ArgoCD fails instead of quietly normalizing the prefix away (the
+		// chart client trims oci:// because helm re-adds it, which used to make
+		// both spellings render the same chart and report "no changes").
+		artifactDir, cleanupArtifact, err := fetchOCIArtifact(ctx, &r.opts, app, source, r.ociImagePaths())
+		if err != nil {
+			return nil, "", err
+		}
+		defer cleanupArtifact()
+		appPath = filepath.Join(artifactDir, source.Path)
+		if err := ValidatePathContainment(artifactDir, appPath); err != nil {
+			return nil, "", fmt.Errorf("invalid source path %q: %w", source.Path, err)
+		}
+		repoRoot = artifactDir
+	case source.Chart != "":
 		// Remote chart: ArgoCD's repo-server fetches charts BEFORE calling
 		// GenerateManifests, so argocdf does the same — through ArgoCD's own
 		// chart client, wrapped in the persistent chart cache.
@@ -244,7 +306,7 @@ func (r *ArgoCDRenderer) renderSource(
 			chartDir = privateDir
 		}
 		appPath, repoRoot = chartDir, chartDir
-	} else {
+	default:
 		appPath = filepath.Join(repoPath, source.Path)
 		if err := ValidatePathContainment(repoPath, appPath); err != nil {
 			return nil, "", fmt.Errorf("invalid source path %q: %w", source.Path, err)

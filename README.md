@@ -24,6 +24,7 @@ In short: `argocd app diff` answers "how does this one app differ from the clust
 - **Auto-detection**: Automatically detects repository path, branches, and cluster version
 - **Multi-source support**: Handles applications with `spec.source` and `spec.sources[]` configurations
 - **Helm rendering**: Renders Helm charts (local and remote repositories, including OCI)
+- **OCI artifacts**: Renders `oci://` artifact sources (ArgoCD 3.1+), not only Helm charts pulled from a registry
 - **Kustomize rendering**: Renders Kustomize directories
 - **Apps-of-apps**: Recursively discovers and diffs child applications from rendered manifests
 - **Multiple outputs**: Colored terminal, GitHub-flavored markdown, unified diff, and interactive HTML report
@@ -224,6 +225,24 @@ An all-literal `--application-namespaces` list is served with one namespaced rea
 | `--no-api-versions`           | Do not pass cluster-discovered API versions to helm via `--api-versions`                                                        | `false`       |
 
 **Rendering runs through ArgoCD's own repo-server code** (`reposerver/repository.GenerateManifests` — the same code path behind `argocd app diff --local`), so option translation matches ArgoCD exactly: helm runs with `--include-crds` (CRDs from `crds/` appear in diffs), all `spec.source.helm`/`kustomize` fields are honored, `$ARGOCD_APP_*` build-env substitution works, `.argocd-source*.yaml` overrides are merged, and helm dependencies are built in an isolated temp helm home — your helm config is never touched, and dependency repos from `Chart.yaml` are registered there automatically, so fresh CI runners need no helm setup. YAML is re-serialized from ArgoCD's parsed objects (key order may differ from raw helm output; diffs are computed semantically so this does not affect results). Set `ARGOCD_LOG_LEVEL=info` to see ArgoCD's per-command exec traces when debugging renders.
+
+### OCI sources: two spellings, two source types
+
+An OCI registry backs an application in two different ways, and the `oci://` scheme is what selects between them — argocdf follows ArgoCD's dispatch, which tests the scheme **before** the `chart:` field:
+
+```yaml
+# Helm chart in an OCI registry            # OCI artifact (ArgoCD 3.1+)
+sources:                                   sources:
+  - repoURL: ghcr.io/org   # NO scheme       - repoURL: oci://ghcr.io/org/my-chart
+    chart: my-chart                            targetRevision: 1.4.2   # tag or digest
+    targetRevision: 1.4.2                      path: manifests/prod    # inside the artifact
+```
+
+For an **artifact** source the pulled artifact *is* the application: argocdf resolves `targetRevision` to a digest, pulls it, unpacks its single content layer, and renders `path` inside the extracted tree (Helm, Kustomize or plain YAML — detected as usual). `chart:` is not read on this path.
+
+The gotcha this order creates is worth knowing before you hit it: **adding `oci://` to a working chart source does not clean up a redundant scheme — it changes the source type.** `chart:` stops being read and the tag is resolved against the repoURL itself, which usually fails in ArgoCD. Helm-OCI chart repositories are stored scheme-less on purpose. If you want the artifact spelling, move the chart name into `repoURL` and drop `chart:`.
+
+Artifact revisions that a registry can re-point — a floating tag like `latest`, or a constraint like `^6.0.0` — bypass the render cache, since identical inputs could otherwise serve manifests from an artifact that has since moved. Pinned versions and digests cache normally. Registry credentials come from repository secrets of `type: oci` in `cluster` mode.
 
 ### Repository Credentials (`--repo-creds`)
 

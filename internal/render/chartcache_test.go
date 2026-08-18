@@ -89,3 +89,33 @@ func TestChartCacheDecision(t *testing.T) {
 		t.Error("expected hit when chart dir is present")
 	}
 }
+
+// TestIsImmutableOCIRevision pins the artifact-revision predicate the render
+// cache bypasses on. A digest is immutable by construction; an exact version tag
+// is treated as immutable by the same convention pinned chart versions already
+// rely on (they are registry tags too); everything a registry can re-point — a
+// floating tag, a semver constraint, empty — is not.
+func TestIsImmutableOCIRevision(t *testing.T) {
+	immutable := []string{
+		"sha256:c1e2d0d3f4a5b6978899aabbccddeeff00112233445566778899aabbccddeeff",
+		"sha512:" + "ab12" + "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		"6.7.0", "v6.7.0", "0.3.1-rc.1", "6.7.0+build.7", " 6.7.0 ",
+	}
+	for _, rev := range immutable {
+		if !IsImmutableOCIRevision(rev) {
+			t.Errorf("IsImmutableOCIRevision(%q) = false, want true", rev)
+		}
+	}
+
+	mutable := []string{
+		"", "latest", "main", "stable", "HEAD", "*", "^6.0.0", "~6.7", "6.x", "6.7", ">=6.0.0",
+		// Digest-shaped but too short to be one, so not a digest — and not a
+		// version either.
+		"sha256:deadbeef",
+	}
+	for _, rev := range mutable {
+		if IsImmutableOCIRevision(rev) {
+			t.Errorf("IsImmutableOCIRevision(%q) = true, want false", rev)
+		}
+	}
+}

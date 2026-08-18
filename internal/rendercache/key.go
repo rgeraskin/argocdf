@@ -44,7 +44,14 @@ import (
 // read with --repo-creds=cluster are different credential sources, and
 // verifying cluster B's credentials must not be answered from entries cluster
 // A rendered — see KeyInput.RepoCredsInstance.
-const SchemaVersion = "rendercache-v5"
+//
+// v6: OCI-ARTIFACT sources (oci:// repoURL, ArgoCD 3.1+) are keyed as what they
+// are — a remote artifact identified by registry URL + revision + the path
+// rendered inside it — and BYPASS the cache when the revision is not immutable,
+// the same soundness rule remote charts get. Before this they fell through to
+// the kustomize/directory branch, which hashed the local commit's root tree: a
+// key that describes the wrong repository entirely.
+const SchemaVersion = "rendercache-v6"
 
 // HelmRepoAlias is one `name → URL` mapping that helm dependency resolution can
 // reach through a `repository: "@name"` (or `alias:`) entry in a chart's
@@ -247,6 +254,21 @@ func ComputeKey(in KeyInput) (string, bool) {
 	// Per-source content identity.
 	for i := range sources {
 		src := sources[i]
+
+		// OCI-artifact source, tested BEFORE Chart for the same reason the
+		// renderer dispatches in that order (argocd.go renderSource): an oci://
+		// URL that also carries a chart: field renders as an ARTIFACT and
+		// ignores the chart, so keying it as a chart would describe a render
+		// that never happens. Nothing in the local repository participates —
+		// the content lives in the registry — so the path is part of the
+		// artifact's identity, not a tree to hash.
+		if src.IsOCI() {
+			if !render.IsImmutableOCIRevision(src.TargetRevision) {
+				return "", false
+			}
+			writeField("oci", src.RepoURL, src.TargetRevision, src.Path)
+			continue
+		}
 
 		if src.Chart != "" {
 			// Remote chart: identity is repo + chart + target revision — but only

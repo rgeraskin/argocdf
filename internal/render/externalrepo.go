@@ -78,10 +78,12 @@ func newExternalRepoSet(opts *RenderOptions, project string) *externalRepoSet {
 }
 
 // repoPathFor returns the render root for a source: the given local repoPath,
-// or a (possibly shared) checkout of the source's external repository. Chart
-// sources never clone — their content comes from the chart fetch.
+// or a (possibly shared) checkout of the source's external repository. Chart and
+// OCI-artifact sources never clone — their content comes from the chart fetch or
+// the registry pull, and an oci:// URL is not a git remote, so cloning one fails
+// instead of yielding the artifact.
 func (s *externalRepoSet) repoPathFor(ctx context.Context, source *cluster.ApplicationSource, localRepoPath string) (string, error) {
-	if source.Chart != "" || !isExternalSource(s.opts, source) {
+	if source.Chart != "" || source.IsOCI() || !isExternalSource(s.opts, source) {
 		return localRepoPath, nil
 	}
 	key := sourceExternalKey(source)

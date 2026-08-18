@@ -29,6 +29,30 @@ func IsImmutableChartVersion(version string) bool {
 	return immutableChartVersionRe.MatchString(strings.TrimSpace(version))
 }
 
+// ociDigestRe matches an OCI content digest ("sha256:<hex>", or any registered
+// algorithm in the same shape). A digest names immutable content by definition —
+// the registry cannot serve different bytes under it.
+var ociDigestRe = regexp.MustCompile(`^[a-z0-9]+(?:[.+_-][a-z0-9]+)*:[a-zA-Z0-9=_-]{32,}$`)
+
+// IsImmutableOCIRevision reports whether an OCI-artifact source's target
+// revision names content that cannot change under it: a digest, or one exact
+// version tag.
+//
+// Anything else — "latest", a floating tag, a semver CONSTRAINT (which ArgoCD
+// resolves against the registry's tag list, util/oci's versions.MaxVersion), or
+// empty — can point at different bytes on a later run, so the render cache must
+// bypass rather than serve a stale artifact's manifests.
+//
+// An exact version TAG is treated as immutable, which is a convention rather
+// than a guarantee (a publisher can move a tag). That is deliberately the SAME
+// assumption argocdf already makes for pinned helm chart versions in an OCI
+// registry, which are stored as tags too: two different answers to one question
+// is how the chart cache and the render cache previously disagreed.
+func IsImmutableOCIRevision(revision string) bool {
+	rev := strings.TrimSpace(revision)
+	return ociDigestRe.MatchString(rev) || IsImmutableChartVersion(rev)
+}
+
 // chartCacheKey is the content-independent identity of a pinned remote chart:
 // sha256(repoURL|chart|version). Because pinned versions are immutable this key
 // maps 1:1 to chart contents.
