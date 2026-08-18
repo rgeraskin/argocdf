@@ -202,6 +202,31 @@ func fetchRemoteChart(ctx context.Context, opts *RenderOptions, app *cluster.App
 	} else {
 		resolved = source.TargetRevision
 	}
+
+	// A CONSTRAINT is not cacheable as written — it resolves against the mutable
+	// registry index, so the same string can mean different content next week —
+	// but the version it resolved TO is. Re-deciding the cache with the resolved
+	// version splits those two halves: the mutable one is re-resolved from the
+	// registry on every run (the index or tag fetch just above), and only the
+	// immutable one is served from disk. So `^1.2.0` now reuses a download
+	// instead of re-pulling the chart every run, and a constraint whose maximum
+	// moves resolves to a different version and therefore a different key.
+	//
+	// The render cache is untouched by this: a constraint revision still bypasses
+	// it (rendercache's IsImmutableChartVersion rule), which is exactly why the
+	// download cache is worth having here — such an app re-renders every run.
+	//
+	// Note this hit costs the credential resolution and the index fetch, unlike
+	// the pinned hit above which contacts nothing at all: resolving the
+	// constraint is what produced the key.
+	if !cacheEnabled && resolveErr == nil {
+		cacheDir, chartDir, hit, cacheEnabled = chartCacheDecision(
+			opts.ChartCacheDir, source.RepoURL, source.Chart, resolved, dirExists,
+		)
+		if cacheEnabled && hit {
+			return chartDir, resolved, true, func() {}, nil
+		}
+	}
 	// --pass-credentials comes from the application source, exactly as the
 	// repo-server passes it to ExtractChart (reposerver/repository.go:423-427).
 	passCredentials := source.Helm != nil && source.Helm.PassCredentials

@@ -16,6 +16,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
   ArgoCD 3.1 made an OCI registry a source type in its own right: `repoURL: oci://ghcr.io/org/my-chart` with a tag or digest as `targetRevision`, no `chart:` field, and the pulled artifact itself is the application — `path` then selects a directory INSIDE it. argocdf now renders those, through ArgoCD's own OCI client (revision-to-digest resolution including semver constraints, ORAS pull, content-layer and media-type validation, size-bounded extraction), so an app on the artifact spelling appears in reports instead of failing. Registry credentials come from repository secrets of `type: oci` in `--repo-creds cluster`. Artifacts are pulled once per run and shared by both diff sides; a revision the registry can re-point (a floating tag, a constraint) bypasses the render cache, the same soundness rule pinned chart versions already get. `e2e/case/oci-artifact-bump` pins the spelling end to end.
 
+### Changed
+
+- A chart pinned by a semver constraint reuses its download
+
+  `targetRevision: ^1.2.0` re-downloaded the chart on every run, because a constraint resolves against the mutable registry index and so cannot be a cache key. Now that argocdf resolves it (see the `ARGOCD_APP_REVISION` fix below), the download is keyed by the version the constraint resolved TO: the mutable half of the question — which version does this constraint mean now — is asked of the registry every run, and only the immutable half comes from disk. A constraint whose maximum has moved therefore lands on a different key and pulls. This is worth having exactly where the render cache cannot help: a constraint revision bypasses that cache, so such an application re-renders every run regardless.
+
 ### Fixed
 
 - `ARGOCD_APP_REVISION` reports what the source actually rendered from

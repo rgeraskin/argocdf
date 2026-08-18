@@ -267,3 +267,68 @@ func TestFetchRemoteChartReportsTheResolvedVersion(t *testing.T) {
 		}
 	})
 }
+
+// TestFetchRemoteChartCachesTheResolvedVersion pins the constraint half of the
+// download cache. A constraint is not cacheable as written — it resolves against
+// the mutable index — but the version it resolves TO is, so the chart is keyed by
+// the resolved version and a second run reuses the download while still asking
+// the registry what the constraint means now.
+func TestFetchRemoteChartCachesTheResolvedVersion(t *testing.T) {
+	cacheBase := t.TempDir()
+	fake := &fakeChartClient{
+		extractedDir: chartFixture(t, "mychart"),
+		tags:         []string{"1.0.0", "1.2.3", "2.0.0"},
+	}
+	stubNewChartClient(t, fake, nil, nil)
+	opts := RenderOptions{ChartCacheDir: cacheBase}
+	source := chartSource("^1.0.0")
+
+	// Miss: pulls, then publishes under the RESOLVED version's key — not the
+	// constraint's, which would be a key whose meaning can change.
+	dir, revision, cached, cleanup, err := fetchRemoteChart(
+		context.Background(), &opts, chartTestApp(), source)
+	if err != nil {
+		t.Fatalf("fetchRemoteChart() error: %v", err)
+	}
+	cleanup()
+	_, wantChartDir := chartCachePaths(cacheBase, source.RepoURL, source.Chart, "1.2.3")
+	if dir != wantChartDir || !cached || revision != "1.2.3" {
+		t.Fatalf("fetchRemoteChart() = (%q, %q, cached=%v), want the cached dir %q at 1.2.3",
+			dir, revision, cached, wantChartDir)
+	}
+
+	// Hit: no second pull, but the registry IS asked again what the constraint
+	// resolves to — that is the mutable half, and skipping it would pin the app
+	// to the first version it ever saw.
+	dir2, revision2, cached2, cleanup2, err := fetchRemoteChart(
+		context.Background(), &opts, chartTestApp(), source)
+	if err != nil {
+		t.Fatalf("fetchRemoteChart() second call error: %v", err)
+	}
+	cleanup2()
+	if dir2 != wantChartDir || !cached2 || revision2 != "1.2.3" {
+		t.Errorf("cache hit = (%q, %q, cached=%v), want the same cached dir at 1.2.3", dir2, revision2, cached2)
+	}
+	if len(fake.calls) != 1 {
+		t.Errorf("ExtractChart called %d times, want 1 — the second run must reuse the download", len(fake.calls))
+	}
+	if fake.tagsCalls != 2 {
+		t.Errorf("tag list fetched %d times, want 2 — a constraint must be re-resolved every run", fake.tagsCalls)
+	}
+
+	// A constraint whose maximum has moved resolves elsewhere, so it lands on a
+	// different key and pulls: the cache can never serve a stale version.
+	fake.tags = append(fake.tags, "1.9.9")
+	dir3, revision3, _, cleanup3, err := fetchRemoteChart(
+		context.Background(), &opts, chartTestApp(), source)
+	if err != nil {
+		t.Fatalf("fetchRemoteChart() third call error: %v", err)
+	}
+	cleanup3()
+	if revision3 != "1.9.9" || dir3 == wantChartDir {
+		t.Errorf("moved constraint = (%q, %q), want a fresh 1.9.9 entry", dir3, revision3)
+	}
+	if len(fake.calls) != 2 {
+		t.Errorf("ExtractChart called %d times, want 2 — the moved constraint must pull", len(fake.calls))
+	}
+}

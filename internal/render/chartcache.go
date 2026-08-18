@@ -17,9 +17,11 @@ var immutableChartVersionRe = regexp.MustCompile(`^v?\d+\.\d+\.\d+(-[0-9A-Za-z.-
 
 // IsImmutableChartVersion reports whether a chart target revision names ONE
 // exact, immutable version. It is the single predicate both caches share: the
-// chart-download cache below only persists immutable versions, and the render
-// cache (rendercache.ComputeKey) bypasses itself for a remote chart whose
-// revision is mutable - a "HEAD", "*" or "^2.0.0" chart can resolve to
+// chart-download cache below only persists immutable versions — a CONSTRAINT is
+// first resolved against the registry and then keyed by the version it resolved
+// TO, so the mutable half is re-decided every run and only the immutable half is
+// cached — and the render cache (rendercache.ComputeKey) bypasses itself for a
+// remote chart whose revision is mutable - a "HEAD", "*" or "^2.0.0" chart can resolve to
 // different content over time under identical key inputs, so a hit could
 // serve manifests from a chart that no longer exists. Two predicates is how
 // the caches previously DISAGREED: the chart cache treated only ""/HEAD/* as
