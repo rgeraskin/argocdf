@@ -633,6 +633,23 @@ func (r *ArgoCDRenderer) prepareRefSources(
 			Chart:          source.Chart,
 		}
 
+		// A ref source that is not a GIT repository has nothing to clone: an
+		// oci:// URL names a registry reference and a chart: source names a chart
+		// repository, and `git clone` fails on either — taking the whole
+		// application's render down before its own branch above is ever reached.
+		// Upstream never meets this because it materializes a ref repo LAZILY:
+		// resolveReferencedSources loops over the VALUE FILES and only resolves
+		// the refs a $ref/... entry actually names. Registering the RefTarget
+		// without materializing it reproduces both of upstream's outcomes — an
+		// unreferenced ref renders (the shape isPureRef's carve-out exists for),
+		// and a referenced one fails inside GenerateManifests with `failed to
+		// find repo` from getResolvedRefValueFile, where upstream refuses a chart
+		// ref explicitly anyway ("Helm charts are not yet not supported for 'ref'
+		// sources").
+		if source.IsOCI() || source.Chart != "" {
+			continue
+		}
+
 		key := argogit.NormalizeGitURL(source.RepoURL)
 		if tempPaths.GetPathIfExists(key) != "" {
 			continue // repo already materialized under this key

@@ -272,3 +272,114 @@ func TestOCIArtifactTarballsAreSharedForTheRun(t *testing.T) {
 		t.Error("ociImagePaths() on a zero-value renderer = nil")
 	}
 }
+
+// TestOCIRefSourceIsNotClonedAndRenders is the other half of the isPureRef
+// carve-out: the shape it unlocks — a source that is BOTH an oci:// artifact and
+// a $ref — has to survive ref preparation to reach its own branch. argocdf
+// materializes ref repositories eagerly, so it used to `git clone` the oci:// URL
+// and fail the whole application before rendering anything. Upstream materializes
+// lazily (resolveReferencedSources walks the value files, not the sources), so an
+// unreferenced ref costs nothing there.
+func TestOCIRefSourceIsNotClonedAndRenders(t *testing.T) {
+	requireHelm(t)
+	serveOCIArtifact(t, writeTree(t, artifactChart()))
+
+	app := &cluster.Application{
+		ObjectMeta: metav1.ObjectMeta{Name: "eng-app", Namespace: "argocd"},
+		Spec: cluster.ApplicationSpec{
+			Sources: []cluster.ApplicationSource{{
+				RepoURL:        "oci://ghcr.io/acme/artifactchart",
+				TargetRevision: "6.7.0",
+				Ref:            "artifact",
+			}},
+			Destination: cluster.ApplicationDestination{Namespace: "apps"},
+		},
+	}
+	// RepoURL set so the ref URL classifies as external — the state that used to
+	// send it to git clone.
+	r := mustNewArgoCDRenderer(t, RenderOptions{
+		ArgoCDNamespace: "argocd",
+		RepoURL:         "https://github.com/acme/repo",
+	})
+
+	result, err := r.RenderApplication(context.Background(), app, t.TempDir(), testRevision)
+	if err != nil {
+		t.Fatalf("RenderApplication() error = %v (an oci:// ref source must not be git-cloned)", err)
+	}
+	if _, ok := parseRendered(t, result.Manifests)["ConfigMap/eng-app-cm"]; !ok {
+		t.Errorf("the artifact did not render; got:\n%s", result.Manifests)
+	}
+}
+
+// TestChartRefSourceIsNotCloned covers the same family: a chart: source carrying
+// a ref is a chart REPOSITORY URL, not a git remote.
+func TestChartRefSourceIsNotCloned(t *testing.T) {
+	requireHelm(t)
+	fake := &fakeChartClient{extractedDir: writeTree(t, artifactChart())}
+	stubNewChartClient(t, fake, nil, nil)
+
+	app := &cluster.Application{
+		ObjectMeta: metav1.ObjectMeta{Name: "eng-app", Namespace: "argocd"},
+		Spec: cluster.ApplicationSpec{
+			Sources: []cluster.ApplicationSource{{
+				RepoURL:        "ghcr.io/acme",
+				Chart:          "artifactchart",
+				TargetRevision: "6.7.0",
+				Ref:            "chart",
+			}},
+			Destination: cluster.ApplicationDestination{Namespace: "apps"},
+		},
+	}
+	r := mustNewArgoCDRenderer(t, RenderOptions{
+		ArgoCDNamespace: "argocd",
+		RepoURL:         "https://github.com/acme/repo",
+	})
+
+	if _, err := r.RenderApplication(context.Background(), app, t.TempDir(), testRevision); err != nil {
+		t.Fatalf("RenderApplication() error = %v (a chart ref source must not be git-cloned)", err)
+	}
+}
+
+// TestReferencedOCIRefFailsInGenerateManifests pins the other outcome: a value
+// file that actually NAMES the unmaterialized ref fails where upstream fails, in
+// GenerateManifests' own resolution, rather than being silently resolved against
+// something else.
+func TestReferencedOCIRefFailsInGenerateManifests(t *testing.T) {
+	requireHelm(t)
+	serveOCIArtifact(t, writeTree(t, artifactChart()))
+
+	repoDir := writeTree(t, map[string]string{
+		"chart/Chart.yaml":        "apiVersion: v2\nname: local\nversion: 0.1.0\n",
+		"chart/templates/cm.yaml": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: local-cm\n",
+	})
+	app := &cluster.Application{
+		ObjectMeta: metav1.ObjectMeta{Name: "eng-app", Namespace: "argocd"},
+		Spec: cluster.ApplicationSpec{
+			Sources: []cluster.ApplicationSource{
+				{
+					RepoURL: "https://github.com/acme/repo",
+					Path:    "chart",
+					Helm:    &cluster.ApplicationSourceHelm{ValueFiles: []string{"$artifact/values.yaml"}},
+				},
+				{
+					RepoURL:        "oci://ghcr.io/acme/artifactchart",
+					TargetRevision: "6.7.0",
+					Ref:            "artifact",
+				},
+			},
+			Destination: cluster.ApplicationDestination{Namespace: "apps"},
+		},
+	}
+	r := mustNewArgoCDRenderer(t, RenderOptions{
+		ArgoCDNamespace: "argocd",
+		RepoURL:         "https://github.com/acme/repo",
+	})
+
+	_, err := r.RenderApplication(context.Background(), app, repoDir, testRevision)
+	if err == nil {
+		t.Fatal("RenderApplication() error = nil; a $ref value file naming an unmaterialized ref must fail")
+	}
+	if !strings.Contains(err.Error(), "failed to find repo") {
+		t.Errorf("error = %v, want GenerateManifests' own `failed to find repo`", err)
+	}
+}
