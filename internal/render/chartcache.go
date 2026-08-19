@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	argogit "github.com/argoproj/argo-cd/v3/util/git"
 )
 
 // immutableChartVersionRe matches a single exact semver version (optional v
@@ -53,6 +55,28 @@ var ociDigestRe = regexp.MustCompile(`^[a-z0-9]+(?:[.+_-][a-z0-9]+)*:[a-zA-Z0-9=
 func IsImmutableOCIRevision(revision string) bool {
 	rev := strings.TrimSpace(revision)
 	return ociDigestRe.MatchString(rev) || IsImmutableChartVersion(rev)
+}
+
+// IsImmutableGitRevision reports whether a git source's target revision names
+// content that cannot change under it: a commit SHA (full or truncated — a
+// truncated one still names exactly one commit), or one exact version tag.
+//
+// It exists for sources in ANOTHER repository, where argocdf has no resolved
+// commit to key a cache on. A branch name, "HEAD", or an empty revision moves by
+// design: the same string can name different content on a later run, so a cache
+// entry under it can be stale while everything local is unchanged.
+//
+// An exact version TAG is treated as immutable by the same convention pinned
+// chart versions and OCI tags already rely on (git tags CAN be moved; moving a
+// released version tag is not something the ecosystem does). Keeping one
+// convention across all three is the point — three predicates disagreeing about
+// what "pinned" means is how the chart and render caches diverged before.
+//
+// The SHA predicates are ArgoCD's own, so "what looks like a commit" cannot drift
+// from upstream's reading of it.
+func IsImmutableGitRevision(revision string) bool {
+	rev := strings.TrimSpace(revision)
+	return argogit.IsCommitSHA(rev) || argogit.IsTruncatedCommitSHA(rev) || IsImmutableChartVersion(rev)
 }
 
 // chartCacheKey is the content-independent identity of a pinned remote chart:

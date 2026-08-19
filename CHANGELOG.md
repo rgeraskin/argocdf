@@ -22,6 +22,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
   `targetRevision: ^1.2.0` re-downloaded the chart on every run, because a constraint resolves against the mutable registry index and so cannot be a cache key. Now that argocdf resolves it (see the `ARGOCD_APP_REVISION` fix below), the download is keyed by the version the constraint resolved TO: the mutable half of the question — which version does this constraint mean now — is asked of the registry every run, and only the immutable half comes from disk. A constraint whose maximum has moved therefore lands on a different key and pulls. This is worth having exactly where the render cache cannot help: a constraint revision bypasses that cache, so such an application re-renders every run regardless.
 
+- The render cache no longer describes an external git source with local content
+
+  A renderable source living in another git repository was keyed by the DIFFED commit's tree — a hash of the wrong repository, the same defect the OCI-artifact keying fixed, and unsound in one direction: the external revision can advance while nothing local changes, so an entry under a branch name could go stale. Such a source is now keyed by its repository URL, revision and path, and bypasses the cache unless the revision names fixed content (a commit SHA, or an exact version tag by the same convention pinned chart versions and OCI tags already use). Dropping the local tree hash also removes a spurious miss: an unrelated local commit no longer invalidates a render that reads nothing local. All previously cached entries are invalidated (`rendercache-v7`).
+
 ### Fixed
 
 - `ARGOCD_APP_REVISION` reports what the source actually rendered from

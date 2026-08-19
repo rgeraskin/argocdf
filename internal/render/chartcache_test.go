@@ -119,3 +119,29 @@ func TestIsImmutableOCIRevision(t *testing.T) {
 		}
 	}
 }
+
+// TestIsImmutableGitRevision pins the predicate the render cache uses for a
+// source in another repository. A commit SHA (full or truncated) names one
+// commit; an exact version tag is treated as fixed by the same convention pinned
+// chart versions and OCI tags rely on; a branch name, HEAD or empty moves by
+// design.
+func TestIsImmutableGitRevision(t *testing.T) {
+	immutable := []string{
+		"0123456789abcdef0123456789abcdef01234567", // full SHA
+		"0123456789ABCDEF0123456789abcdef01234567", // mixed case
+		"0123456", // truncated SHA (7 is git's default)
+		"6.7.0", "v6.7.0", "0.3.1-rc.1", " 6.7.0 ",
+	}
+	for _, rev := range immutable {
+		if !IsImmutableGitRevision(rev) {
+			t.Errorf("IsImmutableGitRevision(%q) = false, want true", rev)
+		}
+	}
+
+	mutable := []string{"", "HEAD", "main", "master", "release-1", "v1-branch", "*", "6.7", "^6.0.0"}
+	for _, rev := range mutable {
+		if IsImmutableGitRevision(rev) {
+			t.Errorf("IsImmutableGitRevision(%q) = true, want false", rev)
+		}
+	}
+}

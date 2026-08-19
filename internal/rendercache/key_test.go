@@ -784,3 +784,73 @@ func TestComputeKeyOCIWinsOverTheChartField(t *testing.T) {
 		t.Error("an oci:// source at a floating tag was keyed; the chart branch claimed it before the artifact branch")
 	}
 }
+
+// extGitInput builds a KeyInput whose source lives in ANOTHER repository, with
+// SameRepo answering for the diffed one only.
+func extGitInput(revision, srcPath string) KeyInput {
+	in := KeyInput{
+		AppName:   "ext-app",
+		Namespace: "argocd",
+		Spec: &cluster.ApplicationSpec{
+			Source: &cluster.ApplicationSource{
+				RepoURL:        "https://github.com/other/repo",
+				Path:           srcPath,
+				TargetRevision: revision,
+			},
+		},
+		KubeVersion: "1.29.0",
+		Commit:      "deadbeef",
+		ResolveTree: fixedResolver("local-treehash"),
+		SameRepo:    func(u string) bool { return u == "https://github.com/owner/repo" },
+	}
+	return in
+}
+
+// TestComputeKeyExternalGitSourceIdentity pins the v7 rule. A source in another
+// repository was keyed by the DIFFED commit's tree — a hash of the wrong
+// repository, the same defect v6 fixed for OCI artifacts — which both invalidated
+// the entry on unrelated local commits and said nothing about the content the
+// render actually reads.
+func TestComputeKeyExternalGitSourceIdentity(t *testing.T) {
+	base := mustKey(t, extGitInput("6.7.0", "kustomize"))
+
+	if mustKey(t, extGitInput("6.8.0", "kustomize")) == base {
+		t.Error("bumping the external revision did not change the key")
+	}
+	if mustKey(t, extGitInput("6.7.0", "manifests")) == base {
+		t.Error("rendering a different path in the external repo did not change the key")
+	}
+
+	// The LOCAL tree is no longer part of this source's identity: the render reads
+	// nothing local, so a local commit must not invalidate it.
+	moved := extGitInput("6.7.0", "kustomize")
+	moved.Commit = "cafebabe"
+	moved.ResolveTree = fixedResolver("a-completely-different-local-tree")
+	if mustKey(t, moved) != base {
+		t.Error("an unrelated local commit changed the key of a source that reads nothing local")
+	}
+
+	// A full commit SHA is the other immutable spelling.
+	mustKey(t, extGitInput("0123456789abcdef0123456789abcdef01234567", "kustomize"))
+}
+
+// TestComputeKeyFloatingExternalRevisionBypasses is the soundness half: a
+// revision the remote can move renders differently under identical local inputs,
+// so it must never be cached.
+func TestComputeKeyFloatingExternalRevisionBypasses(t *testing.T) {
+	for _, rev := range []string{"", "HEAD", "main", "master", "release-1", "v1-branch", "*"} {
+		if _, ok := ComputeKey(extGitInput(rev, "kustomize")); ok {
+			t.Errorf("revision %q: ComputeKey ok = true, want bypass (a branch can advance under a fixed key)", rev)
+		}
+	}
+}
+
+// TestComputeKeyWithoutRepoClassificationKeepsLocalBehavior pins the nil-SameRepo
+// reading: the caller could not classify repositories, so the source takes the
+// local path exactly as it did before v7. The only caller sets SameRepo; this is
+// what keeps a KeyInput built without it from silently bypassing everything.
+func TestComputeKeyWithoutRepoClassificationKeepsLocalBehavior(t *testing.T) {
+	in := extGitInput("main", "kustomize")
+	in.SameRepo = nil
+	mustKey(t, in)
+}

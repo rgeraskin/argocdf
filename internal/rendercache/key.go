@@ -51,7 +51,17 @@ import (
 // the same soundness rule remote charts get. Before this they fell through to
 // the kustomize/directory branch, which hashed the local commit's root tree: a
 // key that describes the wrong repository entirely.
-const SchemaVersion = "rendercache-v6"
+//
+// v7: sources in ANOTHER git repository are keyed as remote sources too, for the
+// same reason. They were hashed against the DIFFED commit's tree — the wrong
+// repository again, and unsound whenever the external revision can move: a branch
+// that advanced renders differently while nothing local changed, under an
+// identical key. Such a source now contributes repository URL + revision + path
+// and BYPASSES unless the revision names fixed content (a commit SHA or an exact
+// version tag — render.IsImmutableGitRevision). Dropping the local tree hash also
+// removes a spurious miss: an unrelated local commit no longer invalidates a
+// render that reads nothing local.
+const SchemaVersion = "rendercache-v7"
 
 // HelmRepoAlias is one `name → URL` mapping that helm dependency resolution can
 // reach through a `repository: "@name"` (or `alias:`) entry in a chart's
@@ -282,6 +292,35 @@ func ComputeKey(in KeyInput) (string, bool) {
 				return "", false
 			}
 			writeField("chart", src.RepoURL, src.Chart, src.TargetRevision)
+			continue
+		}
+
+		// A source in ANOTHER repository: nothing local describes its content, so
+		// the local tree hash the branches below would take is a hash of the wrong
+		// repository — which is exactly what the v6 note above condemns for OCI
+		// artifacts. Identity is the repository, the revision, and the path
+		// rendered from it, and the revision has to name fixed content: a branch
+		// name or HEAD can advance between two runs whose local trees are
+		// identical.
+		//
+		// A nil SameRepo means the caller cannot classify repositories at all; the
+		// source then takes the local path below, which is the behavior every
+		// version before v7 had. (The $ref value-file rule reads nil the other way
+		// — conservatively — because there the question is whether a FILE's content
+		// is available locally, and guessing yes would hash the wrong bytes.)
+		//
+		// Helm value files are deliberately NOT resolved for these sources: they
+		// live in the external repository (relative and repo-root-absolute entries
+		// both resolve against ITS root during the render), so the revision covers
+		// them. Resolving them against the diffed repo — what the helm branch below
+		// did — described files the render never reads. A `$ref` entry into a third
+		// repository is covered by that ref SOURCE's own key contribution, which is
+		// subject to this same rule.
+		if in.SameRepo != nil && !in.SameRepo(src.RepoURL) {
+			if !render.IsImmutableGitRevision(src.TargetRevision) {
+				return "", false
+			}
+			writeField("extgit", src.RepoURL, src.TargetRevision, src.Path)
 			continue
 		}
 
