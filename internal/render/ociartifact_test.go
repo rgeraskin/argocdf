@@ -233,7 +233,7 @@ func TestOCISourceIsNeverGitCloned(t *testing.T) {
 		RepoURL:        "oci://ghcr.io/acme/artifactchart",
 		TargetRevision: "6.7.0",
 	}
-	path, err := set.repoPathFor(context.Background(), source, local)
+	path, _, err := set.repoPathFor(context.Background(), source, local)
 	if err != nil {
 		t.Fatalf("repoPathFor() error = %v, want no clone attempt", err)
 	}

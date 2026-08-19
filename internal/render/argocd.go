@@ -224,13 +224,21 @@ func (r *ArgoCDRenderer) RenderApplication(ctx context.Context, app *cluster.App
 		default:
 		}
 
-		srcRepoPath, err := externalRepos.repoPathFor(ctx, &sources[i], repoPath)
+		srcRepoPath, srcRepoRevision, err := externalRepos.repoPathFor(ctx, &sources[i], repoPath)
 		if err != nil {
 			rerr := fmt.Errorf("failed to render source %d: %w", i, err)
 			return &RenderResult{Error: rerr}, rerr
 		}
+		// A source rendered from ANOTHER repository is rendered at that
+		// repository's resolved commit, so that is the revision it reports (see
+		// sourceRevision in renderSource). Empty means the source renders from the
+		// local worktree, where the commit being diffed is the right answer.
+		srcRevision := revision
+		if srcRepoRevision != "" {
+			srcRevision = srcRepoRevision
+		}
 
-		manifests, srcType, err := r.renderSource(ctx, app, &sources[i], srcRepoPath, revision, refSources, tempPaths)
+		manifests, srcType, err := r.renderSource(ctx, app, &sources[i], srcRepoPath, srcRevision, refSources, tempPaths)
 		if err != nil {
 			rerr := fmt.Errorf("failed to render source %d: %w", i, err)
 			return &RenderResult{Error: rerr}, rerr
@@ -260,8 +268,9 @@ func (r *ArgoCDRenderer) renderSource(
 	// therefore what ARGOCD_APP_REVISION/_SHORT/_SHORT_8 report to a helm
 	// values/parameter substitution. ArgoCD resolves it PER SOURCE
 	// (runRepoOperation passes what the source's own client resolved): the commit
-	// for a git source, the resolved chart version for a chart, the digest for an
-	// OCI artifact. Handing a remote source the git commit — as argocdf did until
+	// for a git source — the EXTERNAL repository's commit when the source lives in
+	// one, resolved by the caller — the resolved chart version for a chart, the
+	// digest for an OCI artifact. Handing a remote source the git commit — as argocdf did until
 	// this became per-source — mislabelled the render and made two sides pulling
 	// the SAME pinned chart differ, because the commit is the one input that
 	// always changes between them.

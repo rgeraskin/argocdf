@@ -332,3 +332,58 @@ func TestFetchRemoteChartCachesTheResolvedVersion(t *testing.T) {
 		t.Errorf("ExtractChart called %d times, want 2 — the moved constraint must pull", len(fake.calls))
 	}
 }
+
+// TestBuildEnvRevisionForExternalGitSource is the third source kind of the
+// per-source revision rule. A renderable source in ANOTHER git repository renders
+// from a clone of that repository at its own TargetRevision, so the revision it
+// reports must be that clone's commit. Reporting the diffed repository's commit
+// described unrelated content — and, being the one input guaranteed to differ
+// between the two sides, made a cross-repo application diff on every PR while
+// both sides rendered identical external content.
+func TestBuildEnvRevisionForExternalGitSource(t *testing.T) {
+	requireHelm(t)
+
+	extRepo := writeTree(t, map[string]string{
+		"chart/Chart.yaml":        revisionChart()["Chart.yaml"],
+		"chart/values.yaml":       revisionChart()["values.yaml"],
+		"chart/templates/cm.yaml": revisionChart()["templates/cm.yaml"],
+	})
+	extURL := initGitRepo(t, extRepo)
+	wantCommit := clonedRevision(extRepo)
+	if wantCommit == "" {
+		t.Fatal("could not read the external repo's HEAD")
+	}
+
+	app := revisionApp(cluster.ApplicationSource{
+		RepoURL: extURL, Path: "chart", TargetRevision: "main",
+	})
+	// RepoURL differs from the source's, which is what makes it external.
+	r := mustNewArgoCDRenderer(t, RenderOptions{
+		ArgoCDNamespace: "argocd",
+		RepoURL:         "https://github.com/acme/repo",
+	})
+	result, err := r.RenderApplication(context.Background(), app, t.TempDir(), testRevision)
+	if err != nil {
+		t.Fatalf("RenderApplication() error = %v", err)
+	}
+	doc, ok := parseRendered(t, result.Manifests)["ConfigMap/eng-app-rev"]
+	if !ok {
+		t.Fatalf("missing ConfigMap/eng-app-rev; rendered:\n%s", result.Manifests)
+	}
+	got, _ := fieldAt(doc, "data.rev")
+	if got == testRevision {
+		t.Fatal("ARGOCD_APP_REVISION is the DIFFED repo's commit; a cross-repo app would diff on every PR")
+	}
+	if got != wantCommit {
+		t.Errorf("ARGOCD_APP_REVISION = %v, want the external clone's commit %q", got, wantCommit)
+	}
+}
+
+// TestClonedRevisionOnANonRepo pins the non-fatal contract: a clone whose commit
+// cannot be read yields "", and the caller then keeps the diffed commit rather
+// than failing a render over a label.
+func TestClonedRevisionOnANonRepo(t *testing.T) {
+	if got := clonedRevision(t.TempDir()); got != "" {
+		t.Errorf("clonedRevision() = %q, want empty for a directory that is not a repository", got)
+	}
+}

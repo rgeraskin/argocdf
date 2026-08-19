@@ -25,11 +25,11 @@ func TestExternalRepoSet_DedupAndCleanup(t *testing.T) {
 	ctx := context.Background()
 
 	// Two sources, same URL + revision: one clone, shared.
-	first, err := set.repoPathFor(ctx, &cluster.ApplicationSource{RepoURL: extURL, Path: "a"}, "/local")
+	first, _, err := set.repoPathFor(ctx, &cluster.ApplicationSource{RepoURL: extURL, Path: "a"}, "/local")
 	if err != nil {
 		t.Fatalf("repoPathFor() error: %v", err)
 	}
-	second, err := set.repoPathFor(ctx, &cluster.ApplicationSource{RepoURL: extURL, Path: "b"}, "/local")
+	second, _, err := set.repoPathFor(ctx, &cluster.ApplicationSource{RepoURL: extURL, Path: "b"}, "/local")
 	if err != nil {
 		t.Fatalf("repoPathFor() second call error: %v", err)
 	}
@@ -47,7 +47,7 @@ func TestExternalRepoSet_DedupAndCleanup(t *testing.T) {
 	}
 
 	// A different revision is a different checkout.
-	third, err := set.repoPathFor(ctx, &cluster.ApplicationSource{RepoURL: extURL, Path: "a", TargetRevision: "main"}, "/local")
+	third, _, err := set.repoPathFor(ctx, &cluster.ApplicationSource{RepoURL: extURL, Path: "a", TargetRevision: "main"}, "/local")
 	if err != nil {
 		t.Fatalf("repoPathFor() revision call error: %v", err)
 	}
@@ -56,11 +56,11 @@ func TestExternalRepoSet_DedupAndCleanup(t *testing.T) {
 	}
 
 	// Local and chart sources never clone.
-	local, err := set.repoPathFor(ctx, &cluster.ApplicationSource{RepoURL: "https://github.com/org/repo", Path: "x"}, "/local")
+	local, _, err := set.repoPathFor(ctx, &cluster.ApplicationSource{RepoURL: "https://github.com/org/repo", Path: "x"}, "/local")
 	if err != nil || local != "/local" {
 		t.Errorf("local source = (%q, %v), want the local worktree", local, err)
 	}
-	chart, err := set.repoPathFor(ctx, &cluster.ApplicationSource{RepoURL: extURL, Chart: "c"}, "/local")
+	chart, _, err := set.repoPathFor(ctx, &cluster.ApplicationSource{RepoURL: extURL, Chart: "c"}, "/local")
 	if err != nil || chart != "/local" {
 		t.Errorf("chart source = (%q, %v), want the local worktree (charts come from the chart fetch)", chart, err)
 	}
@@ -78,7 +78,7 @@ func TestCloneExternalRepo_ResolveErrorIsLoud(t *testing.T) {
 			return nil, errors.New("token exchange failed")
 		},
 	}
-	_, _, err := cloneExternalRepo(context.Background(), opts, "default",
+	_, _, _, err := cloneExternalRepo(context.Background(), opts, "default",
 		&cluster.ApplicationSource{RepoURL: "https://github.com/org/other", Path: "x"})
 	if err == nil || !strings.Contains(err.Error(), "token exchange failed") {
 		t.Errorf("cloneExternalRepo() error = %v, want the credential resolution root cause", err)
