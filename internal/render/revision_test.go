@@ -1,12 +1,14 @@
 package render
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strings"
 	"testing"
 
 	argohelm "github.com/argoproj/argo-cd/v3/util/helm"
+	"github.com/charmbracelet/log"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/rgeraskin/argocdf/internal/cluster"
@@ -385,5 +387,94 @@ func TestBuildEnvRevisionForExternalGitSource(t *testing.T) {
 func TestClonedRevisionOnANonRepo(t *testing.T) {
 	if got := clonedRevision(t.TempDir()); got != "" {
 		t.Errorf("clonedRevision() = %q, want empty for a directory that is not a repository", got)
+	}
+}
+
+// TestEmptyChartRevisionAsksNothing pins the short-circuit: no tag can be empty,
+// so an empty target revision cannot resolve however the index reads, and the
+// round trip — a full index download for a classic repository — would be paid on
+// every render, since an empty revision also bypasses the render cache. HEAD
+// deliberately still asks (a registry may publish a literal HEAD tag, which
+// upstream's string-equality fallback would match).
+func TestEmptyChartRevisionAsksNothing(t *testing.T) {
+	fake := &fakeChartClient{extractedDir: chartFixture(t, "mychart"), tags: []string{"1.2.3"}}
+	stubNewChartClient(t, fake, nil, nil)
+
+	_, revision, _, cleanup, err := fetchRemoteChart(
+		context.Background(), &RenderOptions{}, chartTestApp(), chartSource(""))
+	if err != nil {
+		t.Fatalf("fetchRemoteChart() error: %v", err)
+	}
+	defer cleanup()
+
+	if fake.tagsCalls != 0 || fake.idxCalls != 0 {
+		t.Errorf("an empty revision cost %d tag and %d index calls, want none", fake.tagsCalls, fake.idxCalls)
+	}
+	// The label is the declared revision, which for this source is empty — the
+	// same fallback HEAD gets, and still never the git commit.
+	if revision != "" {
+		t.Errorf("revision = %q, want the declared (empty) revision", revision)
+	}
+	if len(fake.calls) != 1 || fake.calls[0].version != "" {
+		t.Errorf("ExtractChart calls = %+v, want the unchanged latest-means-empty pull", fake.calls)
+	}
+
+	// HEAD still asks the registry.
+	fake.calls = nil
+	_, _, _, cleanup2, err := fetchRemoteChart(
+		context.Background(), &RenderOptions{}, chartTestApp(), chartSource("HEAD"))
+	if err != nil {
+		t.Fatalf("fetchRemoteChart(HEAD) error: %v", err)
+	}
+	defer cleanup2()
+	if fake.tagsCalls != 1 {
+		t.Errorf("HEAD cost %d tag calls, want 1 (parity: a literal HEAD tag can exist)", fake.tagsCalls)
+	}
+}
+
+// TestUnresolvedChartRevisionIsLogged pins that the silent fallback says so once:
+// it changes ARGOCD_APP_REVISION, and nothing else in a run explains why.
+func TestUnresolvedChartRevisionIsLogged(t *testing.T) {
+	fake := &fakeChartClient{extractedDir: chartFixture(t, "mychart")}
+	stubNewChartClient(t, fake, nil, nil)
+
+	var buf bytes.Buffer
+	logger := log.New(&buf)
+	logger.SetLevel(log.DebugLevel)
+
+	_, _, _, cleanup, err := fetchRemoteChart(
+		context.Background(), &RenderOptions{Logger: logger}, chartTestApp(), chartSource("HEAD"))
+	if err != nil {
+		t.Fatalf("fetchRemoteChart() error: %v", err)
+	}
+	defer cleanup()
+
+	out := buf.String()
+	for _, want := range []string{"declared revision", "HEAD", "mychart"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log %q does not mention %q", out, want)
+		}
+	}
+}
+
+// TestResolvedChartRevisionIsNotLogged is the other half: the normal path stays
+// quiet, so the line above means something when it appears.
+func TestResolvedChartRevisionIsNotLogged(t *testing.T) {
+	fake := &fakeChartClient{extractedDir: chartFixture(t, "mychart")}
+	stubNewChartClient(t, fake, nil, nil)
+
+	var buf bytes.Buffer
+	logger := log.New(&buf)
+	logger.SetLevel(log.DebugLevel)
+
+	_, _, _, cleanup, err := fetchRemoteChart(
+		context.Background(), &RenderOptions{Logger: logger}, chartTestApp(), chartSource("1.2.3"))
+	if err != nil {
+		t.Fatalf("fetchRemoteChart() error: %v", err)
+	}
+	defer cleanup()
+
+	if buf.Len() != 0 {
+		t.Errorf("a resolved revision logged %q, want silence", buf.String())
 	}
 }

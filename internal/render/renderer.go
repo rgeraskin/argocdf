@@ -5,6 +5,7 @@ import (
 	"context"
 
 	argoappv1 "github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
+	"github.com/charmbracelet/log"
 
 	"github.com/rgeraskin/argocdf/internal/types"
 )
@@ -62,6 +63,12 @@ type RenderOptions struct {
 	// (never nil on success — unknown URLs yield a credential-less default).
 	// nil means no credential source is configured.
 	ResolveRepo func(ctx context.Context, repoURL, project string) (*argoappv1.Repository, error)
+
+	// Logger, when set, records render-side decisions a report cannot carry.
+	// There is exactly one today: a chart target revision that could not be
+	// resolved, where the build-env label falls back to the declared revision
+	// (fetchRemoteChart). nil disables it — the render never depends on it.
+	Logger *log.Logger
 
 	// HelmRegistryConfig is an explicit helm registry config path to expose
 	// to ArgoCD's helm executions (--repo-creds=local sets it to the user's

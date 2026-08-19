@@ -69,6 +69,7 @@ func (f *Factory) CreateRenderer(kubeVersion string, apiVersions []string, creds
 		KustomizeBuildOptions:   f.config.KustomizeBuildOptions,
 		KustomizeLoadRestrictor: f.config.KustomizeLoadRestrictor,
 		ChartCacheDir:           f.chartCacheDir(credsInstance),
+		Logger:                  f.logger,
 	}
 	if creds != nil {
 		opts.HelmRepos = creds.HelmRepos

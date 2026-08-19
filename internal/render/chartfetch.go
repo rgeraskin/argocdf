@@ -2,6 +2,7 @@ package render
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -91,6 +92,17 @@ func isOCIChartRepo(repoURL string) bool {
 func resolveChartRevision(client chartClient, chart, revision string, enableOCI bool) (string, error) {
 	if argoversions.IsVersion(revision) {
 		return revision, nil
+	}
+	// An EMPTY revision short-circuits before the registry: no tag can be empty,
+	// so MaxVersion's constraint parse and its string-equality fallback both fail
+	// no matter what the index says, and the round trip is pure waste — a full
+	// index download for a classic repository, on every render, since an empty
+	// revision also bypasses the render cache. "HEAD" deliberately does NOT
+	// short-circuit: a registry may publish a literal HEAD tag, which the
+	// string-equality fallback would match, so skipping it would deviate from
+	// upstream for a shape that is at least possible.
+	if revision == "" {
+		return "", errors.New("empty revision is neither a version nor a constraint")
 	}
 	var tags []string
 	if enableOCI {
@@ -201,6 +213,17 @@ func fetchRemoteChart(ctx context.Context, opts *RenderOptions, app *cluster.App
 		version = resolved
 	} else {
 		resolved = source.TargetRevision
+		// Say so once, at DEBUG: the fallback is silent by design but it changes
+		// a user-visible value (ARGOCD_APP_REVISION reports the declared revision
+		// rather than a resolved version), and nothing else in the run explains
+		// why.
+		if opts.Logger != nil {
+			opts.Logger.Debug("Chart revision not resolved; labelling the render with the declared revision",
+				"app", app.Name,
+				"chart", source.Chart,
+				"revision", source.TargetRevision,
+				"reason", resolveErr)
+		}
 	}
 
 	// A CONSTRAINT is not cacheable as written — it resolves against the mutable
