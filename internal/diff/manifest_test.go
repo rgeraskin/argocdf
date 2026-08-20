@@ -541,16 +541,23 @@ metadata:
   annotations:
     key: value1
     key: value2`,
-			wantManifests:     1, // Duplicate keys are non-fatal now; doc kept
-			wantParseErrors:   0,
-			wantParseWarnings: 1,
+			// A duplicate map key is a malformed document, reported and skipped.
+			// It cannot occur from the only producer (JSON marshalled from Go
+			// maps); until 0.5.0, when argocdf parsed raw helm output, it was
+			// resolved last-wins with a warning instead.
+			wantManifests:     0,
+			wantParseErrors:   1,
+			wantParseWarnings: 0,
 		},
 		{
-			name: "mixed valid and duplicate-key documents",
+			// The load-bearing row: one unusable document must cost only ITSELF.
+			// A decode error on document SHAPE lets the stream continue, unlike a
+			// structural error, which cannot (yaml.v3 would return it forever).
+			name: "a malformed document does not truncate the stream",
 			content: `apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: valid-config
+  name: before
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -558,10 +565,15 @@ metadata:
   name: dup
   labels:
     app: test
-    app: duplicate`,
-			wantManifests:     2, // Both kept; second has a resolved duplicate
-			wantParseErrors:   0,
-			wantParseWarnings: 1,
+    app: duplicate
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: after`,
+			wantManifests:     2,
+			wantParseErrors:   1,
+			wantParseWarnings: 0,
 		},
 		{
 			name: "genuine syntax error still lands in ParseErrors and doc skipped",
@@ -606,77 +618,6 @@ data:
 				t.Errorf("ParseManifests() parseWarnings = %d, want %d (%v)", len(result.ParseWarnings), tt.wantParseWarnings, result.ParseWarnings)
 			}
 		})
-	}
-}
-
-// TestParseManifests_DuplicateKeyLastWins verifies the last-value-wins behavior
-// for duplicate map keys and that the surviving document participates in diffs.
-func TestParseManifests_DuplicateKeyLastWins(t *testing.T) {
-	parser := NewManifestParser()
-
-	content := `apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: test
-  namespace: default
-data:
-  key: first
-  key: last`
-
-	result := parser.ParseManifests(content)
-
-	if len(result.Manifests) != 1 {
-		t.Fatalf("expected 1 manifest, got %d", len(result.Manifests))
-	}
-	if len(result.ParseWarnings) != 1 {
-		t.Fatalf("expected 1 warning, got %d (%v)", len(result.ParseWarnings), result.ParseWarnings)
-	}
-
-	// Warning should reference kind/name and the duplicated key.
-	warn := result.ParseWarnings[0]
-	for _, want := range []string{"ConfigMap/test", `"key"`, "last value"} {
-		if !strings.Contains(warn, want) {
-			t.Errorf("warning %q missing %q", warn, want)
-		}
-	}
-
-	// Last value wins.
-	data, ok := result.Manifests[0].Object["data"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("data is not a map: %T", result.Manifests[0].Object["data"])
-	}
-	if data["key"] != "last" {
-		t.Errorf("data.key = %v, want \"last\" (last-wins)", data["key"])
-	}
-}
-
-// TestParseManifests_NestedDuplicateKey verifies a duplicate key nested inside
-// metadata.annotations is detected and resolved.
-func TestParseManifests_NestedDuplicateKey(t *testing.T) {
-	parser := NewManifestParser()
-
-	content := `apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: web
-  namespace: default
-  annotations:
-    nginx.ingress.kubernetes.io/service-upstream: "true"
-    nginx.ingress.kubernetes.io/service-upstream: "false"`
-
-	result := parser.ParseManifests(content)
-
-	if len(result.Manifests) != 1 {
-		t.Fatalf("expected 1 manifest, got %d", len(result.Manifests))
-	}
-	if len(result.ParseWarnings) != 1 {
-		t.Fatalf("expected 1 warning, got %d (%v)", len(result.ParseWarnings), result.ParseWarnings)
-	}
-
-	meta := result.Manifests[0].Object["metadata"].(map[string]interface{})
-	ann := meta["annotations"].(map[string]interface{})
-	if ann["nginx.ingress.kubernetes.io/service-upstream"] != "false" {
-		t.Errorf("annotation = %v, want \"false\" (last-wins)", ann["nginx.ingress.kubernetes.io/service-upstream"])
 	}
 }
 
@@ -747,17 +688,15 @@ metadata:
 data:
   a: "1"`
 
-	// Same ConfigMap but with a duplicate key in data (parse warning).
-	dupKey := `apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: app
-data:
-  a: "1"
-  a: "2"`
+	// The warning SOURCE is two documents sharing one manifest identity, which is
+	// the only parse-layer warning the render pipeline can still produce (see
+	// ParseManifests: duplicate map keys, which this test used to provoke, cannot
+	// reach it). The SUBJECT is the side label, which is what every writer, badge
+	// and lint finding depends on.
+	duplicated := clean + "\n---\n" + clean
 
-	// Warning only in the target content is labeled [target].
-	result, err := differ.DiffManifests(clean, dupKey)
+	// A warning only on the target side is labeled [target].
+	result, err := differ.DiffManifests(clean, duplicated)
 	if err != nil {
 		t.Fatalf("DiffManifests() error = %v", err)
 	}
@@ -768,10 +707,14 @@ data:
 		if !strings.HasPrefix(w, "[target] ") {
 			t.Errorf("warning %q should be labeled [target]", w)
 		}
+		if !strings.Contains(w, "duplicate manifest") {
+			t.Errorf("warning %q is not the duplicate-manifest warning this test provokes", w)
+		}
 	}
 
-	// The same issue on both sides yields one [base] and one [target] entry.
-	result, err = differ.DiffManifests(dupKey, dupKey)
+	// The same issue on both sides yields one [base] and one [target] entry —
+	// which is what makes a one-sided warning readable as introduced or fixed.
+	result, err = differ.DiffManifests(duplicated, duplicated)
 	if err != nil {
 		t.Fatalf("DiffManifests() error = %v", err)
 	}
@@ -786,21 +729,5 @@ data:
 	}
 	if !base || !target {
 		t.Errorf("expected both [base] and [target] warnings, got %v", result.ParseWarnings)
-	}
-
-	// Duplicate manifests only in the old set are labeled [base].
-	twoDocs := clean + "\n---\n" + clean
-	result, err = differ.DiffManifests(twoDocs, clean)
-	if err != nil {
-		t.Fatalf("DiffManifests() error = %v", err)
-	}
-	foundBaseDup := false
-	for _, w := range result.ParseWarnings {
-		if strings.HasPrefix(w, "[base] duplicate manifest") {
-			foundBaseDup = true
-		}
-	}
-	if !foundBaseDup {
-		t.Errorf("expected [base]-labeled duplicate-manifest warning, got %v", result.ParseWarnings)
 	}
 }

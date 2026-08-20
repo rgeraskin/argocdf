@@ -68,24 +68,49 @@ func NewManifestParser() *ManifestParser {
 type ParseResult struct {
 	Manifests   []Manifest
 	ParseErrors []string
-	// ParseWarnings contains non-fatal issues (e.g., duplicate YAML map keys
-	// resolved with last-wins semantics). The document is still kept.
+	// ParseWarnings contains non-fatal issues, and everything else that rides
+	// this channel to the report: two documents sharing one manifest identity
+	// (DiffManifestSets) and every --lint finding (diff.LabelSide). ParseManifests
+	// itself no longer produces any — see its comment.
 	ParseWarnings []string
 }
 
-// ParseManifests parses a multi-document YAML into Manifests.
-// Invalid YAML documents are skipped (not treated as errors) because:
-// - Empty documents and bare separators (---) are common in rendered output
-// - Helm/Kustomize may produce documents with only comments
-// - Continuing with valid documents provides a better user experience
-// Only documents that can be parsed as valid Kubernetes objects (with apiVersion,
-// kind, and metadata.name) are included in the result.
+// ParseManifests parses a multi-document YAML stream into Manifests.
 //
-// Each document is first decoded into a yaml.Node (which does NOT error on
-// duplicate map keys), then any duplicate keys are resolved with last-wins
-// semantics (matching kubectl/ArgoCD apply behavior) and recorded in
-// ParseWarnings. Genuine YAML syntax errors are collected in ParseErrors and
-// the offending document is skipped.
+// The only production producer of that stream is argocdf's own render layer:
+// ArgoCD's GenerateManifests returns one JSON document per resource, and
+// render.manifestsToYAML converts each with yaml.JSONToYAML and joins them with
+// "---". That single fact decides how tolerant this parser has to be, so each
+// tolerance below says whether the producer can actually exercise it:
+//
+//   - a document that is not a Kubernetes object (no apiVersion, kind or
+//     metadata.name) is SKIPPED. LIVE: gitops-engine's SplitYAML keeps any YAML
+//     mapping a chart emits, so a stray "foo: bar" document arrives here as a
+//     manifest.
+//   - an empty or null document contributes nothing. LIVE ENOUGH to keep:
+//     upstream's own UnmarshalToUnstructured guards for a literal "null"
+//     manifest, which is where such a document would come from.
+//   - a document whose root is not a mapping is skipped and recorded in
+//     ParseErrors, and the stream CONTINUES. Unreachable from JSON objects, but
+//     the decode error has to be handled either way, and skipping one document
+//     beats truncating the stream.
+//   - a structural YAML error is recorded in ParseErrors and STOPS the stream:
+//     yaml.v3's decoder cannot advance past one, so continuing would spin
+//     forever. Unreachable from machine-serialized input.
+//
+// What is deliberately NOT here: duplicate-map-key resolution. Until 0.5.0
+// argocdf parsed raw `helm template` stdout, where a chart could emit duplicate
+// keys, and this parser resolved them last-wins with a warning (ffe57f4, three
+// weeks before the native pipeline was deleted). ArgoCD's engine hands over JSON
+// marshalled from Go maps, so a duplicate key cannot survive to reach here — the
+// machinery guarded an input the pipeline can no longer produce, while its tests
+// implied coverage of a real scenario. A duplicate key now lands in ParseErrors
+// like any other malformed document: reported, and never silently resolved.
+//
+// The two-step decode (yaml.Node, then Node.Decode into a map) is what keeps
+// those last two cases distinguishable — a Node decode never fails on document
+// SHAPE, so an error from it is a type problem the stream can survive, while an
+// error from the stream decoder is structural and cannot be.
 func (p *ManifestParser) ParseManifests(content string) ParseResult {
 	decoder := yaml.NewDecoder(strings.NewReader(content))
 	var result ParseResult
@@ -109,12 +134,6 @@ func (p *ManifestParser) ParseManifests(content string) ParseResult {
 			break
 		}
 
-		// Resolve duplicate map keys (last wins), collecting the duplicated
-		// leaf key names so we can attach kind/name context after decode.
-		var dupKeys []string
-		dedupNode(&node, &dupKeys)
-
-		// Decode the (deduplicated) node into a map.
 		var rawObj map[string]interface{}
 		if err := node.Decode(&rawObj); err != nil {
 			errMsg := strings.ReplaceAll(fmt.Sprintf("%v", err), "\n", " ")
@@ -147,56 +166,10 @@ func (p *ManifestParser) ParseManifests(content string) ParseResult {
 			continue
 		}
 
-		// Record duplicate-key warnings now that kind/name are known.
-		for _, k := range dupKeys {
-			w := fmt.Sprintf("resource %s/%s: duplicate key %q (using last value)", manifest.Kind, manifest.Name, k)
-			result.ParseWarnings = append(result.ParseWarnings, w)
-			log.Warnf("Duplicate YAML key resolved with last-wins: %s", w)
-		}
-
 		result.Manifests = append(result.Manifests, manifest)
 	}
 
 	return result
-}
-
-// dedupNode walks a yaml.Node tree and, for every mapping node, removes
-// duplicate keys keeping the LAST occurrence (matching YAML/kubectl last-wins
-// semantics). The leaf name of each duplicated key is appended to dups.
-func dedupNode(node *yaml.Node, dups *[]string) {
-	if node == nil {
-		return
-	}
-	switch node.Kind {
-	case yaml.DocumentNode:
-		for _, c := range node.Content {
-			dedupNode(c, dups)
-		}
-	case yaml.MappingNode:
-		seen := make(map[string]int) // key value -> index of the key node in newContent
-		newContent := make([]*yaml.Node, 0, len(node.Content))
-		for i := 0; i+1 < len(node.Content); i += 2 {
-			keyNode := node.Content[i]
-			valNode := node.Content[i+1]
-			if idx, ok := seen[keyNode.Value]; ok {
-				// Duplicate: last wins. Replace the previously kept key/value
-				// pair in place so the later value takes precedence.
-				*dups = append(*dups, keyNode.Value)
-				newContent[idx] = keyNode
-				newContent[idx+1] = valNode
-			} else {
-				seen[keyNode.Value] = len(newContent)
-				newContent = append(newContent, keyNode, valNode)
-			}
-			// Recurse into the value node to dedup nested mappings.
-			dedupNode(valNode, dups)
-		}
-		node.Content = newContent
-	case yaml.SequenceNode:
-		for _, c := range node.Content {
-			dedupNode(c, dups)
-		}
-	}
 }
 
 // getString safely extracts a string from a map.
