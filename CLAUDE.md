@@ -59,7 +59,7 @@ The tool follows a pipeline architecture orchestrated by `internal/app/app.go`:
 
 ### ArgoCD Types Dependency
 
-The `internal/cluster` package uses ArgoCD's official types from `github.com/argoproj/argo-cd/v2/pkg/apis/application/v1alpha1` via type aliases. This ensures automatic compatibility with all ArgoCD Application fields and eliminates field drift bugs.
+The `internal/cluster` package uses ArgoCD's official types from `github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1` via type aliases. This ensures automatic compatibility with all ArgoCD Application fields and eliminates field drift bugs.
 
 ```go
 // Type aliases in internal/cluster/applications.go
