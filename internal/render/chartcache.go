@@ -73,7 +73,12 @@ func IsImmutableOCIRevision(revision string) bool {
 // what "pinned" means is how the chart and render caches diverged before.
 //
 // The SHA predicates are ArgoCD's own, so "what looks like a commit" cannot drift
-// from upstream's reading of it.
+// from upstream's reading of it. That inherits upstream's shape exactly, including
+// its edge: any hex-looking name of seven or more characters reads as a truncated
+// SHA, so a branch called `deadbeef` or an all-digit date tag like `20260819` is
+// treated as immutable. Accepted knowingly — it is the same movable-name risk the
+// version-tag convention above already takes, and having the predicate BE
+// upstream's is worth more than closing a shape nobody writes.
 func IsImmutableGitRevision(revision string) bool {
 	rev := strings.TrimSpace(revision)
 	return argogit.IsCommitSHA(rev) || argogit.IsTruncatedCommitSHA(rev) || IsImmutableChartVersion(rev)

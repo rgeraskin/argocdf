@@ -854,3 +854,63 @@ func TestComputeKeyWithoutRepoClassificationKeepsLocalBehavior(t *testing.T) {
 	in.SameRepo = nil
 	mustKey(t, in)
 }
+
+// TestComputeKeyEmptySourceRepoURLIsLocal pins the second emptiness guard of the
+// v7 branch. render.isExternalSource requires BOTH URLs to be known before it
+// calls a source external, so a source with no repoURL renders from the local
+// worktree — and the key has to agree. Classifying it external instead was
+// reachable through apps-of-apps discovery, which bypasses selection entirely: a
+// child CR whose template emits an empty repoURL would have been keyed as a
+// remote source carrying no local content, so both sides of the diff would
+// compute the SAME key and the second would be served the first one's manifests.
+func TestComputeKeyEmptySourceRepoURLIsLocal(t *testing.T) {
+	// SameRepo says "no" to everything, which is what makes this a test of the
+	// URL guard rather than of the closure.
+	noneAreLocal := func(string) bool { return false }
+
+	build := func(revision, treeHash string) KeyInput {
+		return KeyInput{
+			AppName:   "child-app",
+			Namespace: "argocd",
+			Spec: &cluster.ApplicationSpec{
+				Source: &cluster.ApplicationSource{
+					RepoURL:        "",
+					Path:           "apps/child",
+					TargetRevision: revision,
+				},
+			},
+			KubeVersion: "1.29.0",
+			Commit:      "deadbeef",
+			ResolveTree: fixedResolver(treeHash),
+			SameRepo:    noneAreLocal,
+		}
+	}
+
+	// A FLOATING revision is the tell: the external branch would bypass on it,
+	// while a local source is keyed from its tree regardless of the revision.
+	base := mustKey(t, build("main", "local-treehash"))
+
+	// And the local tree really is what identifies it — the proof it took the
+	// local path rather than an external one that merely happened to key.
+	if mustKey(t, build("main", "another-treehash")) == base {
+		t.Error("the local tree hash does not participate; the source was keyed as external")
+	}
+}
+
+// TestComputeKeyUnknownLocalRepoKeepsEveryLocalSource is the first emptiness
+// guard, from the caller's side: when the local repository URL is unknown the
+// caller passes a nil SameRepo (app.sameRepoMatcher), and every source must keep
+// the local path the renderer will use for it. A closure answering "not the same
+// repo" for everything would flip every source to external in the key alone.
+func TestComputeKeyUnknownLocalRepoKeepsEveryLocalSource(t *testing.T) {
+	in := extGitInput("main", "kustomize")
+	in.SameRepo = nil
+	base := mustKey(t, in)
+
+	moved := extGitInput("main", "kustomize")
+	moved.SameRepo = nil
+	moved.ResolveTree = fixedResolver("another-treehash")
+	if mustKey(t, moved) == base {
+		t.Error("with no repository classification the key ignored the local tree; both diff sides would share it")
+	}
+}

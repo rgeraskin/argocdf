@@ -1476,8 +1476,6 @@ func (a *App) renderCacheKey(app *cluster.Application, commit string) (string, b
 		return "", false
 	}
 
-	localRepoURL := git.NormalizeRepoURL(a.cfg.RepoURL)
-
 	return rendercache.ComputeKey(rendercache.KeyInput{
 		AppName:     app.Name,
 		Namespace:   app.Namespace,
@@ -1502,9 +1500,8 @@ func (a *App) renderCacheKey(app *cluster.Application, commit string) (string, b
 		},
 		// A ref source is resolvable to local content only when it points at
 		// the repository being diffed; external-repo refs force a cache bypass.
-		SameRepo: func(repoURL string) bool {
-			return git.NormalizeRepoURL(repoURL) == localRepoURL
-		},
+		// Absent when the local repository is unknown — see sameRepoMatcher.
+		SameRepo: sameRepoMatcher(a.cfg.RepoURL),
 		ReadFile: func(commit, path string) (string, bool) {
 			content, rerr := a.repo.FileContent(commit, path)
 			if rerr != nil {
@@ -1513,6 +1510,31 @@ func (a *App) renderCacheKey(app *cluster.Application, commit string) (string, b
 			return content, true
 		},
 	})
+}
+
+// sameRepoMatcher builds the render cache's repository classifier: does this URL
+// name the repository being diffed?
+//
+// It returns NIL when the local repository URL is unknown, which is not a
+// degenerate case but the convention every other layer already follows.
+// render.isExternalSource and sourcePathsExist both require a non-empty local URL
+// before calling anything external, so an undetected repository (detection
+// failure is non-fatal) means the renderer reads the local worktree for every
+// source. A closure would answer "not the same repo" for all of them, classifying
+// every source as EXTERNAL in the key alone — and an external source's key
+// deliberately carries no local content, so both sides of a diff would compute
+// the same key and the second would be served the first one's manifests.
+//
+// Extracted as its own function because that inversion is invisible at the call
+// site: a closure over an empty string looks harmless.
+func sameRepoMatcher(localRepoURL string) func(string) bool {
+	if localRepoURL == "" {
+		return nil
+	}
+	normalized := git.NormalizeRepoURL(localRepoURL)
+	return func(repoURL string) bool {
+		return git.NormalizeRepoURL(repoURL) == normalized
+	}
 }
 
 // sourcePathsExist checks if all local source paths for an application exist on disk.

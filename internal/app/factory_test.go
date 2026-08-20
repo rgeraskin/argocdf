@@ -558,3 +558,38 @@ func TestLintSideAttribution(t *testing.T) {
 		t.Errorf("command ran in %#v, want the side's worktree %q", warnings, worktree)
 	}
 }
+
+// TestSameRepoMatcherWithoutALocalRepoURL pins the render cache's half of the
+// external-source convention that render.isExternalSource and sourcePathsExist
+// already state: an unknown local repository means every source is LOCAL. The
+// matcher must therefore be ABSENT rather than a closure that answers "not the
+// same repo" for everything — which would classify every source as external in
+// the key alone, and an external key deliberately carries no local content, so
+// both sides of a diff would compute one key and the second would be served the
+// first one's manifests.
+func TestSameRepoMatcherWithoutALocalRepoURL(t *testing.T) {
+	if sameRepoMatcher("") != nil {
+		t.Fatal("sameRepoMatcher(\"\") returned a closure; every source would be keyed as external")
+	}
+
+	match := sameRepoMatcher("https://github.com/owner/repo.git")
+	if match == nil {
+		t.Fatal("sameRepoMatcher() = nil for a known repository")
+	}
+	// Normalization applies to both sides, exactly as the other two layers
+	// compare: .git suffix, scheme and trailing slash must not decide it.
+	for _, same := range []string{
+		"https://github.com/owner/repo.git",
+		"https://github.com/owner/repo",
+		"git@github.com:owner/repo.git",
+	} {
+		if !match(same) {
+			t.Errorf("match(%q) = false, want true (same repository, different spelling)", same)
+		}
+	}
+	for _, other := range []string{"https://github.com/owner/other", "", "oci://ghcr.io/owner/repo"} {
+		if match(other) {
+			t.Errorf("match(%q) = true, want false", other)
+		}
+	}
+}

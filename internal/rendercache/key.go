@@ -303,11 +303,21 @@ func ComputeKey(in KeyInput) (string, bool) {
 		// name or HEAD can advance between two runs whose local trees are
 		// identical.
 		//
-		// A nil SameRepo means the caller cannot classify repositories at all; the
-		// source then takes the local path below, which is the behavior every
-		// version before v7 had. (The $ref value-file rule reads nil the other way
-		// — conservatively — because there the question is whether a FILE's content
-		// is available locally, and guessing yes would hash the wrong bytes.)
+		// The two emptiness guards make this test a literal mirror of
+		// render.isExternalSource, which is what decides where the render actually
+		// reads from: an unknown repository — either side of the comparison — means
+		// LOCAL there, and sourcePathsExist spells out the same convention for the
+		// third consumer of it. A key that classified a source differently than
+		// the renderer does is the bug this whole series is about, one layer
+		// further in: it would describe a repository the render never opened.
+		//
+		// A nil SameRepo means the caller cannot classify repositories at all (it
+		// passes nil precisely when the local repository URL is unknown); the
+		// source then takes the local path below, which is both the renderer's
+		// answer and the behavior every version before v7 had. (The $ref
+		// value-file rule reads nil the other way — conservatively — because there
+		// the question is whether a FILE's content is available locally, and
+		// guessing yes would hash the wrong bytes.)
 		//
 		// Helm value files are deliberately NOT resolved for these sources: they
 		// live in the external repository (relative and repo-root-absolute entries
@@ -316,7 +326,7 @@ func ComputeKey(in KeyInput) (string, bool) {
 		// did — described files the render never reads. A `$ref` entry into a third
 		// repository is covered by that ref SOURCE's own key contribution, which is
 		// subject to this same rule.
-		if in.SameRepo != nil && !in.SameRepo(src.RepoURL) {
+		if src.RepoURL != "" && in.SameRepo != nil && !in.SameRepo(src.RepoURL) {
 			if !render.IsImmutableGitRevision(src.TargetRevision) {
 				return "", false
 			}
