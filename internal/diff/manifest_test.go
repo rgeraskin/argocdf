@@ -533,7 +533,7 @@ func TestParseManifests_CollectsParseErrors(t *testing.T) {
 		wantParseWarnings int
 	}{
 		{
-			name: "duplicate key resolved with last-wins (warning, doc kept)",
+			name: "a duplicate map key is reported and its document skipped",
 			content: `apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -573,6 +573,17 @@ metadata:
   name: after`,
 			wantManifests:     2,
 			wantParseErrors:   1,
+			wantParseWarnings: 0,
+		},
+		{
+			// Pins the tolerance ParseManifests documents as LIVE ENOUGH: upstream's
+			// UnmarshalToUnstructured guards for a literal "null" manifest, and such
+			// a document contributes nothing — no manifest, no error, and the
+			// documents around it are unaffected.
+			name:              "a literal null document contributes nothing",
+			content:           "null\n---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: after",
+			wantManifests:     1,
+			wantParseErrors:   0,
 			wantParseWarnings: 0,
 		},
 		{
@@ -732,13 +743,13 @@ data:
 	}
 }
 
-// TestApiGroupUsesApimachinery pins the group split, including the shape a
+// TestAPIGroupUsesApimachinery pins the group split, including the shape a
 // hand-rolled strings.Index read differently: an apiVersion with more than one
 // slash is invalid, and apimachinery rejects it rather than treating the first
 // segment as a group — so such a resource keys as if it were core-group. Nothing
 // valid reaches that row; it is here so the swap's one behavior change is
 // recorded rather than discovered.
-func TestApiGroupUsesApimachinery(t *testing.T) {
+func TestAPIGroupUsesApimachinery(t *testing.T) {
 	tests := map[string]string{
 		"v1":                   "",
 		"v1beta1":              "",
