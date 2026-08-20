@@ -845,16 +845,6 @@ func TestComputeKeyFloatingExternalRevisionBypasses(t *testing.T) {
 	}
 }
 
-// TestComputeKeyWithoutRepoClassificationKeepsLocalBehavior pins the nil-SameRepo
-// reading: the caller could not classify repositories, so the source takes the
-// local path exactly as it did before v7. The only caller sets SameRepo; this is
-// what keeps a KeyInput built without it from silently bypassing everything.
-func TestComputeKeyWithoutRepoClassificationKeepsLocalBehavior(t *testing.T) {
-	in := extGitInput("main", "kustomize")
-	in.SameRepo = nil
-	mustKey(t, in)
-}
-
 // TestComputeKeyEmptySourceRepoURLIsLocal pins the second emptiness guard of the
 // v7 branch. render.isExternalSource requires BOTH URLs to be known before it
 // calls a source external, so a source with no repoURL renders from the local
@@ -902,6 +892,12 @@ func TestComputeKeyEmptySourceRepoURLIsLocal(t *testing.T) {
 // caller passes a nil SameRepo (app.sameRepoMatcher), and every source must keep
 // the local path the renderer will use for it. A closure answering "not the same
 // repo" for everything would flip every source to external in the key alone.
+//
+// The first assertion is also the whole nil-SameRepo contract v7 documented — the
+// source is keyed rather than bypassed, so a KeyInput built without a classifier
+// (the only production caller always passes one) cannot silently stop caching.
+// The second is what makes the pin real: being keyed is not enough, the key has
+// to be keyed from LOCAL content, or both sides of a diff share it.
 func TestComputeKeyUnknownLocalRepoKeepsEveryLocalSource(t *testing.T) {
 	in := extGitInput("main", "kustomize")
 	in.SameRepo = nil
