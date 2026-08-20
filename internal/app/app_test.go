@@ -2313,3 +2313,64 @@ func TestProcessApplicationsNewChildRequeuesClusterQueued(t *testing.T) {
 		t.Errorf("early-child base renders = %d, want 1 (premature wave-0 render only)", childBaseRenders)
 	}
 }
+
+// TestFilterAffectedAppsSkipsOCISources pins the reason OCI-artifact support
+// needed no selection change: an oci:// repoURL can never equal the diffed git
+// repository's URL, so the source is skipped by the URL check BEFORE
+// source.Path containment could match a same-named local directory.
+//
+// That claim is load-bearing and easy to break from a distance. An OCI-artifact
+// source's Path names a directory INSIDE the pulled artifact, so if
+// NormalizeRepoURL ever mapped an oci:// URL onto the local repository — or the
+// URL check moved after containment — every repository with a top-level
+// `manifests/` would start reporting artifact apps that read nothing from it.
+// A false-positive app appears in every report and renders on both sides, so it
+// costs a registry pull too.
+//
+// The fixture is built so BOTH of those regressions fail it, which is why the
+// artifact URL is the local repository's URL with a different SCHEME rather than
+// an unrelated registry. Only the scheme separates them, so a NormalizeRepoURL
+// that ever stripped or unified schemes — the plausible "simplification" —
+// normalizes the two to the same string, the artifact source passes the URL
+// check, and containment then matches its manifests/ path. With unrelated URLs
+// that mutation would still leave them unequal and the test would pass through
+// it. Both mutations were run against this fixture; each selects the artifact
+// app.
+//
+// The remote-chart entry is here as documentation, not protection: a chart
+// source is held out by its EMPTY Path and by helmLocalFilesAffected's chart
+// skip, which TestHelmLocalFilesAffected_RemoteChart is the pin for.
+func TestFilterAffectedAppsSkipsOCISources(t *testing.T) {
+	// The local repo and the artifact differ ONLY by scheme.
+	const localRepo = "https://ghcr.io/acme/artifactchart"
+
+	ociApp := testutil.TestAppMultiSource("oci-artifact-app", "argocd", []cluster.ApplicationSource{{
+		RepoURL:        "oci://ghcr.io/acme/artifactchart",
+		TargetRevision: "6.7.0",
+		Path:           "manifests",
+	}})
+	chartApp := testutil.TestAppMultiSource("oci-chart-app", "argocd", []cluster.ApplicationSource{{
+		RepoURL:        "ghcr.io/acme",
+		Chart:          "mychart",
+		TargetRevision: "6.7.0",
+	}})
+	// A local app sharing that path proves the change really does touch it, so a
+	// zero result for the two above cannot be a mis-specified changed-file list.
+	localApp := testutil.TestApp("local-app", "argocd", localRepo, "manifests")
+
+	cfg := &config.Config{RepoURL: localRepo}
+	logger := log.New(nil)
+	logger.SetLevel(log.FatalLevel)
+	app := &App{cfg: cfg, logger: logger}
+
+	changed := testutil.TestChangedFiles([]string{"manifests/deployment.yaml"}, nil, nil)
+	got := app.filterAffectedApps([]cluster.Application{ociApp, chartApp, localApp}, changed)
+
+	var names []string
+	for _, a := range got {
+		names = append(names, a.Name)
+	}
+	if len(names) != 1 || names[0] != "local-app" {
+		t.Errorf("filterAffectedApps() = %v, want only [local-app]: a remote source's path names a directory inside the artifact or chart, not in this repository", names)
+	}
+}
