@@ -731,3 +731,48 @@ data:
 		t.Errorf("expected both [base] and [target] warnings, got %v", result.ParseWarnings)
 	}
 }
+
+// TestApiGroupUsesApimachinery pins the group split, including the shape a
+// hand-rolled strings.Index read differently: an apiVersion with more than one
+// slash is invalid, and apimachinery rejects it rather than treating the first
+// segment as a group — so such a resource keys as if it were core-group. Nothing
+// valid reaches that row; it is here so the swap's one behavior change is
+// recorded rather than discovered.
+func TestApiGroupUsesApimachinery(t *testing.T) {
+	tests := map[string]string{
+		"v1":                   "",
+		"v1beta1":              "",
+		"apps/v1":              "apps",
+		"cert-manager.io/v1":   "cert-manager.io",
+		"argoproj.io/v1alpha1": "argoproj.io",
+		"":                     "",
+		"a/b/c":                "",
+	}
+	for apiVersion, want := range tests {
+		if got := apiGroup(apiVersion); got != want {
+			t.Errorf("apiGroup(%q) = %q, want %q", apiVersion, got, want)
+		}
+	}
+}
+
+// TestManifestKeyOmitsEmptySegments pins the identity format apiGroup feeds:
+// namespace and group are dropped when empty, so a core-group cluster-scoped
+// resource reads as "Kind/name" in a report rather than carrying empty segments —
+// the reason Key() is not gitops-engine's ResourceKey.String(), which always
+// prints four.
+func TestManifestKeyOmitsEmptySegments(t *testing.T) {
+	tests := []struct {
+		m    Manifest
+		want string
+	}{
+		{Manifest{APIVersion: "v1", Kind: "Namespace", Name: "team"}, "Namespace/team"},
+		{Manifest{APIVersion: "v1", Kind: "ConfigMap", Name: "cm", Namespace: "apps"}, "apps/ConfigMap/cm"},
+		{Manifest{APIVersion: "apps/v1", Kind: "Deployment", Name: "web", Namespace: "apps"}, "apps/apps/Deployment/web"},
+		{Manifest{APIVersion: "rbac.authorization.k8s.io/v1", Kind: "ClusterRole", Name: "admin"}, "rbac.authorization.k8s.io/ClusterRole/admin"},
+	}
+	for _, tt := range tests {
+		if got := tt.m.Key(); got != tt.want {
+			t.Errorf("Key() = %q, want %q", got, tt.want)
+		}
+	}
+}

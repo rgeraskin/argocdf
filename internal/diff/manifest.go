@@ -9,6 +9,7 @@ import (
 
 	"github.com/charmbracelet/log"
 	"gopkg.in/yaml.v3"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 // Manifest represents a parsed Kubernetes manifest.
@@ -49,11 +50,19 @@ func (m *Manifest) Key() string {
 // apiGroup returns the API group portion of an apiVersion string.
 // For "group/version" (e.g. "cert-manager.io/v1") it returns the group; for a
 // core-group apiVersion (e.g. "v1") it returns an empty string.
+//
+// The split is apimachinery's own, the same function that builds a GroupVersion
+// from this field everywhere in Kubernetes, rather than a hand-rolled
+// strings.Index. One behavior follows from that and is pinned: an apiVersion with
+// more than one slash is INVALID, and ParseGroupVersion rejects it instead of
+// treating the first segment as a group, so such a resource keys as if it were in
+// the core group. Nothing valid reaches that branch.
 func apiGroup(apiVersion string) string {
-	if i := strings.Index(apiVersion, "/"); i >= 0 {
-		return apiVersion[:i]
+	gv, err := schema.ParseGroupVersion(apiVersion)
+	if err != nil {
+		return ""
 	}
-	return ""
+	return gv.Group
 }
 
 // ManifestParser parses YAML manifests.
