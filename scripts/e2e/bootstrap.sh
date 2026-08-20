@@ -264,6 +264,75 @@ for v in 0.1.0 0.2.0; do
     "oci://$REGISTRY_HOST/charts" --insecure-skip-tls-verify >/dev/null 2>&1 \
     || { echo "chart push failed for private-app $v" >&2; exit 1; }
 done
+
+# Seed a PLAIN (non-helm) OCI artifact: one application/vnd.oci.image.layer.v1.tar+gzip
+# layer under a config media type that is NOT helm's, which is what sends
+# ArgoCD's OCI client down its non-helm extraction path - the layer's contents
+# land at the extraction root with NO top-level directory stripped, where a
+# `helm push`ed chart has exactly that stripped. case/plain-oci-artifact renders
+# it with `path: manifests`, so it is also the only case that exercises the
+# non-helm entries of argocdf's own render.DefaultOCILayerMediaTypes.
+#
+# Pushed with curl against the registry API rather than oras/skopeo/crane: none
+# of them is otherwise needed, and the suite's dependency list is a cost every
+# contributor and CI runner pays. Rebuilt and re-pushed every bootstrap rather
+# than skipped when the tag exists - a stale tag serving an edited fixture is a
+# worse failure than orphaned blobs in a throwaway registry - and with no
+# reproducibility flags, since bsdtar and GNU tar spell them differently and the
+# digest is not an input to anything the suite pins.
+digest_of() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -d' ' -f1
+  else shasum -a 256 | cut -d' ' -f1; fi
+}
+push_blob() { # <file> <digest> -> prints nothing, fails loudly
+  local loc sep
+  loc=$(curl -ksS -u e2e:e2e -X POST -D - -o /dev/null \
+        "https://$REGISTRY_HOST/v2/artifacts/plain-app/blobs/uploads/" \
+        | tr -d '\r' | awk '/^[Ll]ocation:/ {print $2}')
+  # Name the real failure: without this, a refused upload SESSION (registry not
+  # up, auth broken) leaves $loc empty and the error below blames the blob PUT.
+  [ -n "$loc" ] || { echo "blob upload session refused by $REGISTRY_HOST" >&2; exit 1; }
+  case "$loc" in https://*) ;; *) loc="https://$REGISTRY_HOST$loc" ;; esac
+  sep='?'; case "$loc" in *\?*) sep='&' ;; esac
+  curl -ksSf -u e2e:e2e -X PUT -H 'Content-Type: application/octet-stream' \
+       --data-binary "@$1" "$loc${sep}digest=sha256:$2" -o /dev/null \
+    || { echo "blob upload failed for $1" >&2; exit 1; }
+}
+artifact=$(mktemp -d)
+( cd bootstrap/artifacts/plain-app && find . -type f ! -name README.md \
+  | LC_ALL=C sort | tar -cf - -T - ) | gzip -n > "$artifact/layer.tgz"
+printf '{}' > "$artifact/config.json"
+layer_digest=$(digest_of < "$artifact/layer.tgz")
+layer_size=$(wc -c < "$artifact/layer.tgz" | tr -d ' ')
+config_digest=$(digest_of < "$artifact/config.json")
+config_size=$(wc -c < "$artifact/config.json" | tr -d ' ')
+push_blob "$artifact/config.json" "$config_digest"
+push_blob "$artifact/layer.tgz" "$layer_digest"
+cat > "$artifact/manifest.json" <<JSON
+{
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.manifest.v1+json",
+  "config": {
+    "mediaType": "application/vnd.oci.empty.v1+json",
+    "digest": "sha256:$config_digest",
+    "size": $config_size
+  },
+  "layers": [
+    {
+      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+      "digest": "sha256:$layer_digest",
+      "size": $layer_size
+    }
+  ]
+}
+JSON
+curl -ksSf -u e2e:e2e -X PUT \
+  -H 'Content-Type: application/vnd.oci.image.manifest.v1+json' \
+  --data-binary "@$artifact/manifest.json" \
+  "https://$REGISTRY_HOST/v2/artifacts/plain-app/manifests/1.0.0" -o /dev/null \
+  || { echo "plain artifact manifest push failed" >&2; exit 1; }
+rm -rf "$artifact"
+
 rm -rf "$seed"
 # ------------------------------------------------------------------------------
 
