@@ -433,7 +433,7 @@ func TestComputeSummary(t *testing.T) {
 							{Kind: "ConfigMap", Name: "cm1"},
 						},
 						ParseWarnings: []string{
-							`resource ConfigMap/cm1: duplicate key "foo" (using last value)`,
+							"[target] duplicate manifest ConfigMap/cm1: 2 documents share this identity; ArgoCD will only apply one",
 						},
 					},
 				},

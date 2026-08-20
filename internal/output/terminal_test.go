@@ -107,11 +107,11 @@ func TestTerminalWriterWriteAppDiff(t *testing.T) {
 						{Kind: "ConfigMap", Namespace: "default", Name: "newcm"},
 					},
 					ParseWarnings: []string{
-						`resource ConfigMap/newcm: duplicate key "foo" (using last value)`,
+						"[target] duplicate manifest default/ConfigMap/newcm: 2 documents share this identity; ArgoCD will only apply one",
 					},
 				},
 			},
-			wantOutput: []string{"test-app", "1 warning(s)", "duplicate key", "1 added"},
+			wantOutput: []string{"test-app", "1 warning(s)", "duplicate manifest", "1 added"},
 		},
 		{
 			name:   "app with changes in fields format",

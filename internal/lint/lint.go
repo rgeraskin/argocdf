@@ -168,7 +168,7 @@ type linterID struct {
 //
 //	[base] [lint-kyverno#1/require-pinned-images] Deployment/web: images must be pinned
 //	[base] [lint-kyverno#1] not linted: no policies in "policies/kyverno"
-//	[base] resource ConfigMap/cm: duplicate key "a" (using last value)
+//	[base] duplicate manifest ConfigMap/cm: 2 documents share this identity; ArgoCD will only apply one
 //
 // A bracket CONTINUING into a policy is a finding (a rule matched a resource, and
 // the text after it is the tool's). A bracket that ends at the linter is argocdf

@@ -237,9 +237,8 @@ type ManifestSetDiff struct {
 	ParseErrors []string
 
 	// ParseWarnings contains non-fatal issues from both old and new content
-	// (e.g., duplicate map keys resolved with last-wins semantics, or multiple
-	// rendered documents sharing the same manifest identity). The affected
-	// documents are still kept and diffed.
+	// (e.g., multiple rendered documents sharing the same manifest identity).
+	// The affected documents are still kept and diffed.
 	ParseWarnings []string
 }
 
