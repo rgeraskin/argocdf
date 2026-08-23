@@ -20,6 +20,32 @@
 # error card's closing tags and the start of the summary section - excluding all of it
 # from byte comparison for that format forever. Neither observed wording contains
 # either character.
+# The API-version COUNT inside an elided render error (`--helm-api-versions <309
+# elided>`) is the SIZE of the cluster's advertised API set, which describes the
+# CLUSTER rather than argocdf: the same failure quotes 309 against the cluster that
+# motivated the eliding and 107 against this one. Pinning the number would make the
+# expectation churn on every E2E_KIND_NODE_IMAGE bump for a reason the case says
+# nothing about, so the digits collapse to <N> and the MARKER - what such a case
+# actually pins - is kept: a regression that stops eliding brings the whole list
+# back and still fails. Both bracket spellings are handled because markdown and
+# HTML escape them.
+#
+# It is ALSO what the two bootstrap modes need, though bootstrap.sh now equalizes
+# everything it cheaply can (ArgoCD's applicationset/appproject CRDs and the widget
+# CRD the controller-backed mode gets by syncing a fixture): metrics-server's
+# AGGREGATED metrics.k8s.io/v1beta1 stays baseline-only, 3 entries out of 107. See
+# bootstrap.sh's header for why that one cannot be applied as a manifest.
+#
+# The (helm-)? alternation deliberately covers a spelling that should never REACH a
+# report - argocdf's helm-side eliding is log-records-only, because ArgoCD strips
+# that list from the error it RETURNS - so do not read it as dead and delete it. It
+# is what makes this rule degrade gracefully if that upstream strip ever stops: the
+# flood would arrive already elided and get its count collapsed here, instead of
+# pinning a mode-dependent number. And it cannot hollow the tripwire that would
+# catch such a change, because case/helm-schema-fail pins upstream's OWN
+# `<api versions removed>` marker, which carries no count for this rule to touch and
+# passes through verbatim - so that case still fails on the text that changed.
+#
 # No in-place sed: BSD and GNU sed disagree on -i syntax, and Linux CI must
 # run this too.
 # Usage: normalize.sh <file>   (in place)
@@ -36,5 +62,6 @@ grep -v \
       -e 's#[^ `"]*/argocdf-worktree-[0-9]+#<worktree>#g' \
       -e 's#[^ `"]*/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}#<tempfile>#g' \
       -e 's#tls: failed to verify certificate: [^<&]*#tls: failed to verify certificate: <platform-specific>#g' \
+      -e 's#(--(helm-)?api-versions) (<|&lt;)[0-9]+ elided(>|&gt;)#\1 \3N elided\4#g' \
       > "$tmp" || true
 command mv -f "$tmp" "$f"
