@@ -1400,7 +1400,8 @@ func (a *App) processOneApp(ctx context.Context, queuedApp *diff.QueuedApp) (*ty
 // renderBranch renders an application from the given ephemeral worktree,
 // consulting the persistent render cache first. On a cache hit it returns the
 // cached manifests and SKIPS rendering entirely (the main speedup). On a miss
-// it renders from the worktree path and stores the result.
+// it renders from the worktree path and stores the result. A spec ArgoCD would
+// refuse is an error before either of those happens (see the guard below).
 //
 // worktreePath is the fixed checkout to render from; commit is its resolved
 // hash (used for the cache key). label is a human-readable branch/ref name for
@@ -1411,6 +1412,25 @@ func (a *App) renderBranch(
 	app *cluster.Application,
 	worktreePath, commit, label, missingKind string,
 ) ([]byte, types.SourceType, error) {
+	// Refuse a spec ArgoCD would refuse, BEFORE the cache lookup: an entry stored
+	// while the spec was still valid would otherwise answer for it, and the
+	// report would show manifests for an application the controller never
+	// rendered.
+	//
+	// Per SIDE, which is the point rather than an accident - the two sides carry
+	// two different specs (appOld/appNew in processOneApp), so a PR that BREAKS a
+	// child's spec fails here on the target side while the base side rendered
+	// fine, and one that FIXES it fails on the base side. Either way the caller
+	// turns this into the application's AppDiff.Error, so the report says which
+	// side's spec ArgoCD refuses and every other application still diffs.
+	//
+	// Not in filterAffectedApps: dropping the application during selection would
+	// remove it from the report, which is the exact failure this guard exists to
+	// end.
+	if err := cluster.ValidateSourceSpec(app); err != nil {
+		return nil, "", err
+	}
+
 	// Compute the cache key from the precomputed commit (git rev-parse reads the
 	// object database directly). An empty key means "bypass the cache".
 	key, haveKey := a.renderCacheKey(app, commit)
