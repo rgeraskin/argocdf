@@ -448,10 +448,12 @@ func (h *logrusForwarder) Fire(e *logrus.Entry) error {
 		level = logrus.DebugLevel
 	}
 
-	// Elided unconditionally, --verbose included: ArgoCD quotes the whole helm
-	// argv, and one --api-versions pair per advertised group/version AND kind
-	// makes that ~16,000 characters whose last ~180 are the actual failure. The
-	// list is never the diagnosis and is reproducible from the cluster.
+	// Elided unconditionally, --verbose included: ArgoCD quotes the whole argv,
+	// and one API-version pair per advertised group/version AND kind makes that
+	// ~16,000 characters whose last ~180 are the actual failure. The list is
+	// never the diagnosis and is reproducible from the cluster. Both spellings
+	// travel this stream — `--api-versions` from `helm template`,
+	// `--helm-api-versions` from `kustomize build --enable-helm`.
 	msg := render.ElideAPIVersions(e.Message)
 
 	switch level {

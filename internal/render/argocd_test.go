@@ -3,6 +3,7 @@ package render
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -916,6 +917,15 @@ func TestElideAPIVersions(t *testing.T) {
 	for i := 0; i < 309; i++ {
 		fmt.Fprintf(&flood, "--api-versions group%d.example.com/v1 ", i)
 	}
+	// The same set as kustomize is handed it: 309 is what the cluster behind the
+	// motivating report advertises, and the pairs END the argv there.
+	var kustomizeFlood strings.Builder
+	for i := 0; i < 309; i++ {
+		if i > 0 {
+			kustomizeFlood.WriteString(" ")
+		}
+		fmt.Fprintf(&kustomizeFlood, "--helm-api-versions group%d.example.com/v1", i)
+	}
 	tests := []struct {
 		name string
 		in   string
@@ -949,6 +959,42 @@ func TestElideAPIVersions(t *testing.T) {
 			want: "`helm template . --api-versions <3 elided>` failed exit status 1: Error: boom",
 		},
 		{
+			// The shape that motivated eliding the RETURNED error: util/kustomize
+			// has no apiVersionsRemover, so `kustomize build --enable-helm`'s
+			// failure travels into AppDiff.Error — and a PR comment — intact. The
+			// pairs are the LAST arguments kustomize gets, so the closing backtick
+			// sits flush against the final value on every such failure, not only
+			// on the helm.skipCrds shape.
+			name: "kustomize's --helm-api-versions collapses the same way",
+			in: "`kustomize build /tmp/w/tree/env/prod/gateway-api --enable-helm --load-restrictor=LoadRestrictionsNone --helm-kube-version 1.34.9 " +
+				kustomizeFlood.String() + "` failed exit status 1: Error: accumulating components: cycle detected",
+			want: "`kustomize build /tmp/w/tree/env/prod/gateway-api --enable-helm --load-restrictor=LoadRestrictionsNone --helm-kube-version 1.34.9 " +
+				"--helm-api-versions <309 elided>` failed exit status 1: Error: accumulating components: cycle detected",
+		},
+		{
+			// The two spellings are textually disjoint — `--helm-api-versions`
+			// holds no `--api-versions` substring, since only ONE dash precedes
+			// `api-versions` there — so the helm pattern must not shorten the
+			// kustomize flag to `--helm<N elided>`, and each replacement keeps its
+			// own name so the elided line still says which tool ran.
+			name: "the helm pattern does not eat the kustomize flag's tail",
+			in:   "cmd --helm-api-versions a/v1 --helm-api-versions b/v1 --helm-api-versions c/v1",
+			want: "cmd --helm-api-versions <3 elided>",
+		},
+		{
+			name: "a short kustomize list is left alone too",
+			in:   "cmd --helm-api-versions v1 --helm-api-versions v1/ConfigMap --enable-helm",
+			want: "cmd --helm-api-versions v1 --helm-api-versions v1/ConfigMap --enable-helm",
+		},
+		{
+			// Upstream already strips helm's list from the error it RETURNS, and
+			// that marker must survive untouched: it is what case/helm-schema-fail
+			// pins as the tripwire for a bump that stops stripping.
+			name: "upstream's own marker is left alone",
+			in:   "`helm template .` failed exit status 1: <api versions removed> Error: boom",
+			want: "`helm template .` failed exit status 1: <api versions removed> Error: boom",
+		},
+		{
 			name: "nothing to elide is returned unchanged",
 			in:   "`helm dependency build` failed exit status 1: Error: no cached repo found",
 			want: "`helm dependency build` failed exit status 1: Error: no cached repo found",
@@ -960,5 +1006,165 @@ func TestElideAPIVersions(t *testing.T) {
 				t.Errorf("ElideAPIVersions() =\n%q\nwant\n%q", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestKustomizeAPIVersionFloodIsElidedInTheReturnedError is the end-to-end pin
+// for the difference between the two tools: ArgoCD's helm wrapper strips its own
+// --api-versions list from the error it RETURNS (util/helm/cmd.go:449-455), but
+// util/kustomize has no equivalent — Build hands back executil.Run's error
+// verbatim, so a broken kustomization reaches AppDiff.Error, and from there a PR
+// comment, as one ~17,000-character line whose last ~290 characters are the
+// diagnosis.
+//
+// This renders a REAL failing `kustomize build --enable-helm` with a real
+// API-version list rather than asserting on a hand-written string, because what
+// broke in production was not the regex: it was that nothing applied it to the
+// returned error at all. A message-only test passes with the call site missing.
+func TestKustomizeAPIVersionFloodIsElidedInTheReturnedError(t *testing.T) {
+	requireKustomize(t)
+
+	repoDir := t.TempDir()
+	appDir := filepath.Join(repoDir, "overlay")
+	if err := os.MkdirAll(appDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A kustomization that cannot build. The specific failure does not matter —
+	// only that kustomize exits non-zero AFTER util/exec has quoted the argv.
+	if err := os.WriteFile(filepath.Join(appDir, "kustomization.yaml"),
+		[]byte("resources:\n  - does-not-exist.yaml\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The size a live cluster contributes: one pair per group/version AND kind.
+	apiVersions := make([]string, 0, 309)
+	for i := 0; i < 309; i++ {
+		apiVersions = append(apiVersions, fmt.Sprintf("group%d.example.com/v1", i))
+	}
+
+	app := &cluster.Application{
+		ObjectMeta: metav1.ObjectMeta{Name: "kust-broken"},
+		Spec: cluster.ApplicationSpec{
+			Source: &cluster.ApplicationSource{
+				RepoURL: "https://github.com/example/repo.git",
+				Path:    "overlay",
+			},
+			Destination: cluster.ApplicationDestination{Namespace: "default"},
+		},
+	}
+
+	r := mustNewArgoCDRenderer(t, RenderOptions{
+		// --helm-api-versions is only appended when the build options enable
+		// helm (util/kustomize/kustomize.go:419, kustomize >= 5.3).
+		KustomizeEnableHelm: true,
+		KubeVersion:         "1.34.9",
+		APIVersions:         apiVersions,
+	})
+	_, err := r.RenderApplication(context.Background(), app, repoDir, "abcdef1234567890")
+	if err == nil {
+		t.Fatal("RenderApplication() expected an error for an unbuildable kustomization, got nil")
+	}
+	msg := err.Error()
+
+	if !strings.Contains(msg, "--helm-api-versions <309 elided>") {
+		t.Errorf("returned error does not carry the elided list; got (%d chars):\n%s", len(msg), msg)
+	}
+	// The flood itself must be gone, not merely summarized somewhere in it.
+	if strings.Contains(msg, "group300.example.com/v1") {
+		t.Errorf("returned error still carries individual API versions (%d chars):\n%s", len(msg), msg)
+	}
+	// Exactly one mention of the flag survives — the marker — so the flood is
+	// gone rather than summarized somewhere inside it.
+	if n := strings.Count(msg, "--helm-api-versions"); n != 1 {
+		t.Errorf("returned error mentions --helm-api-versions %d times, want 1:\n%s", n, msg)
+	}
+	// The point of eliding: the line becomes readable. The unelided argv for this
+	// same render is ~13,000 characters; the bound is loose because both the
+	// t.TempDir() path and kustomize's own diagnosis appear twice in it.
+	if len(msg) > 2000 {
+		t.Errorf("returned error is %d chars, want a readable line:\n%s", len(msg), msg)
+	}
+	// And the diagnosis — the reason the whole line exists — survives.
+	if !strings.Contains(msg, "does-not-exist.yaml") {
+		t.Errorf("returned error lost the actual failure:\n%s", msg)
+	}
+	// The render root is redacted the way ArgoCD redacts it in the command list
+	// it returns. kustomize is quoted with an ABSOLUTE app path and names
+	// absolute paths in its own diagnoses, so without this a PR comment carries
+	// an ephemeral worktree directory — internal state that is gone by the time
+	// anyone reads it and differs between the two sides of one diff. The e2e
+	// review gate refuses to pin it, which is how this was found.
+	if strings.Contains(msg, repoDir) {
+		t.Errorf("returned error leaks the render root %q:\n%s", repoDir, msg)
+	}
+	if resolved, err := filepath.EvalSymlinks(repoDir); err == nil && strings.Contains(msg, resolved) {
+		// macOS resolves the temp root through a symlink and kustomize reports
+		// the RESOLVED path while the argv carries the one argocdf passed, so
+		// redacting one spelling is not enough.
+		t.Errorf("returned error leaks the resolved render root %q:\n%s", resolved, msg)
+	}
+	if !strings.Contains(msg, "kustomize build ./overlay") {
+		t.Errorf("redacted argv should read as a runnable command:\n%s", msg)
+	}
+}
+
+// TestRedactRenderRootHandlesBothSpellings pins the symlink half specifically:
+// on macOS the temp root resolves through /var -> /private/var, and kustomize
+// reports the RESOLVED path while the argv carries the one argocdf passed. A
+// redaction of only the given form looks correct on a Linux CI runner and leaks
+// on a developer's machine, which is the worst way for this to fail.
+func TestRedactRenderRootHandlesBothSpellings(t *testing.T) {
+	root := t.TempDir()
+	resolved, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	msg := fmt.Sprintf("`kustomize build %s/app` failed: cycle detected: candidate root '%s/app'", root, resolved)
+	got := redactRenderRoot(msg, root)
+	if strings.Contains(got, root) || strings.Contains(got, resolved) {
+		t.Errorf("redactRenderRoot left a root behind:\n%s", got)
+	}
+	if want := "`kustomize build ./app` failed: cycle detected: candidate root './app'"; got != want {
+		t.Errorf("redactRenderRoot() =\n%q\nwant\n%q", got, want)
+	}
+
+	// Guards that would turn a redaction into corruption of every absolute path
+	// in the message.
+	for _, root := range []string{"", "/"} {
+		in := "`kustomize build /srv/app` failed"
+		if got := redactRenderRoot(in, root); got != in {
+			t.Errorf("redactRenderRoot(%q) = %q, want it untouched", root, got)
+		}
+	}
+}
+
+// TestElideAPIVersionsErrPreservesTheErrorChain pins that rewriting the MESSAGE
+// does not cost the identity. Nothing tests a render error with errors.Is today,
+// so this guards a property rather than a live caller — but the wrapper is the
+// only thing standing between a rewritten message and a silently anonymous
+// error, and it is free.
+func TestElideAPIVersionsErrPreservesTheErrorChain(t *testing.T) {
+	var flood strings.Builder
+	for i := 0; i < 5; i++ {
+		fmt.Fprintf(&flood, "--helm-api-versions group%d.example.com/v1 ", i)
+	}
+	wrapped := fmt.Errorf("`kustomize build . %s` failed: %w", flood.String(), context.Canceled)
+
+	got := reportableRenderError(wrapped, "")
+	if !strings.Contains(got.Error(), "--helm-api-versions <5 elided>") {
+		t.Errorf("message not elided: %s", got.Error())
+	}
+	if !errors.Is(got, context.Canceled) {
+		t.Errorf("errors.Is(got, context.Canceled) = false; the elided wrapper broke the chain")
+	}
+
+	// An error with nothing to elide keeps its own identity rather than gaining a
+	// wrapper that only re-states it.
+	plain := errors.New("`helm dependency build` failed exit status 1")
+	if got := reportableRenderError(plain, ""); got != plain {
+		t.Errorf("reportableRenderError wrapped an untouched error: %#v", got)
+	}
+	if reportableRenderError(nil, "") != nil {
+		t.Error("reportableRenderError(nil) must stay nil")
 	}
 }

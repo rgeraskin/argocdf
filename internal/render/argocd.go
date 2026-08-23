@@ -382,7 +382,15 @@ func (r *ArgoCDRenderer) renderSource(
 		)
 	}()
 	if err != nil {
-		return nil, "", err
+		// The one error here that reaches a REPORT carrying argv noise, and so
+		// the one place both message transforms belong: util/kustomize returns
+		// `kustomize build`'s failure verbatim, so a broken kustomization
+		// reaches AppDiff.Error — and a PR comment — as ~17,000 characters of
+		// --helm-api-versions around an absolute worktree path, with the
+		// diagnosis at the very end. helm shows neither: ArgoCD strips its
+		// API-version list from the returned error itself and runs it with a
+		// WorkDir, so its argv says `helm template .`.
+		return nil, "", reportableRenderError(err, repoRoot)
 	}
 
 	manifests, err := manifestsToYAML(resp.Manifests)
@@ -392,56 +400,180 @@ func (r *ArgoCDRenderer) renderSource(
 	return manifests, mapSourceType(resp.SourceType), nil
 }
 
-// apiVersionsRun matches a consecutive run of `--api-versions <value>` pairs.
+// apiVersionsFlags are the two spellings ArgoCD passes the cluster's API-version
+// set under, and they are NOT interchangeable: `helm template` takes
+// `--api-versions` (util/helm/cmd.go:437) while `kustomize build --enable-helm`
+// takes `--helm-api-versions` (util/kustomize/kustomize.go:424, kustomize >=5.3).
+//
+// The two are textually DISJOINT — `--helm-api-versions` contains no
+// `--api-versions` substring, since only ONE dash precedes `api-versions` there —
+// which is both why upstream's helm-only remover never fired on a kustomize argv
+// and why these patterns can run in any order without matching each other's
+// output.
+var apiVersionsFlags = []string{"--helm-api-versions", "--api-versions"}
+
+// apiVersionsRuns matches a consecutive run of `<flag> <value>` pairs, one entry
+// per spelling.
+//
 // Values are group/version[/Kind], so they contain neither whitespace nor a
 // backtick: the run ends at the next unrelated argument (typically --include-crds)
 // rather than eating it, and — because util/exec formats a failure as
 // `<argv>` failed <cause> with the closing backtick flush against the last
 // argument — it stops before that backtick when the run ENDS the argv, which it
-// does whenever an app sets helm.skipCrds (nothing is appended after the pairs).
-// With a bare \S+ the backtick was swallowed and the line then read as though the
-// failure text were part of the quoted command.
-var apiVersionsRun = regexp.MustCompile("(?:--api-versions [^\\s`]+\\s*)+")
+// does whenever an app sets helm.skipCrds (nothing is appended after the pairs)
+// and on every `kustomize build`, where the pairs are the LAST arguments
+// unconditionally. With a bare \S+ the backtick was swallowed and the line then
+// read as though the failure text were part of the quoted command.
+var apiVersionsRuns = func() []*regexp.Regexp {
+	runs := make([]*regexp.Regexp, len(apiVersionsFlags))
+	for i, flag := range apiVersionsFlags {
+		runs[i] = regexp.MustCompile("(?:" + regexp.QuoteMeta(flag) + " [^\\s`]+\\s*)+")
+	}
+	return runs
+}()
 
 // minElidedAPIVersions is where eliding starts paying: a one- or two-entry list
 // is already readable, and replacing it would hide real information to save
 // nothing. A real cluster contributes hundreds.
 const minElidedAPIVersions = 3
 
-// ElideAPIVersions replaces runs of `--api-versions <value>` in an ArgoCD message
-// with their COUNT.
+// ElideAPIVersions replaces runs of `--api-versions <value>` (helm) and
+// `--helm-api-versions <value>` (kustomize) in an ArgoCD message with their
+// COUNT.
 //
-// ArgoCD passes one --api-versions pair per group/version AND per kind the
-// cluster advertises, so the `helm template` argv it logs (and quotes back in
-// every error) is ~16,000 characters of which the last ~180 are the actual
-// failure. GitHub truncates a PR comment line, terminals wrap it into a screenful,
-// and grep -o becomes useless — while the list itself is never the diagnosis, and
-// is reproducible from the cluster (or removable with --no-api-versions).
+// ArgoCD passes one pair per group/version AND per kind the cluster advertises,
+// so the argv it logs (and quotes back in every error) is ~16,000 characters of
+// which the last ~180 are the actual failure. GitHub truncates a PR comment line,
+// terminals wrap it into a screenful, and grep -o becomes useless — while the
+// list itself is never the diagnosis, and is reproducible from the cluster (or
+// removable with --no-api-versions).
 //
 // The count is kept rather than dropped because it is the one informative part:
-// it says whether argocdf passed the cluster's API set at all.
+// it says whether argocdf passed the cluster's API set at all. Each spelling
+// keeps its OWN name in the replacement, so the elided line still says which tool
+// ran.
 //
-// This is for LOG records only, and deliberately not applied to the error
-// GenerateManifests returns: ArgoCD strips the list there itself
-// (util/helm/cmd.go:449-455, leaving `<api versions removed>`), so an error
-// reaching a PR comment is already short. The log record is the one that escapes
-// that treatment, because util/exec logs the failure INSIDE the helm wrapper,
-// before it rewrites the message. Wrapping the returned error here as well is the
-// symmetry to refuse: it would be doing upstream's work a second time.
+// WHERE IT IS APPLIED DIFFERS PER TOOL, because upstream's own treatment does:
+//
+//   - helm — LOG RECORDS ONLY. ArgoCD strips the list from the error it RETURNS
+//     itself (util/helm/cmd.go:449-455, leaving `<api versions removed>`), so an
+//     error reaching AppDiff.Error and a PR comment is already short. The log
+//     record is the one that escapes that, because util/exec logs the failure
+//     INSIDE the helm wrapper, before it rewrites the message. Wrapping the
+//     returned error there as well is the symmetry to refuse: it would be doing
+//     upstream's work a second time.
+//   - kustomize — BOTH. util/kustomize has no equivalent of apiVersionsRemover:
+//     Build returns executil.Run's error verbatim (only the repo root is
+//     redacted, and only in the returned command list), so the flood travels
+//     intact into AppDiff.Error and straight into a PR comment. renderSource
+//     therefore elides the RETURNED error too, via elideAPIVersionsErr.
+//
+// Applying it to the returned error is a no-op for helm exactly while upstream
+// keeps stripping, so the one function can be used at both call sites without
+// re-doing upstream's work.
 func ElideAPIVersions(msg string) string {
-	return apiVersionsRun.ReplaceAllStringFunc(msg, func(run string) string {
-		n := strings.Count(run, "--api-versions ")
-		if n < minElidedAPIVersions {
-			return run
-		}
-		elided := fmt.Sprintf("--api-versions <%d elided>", n)
-		// Keep the run's own trailing separator, so the next argument stays
-		// separated (and a run at the very end gains no stray space).
-		if trimmed := strings.TrimRight(run, " \t\n"); len(trimmed) < len(run) {
-			return elided + run[len(trimmed):]
-		}
-		return elided
-	})
+	for i, run := range apiVersionsRuns {
+		flag := apiVersionsFlags[i]
+		msg = run.ReplaceAllStringFunc(msg, func(match string) string {
+			n := strings.Count(match, flag+" ")
+			if n < minElidedAPIVersions {
+				return match
+			}
+			elided := fmt.Sprintf("%s <%d elided>", flag, n)
+			// Keep the run's own trailing separator, so the next argument stays
+			// separated (and a run at the very end gains no stray space).
+			if trimmed := strings.TrimRight(match, " \t\n"); len(trimmed) < len(match) {
+				return elided + match[len(trimmed):]
+			}
+			return elided
+		})
+	}
+	return msg
+}
+
+// elidedAPIVersionsError carries a rewritten MESSAGE while Unwrap still reaches
+// the original error, so errors.Is/As keep working on a message the report has
+// rewritten.
+//
+// No caller tests a render error that way TODAY (argocdf's only errors.Is on a
+// wrapped error is the klog handler's context.Canceled check in main.go), so this
+// is a property kept rather than a bug fixed: a transform that rewrites a message
+// must not quietly cost the error its identity, and this return path can carry a
+// context error — GenerateManifests propagates a cancelled context out of the
+// exec it wraps — which is the one a future caller would most likely ask about.
+type elidedAPIVersionsError struct {
+	err error
+	msg string
+}
+
+func (e *elidedAPIVersionsError) Error() string { return e.msg }
+func (e *elidedAPIVersionsError) Unwrap() error { return e.err }
+
+// redactRenderRoot replaces the render's own root directory with "." in a
+// message, which is what ArgoCD does to the kustomize command list it
+// returns (util/kustomize/kustomize.go:409-411) — and ONLY there, never to the
+// error.
+//
+// Package-private on purpose, unlike ElideAPIVersions: this is only correct
+// where the root is KNOWN, which is the render. The log records main.go routes
+// carry the same absolute path, but that hook is a process-global logrus sink
+// with no per-render context to redact against — and a developer reading a log
+// locally has reason to want the real worktree, which a report's reader never
+// does.
+//
+// Every `kustomize build` failure quotes an argv whose first argument is the
+// ABSOLUTE app path, and kustomize's own diagnoses name absolute paths too (a
+// components cycle prints its root twice), so one broken kustomization put an
+// ephemeral worktree path into a PR comment three times. That is argocdf
+// internal state in a user-facing report: the directory is gone by the time
+// anyone reads it, it differs between the two sides of the same diff, and it
+// says nothing the application name does not.
+//
+// BOTH spellings of the root are redacted because the render and the tool can
+// name the same directory differently: macOS resolves the temp root through a
+// symlink (/var → /private/var), and kustomize reports the RESOLVED path while
+// the argv carries the one argocdf passed. Redacting only the given form leaves
+// the other in the report — which on a Linux CI runner looks fine and on a
+// developer's machine does not.
+//
+// "." rather than a placeholder: it is upstream's own choice for the same
+// substitution, and it leaves the message readable as a command someone could
+// run from the source root.
+func redactRenderRoot(msg, root string) string {
+	if root == "" || root == "/" {
+		return msg
+	}
+	roots := []string{root}
+	if resolved, err := filepath.EvalSymlinks(root); err == nil && resolved != root && resolved != "" && resolved != "/" {
+		roots = append(roots, resolved)
+	}
+	// LONGEST FIRST, because one spelling can CONTAIN the other: macOS resolves
+	// /var/... to /private/var/..., so redacting the short form first rewrites
+	// the long one's tail into "/private./app" and leaves a path the second pass
+	// can no longer find. Sorting by length needs no assumption about which
+	// direction a symlink points.
+	slices.SortFunc(roots, func(a, b string) int { return len(b) - len(a) })
+	for _, r := range roots {
+		msg = strings.ReplaceAll(msg, r, ".")
+	}
+	return msg
+}
+
+// reportableRenderError rewrites a GenerateManifests failure for the REPORT it
+// is about to become: the API-version flood collapses to its count and the
+// render root is redacted. Both are message-only, and the error is returned
+// UNWRAPPED when neither changed anything, so an untouched error keeps its own
+// identity and formatting.
+func reportableRenderError(err error, root string) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	clean := redactRenderRoot(ElideAPIVersions(msg), root)
+	if clean == msg {
+		return err
+	}
+	return &elidedAPIVersionsError{err: err, msg: clean}
 }
 
 // IsRetriedMissingDependencyLog reports whether an ArgoCD log message is the
