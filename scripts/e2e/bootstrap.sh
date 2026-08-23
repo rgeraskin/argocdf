@@ -25,11 +25,25 @@
 # the .status a controller writes. Expectations are therefore mode-agnostic -
 # regenerate on --static, verify on the controller-backed default.
 #
+# The API SET the modes advertise is part of that, and is kept equal deliberately
+# (see the CRDs applied under --static below) because it is a render input rather
+# than cluster trivia. ONE entry of it cannot cheaply be equalized: the
+# controller-backed mode runs metrics-server, whose AGGREGATED
+# metrics.k8s.io/v1beta1 API contributes 3 entries (107 against 104 on the pinned
+# node image). metrics-server exists only so the HPA in external-podinfo's source
+# can reach Healthy for the sync wait - nothing argocdf renders reads it - and it
+# is a running Deployment, not a manifest to apply: a bare APIService with no
+# endpoints makes discovery partially FAIL, so the count would depend on whether
+# a pod was Ready, which is worse than a stable difference. A report quoting the
+# API-version COUNT is therefore normalized (scripts/e2e/normalize.sh), which is
+# the right altitude regardless: the number describes the CLUSTER, not argocdf,
+# and would otherwise churn on every node-image bump.
+#
 # Env (single authority: the argocdf repo's .mise.toml [env]):
 #   E2E_KIND_NODE_IMAGE   pinned kind node image (k8s version + digest)
 #   E2E_ARGOCD_VERSION    ArgoCD version: the default installs all of it,
-#                          --static applies just its Application CRD from
-#                          upstream (keep = go.mod argo-cd version)
+#                          --static applies only its CRDs from upstream
+#                          (keep = go.mod argo-cd version)
 set -euo pipefail
 # Harness script (argocdf repo) operating on the e2e submodule's content.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -384,10 +398,29 @@ if ! $STATIC; then
   kubectl --context "$CTX" -n kube-system patch deployment metrics-server --type json \
     -p '[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
 else
-  # Only the Application CRD: argocdf just LISTS Application CRs. Sourced from
-  # the pinned upstream version instead of a vendored copy.
+  # ArgoCD's CRDs, from the pinned upstream version instead of vendored copies.
+  # argocdf only LISTS Application CRs, so application-crd alone is all it needs
+  # to RUN - applicationset and appproject are here because the cluster's
+  # advertised API SET is a render INPUT: it becomes helm's --api-versions and
+  # kustomize's --helm-api-versions, charts branch on
+  # .Capabilities.APIVersions.Has, and rendercache/key.go hashes it. A mode
+  # advertising a different set is a mode that can render differently, which is
+  # exactly what the header promises does not happen. Each CRD contributes its
+  # KIND entry (the argoproj.io/v1alpha1 group/version comes from any one of
+  # them), so the two missing ones were 2 entries of drift that no fixture
+  # happened to observe.
+  for crd in application applicationset appproject; do
+    kubectl --context "$CTX" apply --server-side --force-conflicts \
+      -f "https://raw.githubusercontent.com/argoproj/argo-cd/${ARGOCD_VERSION}/manifests/crds/${crd}-crd.yaml"
+  done
+  # Same reason from the other direction: the controller-backed mode gets this
+  # CRD by SYNCING apps/widget-operator, a helm chart with a crds/ dir that
+  # --include-crds applies, so a static cluster advertised no example.com/v1 at
+  # all. It is the ONLY fixture shipping a CRD; a new one has to be added here
+  # too, deliberately over scanning every fixture for CustomResourceDefinitions -
+  # the same choice the depth-2 Applications below are spelled out for.
   kubectl --context "$CTX" apply --server-side --force-conflicts \
-    -f "https://raw.githubusercontent.com/argoproj/argo-cd/${ARGOCD_VERSION}/manifests/crds/application-crd.yaml"
+    -f apps/widget-operator/crds/widget.yaml
   # --repo-creds cluster goes through ArgoCD's settings manager, which expects
   # the control-plane ConfigMap/Secret to exist (the default mode installs the
   # real ones with install.yaml, so these stubs must not be applied there).
