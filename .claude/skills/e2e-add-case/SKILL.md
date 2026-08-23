@@ -22,7 +22,7 @@ The modes are not interchangeable on an EXISTING cluster, and both bootstraps re
 ## 1. Choose the case type
 
 - **App-source case** (rendered content changes): the branch edits files under `e2e/apps/<dir>/`. Most cases.
-- **Spec case** (an Application's spec changes): the branch edits `e2e/charts/apps/values-apps.yaml` (the catalog). Covers helm/kustomize spec fields, child add/remove/spec-change.
+- **Spec case** (an Application's spec changes): the branch edits `e2e/charts/apps/values-apps.yaml` (the catalog). Covers helm/kustomize spec fields, child add/remove/spec-change. The entry must stay a spec ArgoCD would ACCEPT: every source needs a `repoURL` and either a `path` or a `chart` (an OCI artifact source takes `path: .`; a `chart` also needs a `targetRevision`). Anything else is an `InvalidSpecError` the controller never renders and argocdf now refuses, so the report carries `invalid Application spec` and the review gate fails the case unless `checks.grep` declares that marker with a `must:` line - dropping a `path` while editing a source is how this bites.
 - **New-app case** (needs a child app that doesn't exist yet): FIRST add the fixture dir + catalog entry to e2e **master** (commit), then `mise run e2e:bootstrap-static` (the cluster must learn the new child), then branch the actual change. A master catalog change shifts context lines in OTHER cases' root-app diffs - rebase every existing branch and regenerate ALL expectations (see step 7).
 
 ## 2. Create the branch

@@ -95,6 +95,14 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR/../../e2e" || exit 1
 
 REPORTS=(unified.diff md-fields.md md-unified.md html-side-by-side.html)
+
+# The marker argocdf leaves in a report for a spec ArgoCD REFUSES, and the literal
+# the invalid-spec rule below greps for. It must stay in step with the error
+# cluster.invalidSpec builds - a reword there would hollow that rule - which
+# TestReviewGateMarksTheInvalidSpecError enforces by reading THIS assignment and
+# asserting the error still contains it. One assignment, so that test has one
+# thing to find.
+INVALID_SPEC_MARKER='invalid Application spec'
 violations=0
 fail() { printf 'FAIL %s: %s\n' "$1" "$2"; violations=$((violations+1)); }
 
@@ -288,7 +296,34 @@ for dir in expected/*/; do
   ban "$name" "$rep" '\[lint(-[a-z]+)?#[0-9]+\] (exit status [0-9]+|timeout after|signal:)' \
     "pinned lint-adapter failure line (exit status/timeout/signal on a lint warning)"
   ban "$name" "$rep" 'with no report output' "pinned built-in lint adapter failure ('with no report output')"
+
   ban "$name" "$rep" 'unparsable report' "pinned built-in lint adapter failure ('unparsable report' - the tool's output format changed)"
+
+  # A spec ArgoCD REFUSES must never be pinned by accident. argocdf reports such
+  # an application as an error instead of a diff, so an unrealistic fixture - one
+  # no ArgoCD cluster would ever render - leaves $INVALID_SPEC_MARKER in the report
+  # where it used to leave a plausible clean diff. That silence is how
+  # case/oci-artifact-spelling stayed green for days against a spec the controller
+  # was refusing the whole time.
+  #
+  # Not a plain ban, because a case ABOUT spec validation legitimately pins it: the
+  # marker is allowed exactly where checks.grep DECLARES it with a must: line. So a
+  # deliberate case says so out loud and every accidental one fails, which is why
+  # this needs no per-case allowlist.
+  #
+  # That must: line has to carry the marker LITERALLY, which is the point rather
+  # than a limitation: a broad pattern an unrelated case already has (must:# Error:)
+  # would otherwise authorize an invalid-spec pin it says nothing about. Declaring
+  # means naming.
+  #
+  # unified.diff is enough: --regenerate writes every format from ONE run, so the
+  # marker cannot appear in one format only, and the cross-format count rule below
+  # ties them together anyway.
+  if [ -f "$rep"unified.diff ] && grep -q "$INVALID_SPEC_MARKER" "$rep"unified.diff; then
+    if ! grep -Eq "^must:.*$INVALID_SPEC_MARKER" "${dir}checks.grep" 2>/dev/null; then
+      fail "$name" "pins '$INVALID_SPEC_MARKER' (a spec ArgoCD REFUSES) with no must: line naming that literal - fix the fixture (every source needs a repoURL and either a path or a chart), or, if the case is ABOUT an invalid spec, declare it with must:<pattern containing '$INVALID_SPEC_MARKER'>"
+    fi
+  fi
   ban "$name" "$rep" 'no resolved kube context' "pinned built-in kyverno refusal (no resolved kube context)"
   ban "$name" "$rep" 'unusable policy directory' \
     "pinned built-in lint adapter failure ('unusable policy directory' - the path is not a readable directory)"

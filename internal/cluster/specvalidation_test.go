@@ -2,6 +2,8 @@ package cluster
 
 import (
 	"context"
+	"os"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -304,4 +306,46 @@ func upstreamConditions(t *testing.T, spec ApplicationSpec) (conditions []argoap
 	}}
 
 	return argo.ValidatePermissions(context.Background(), &spec, permissive, permissiveDB{})
+}
+
+// TestReviewGateMarksTheInvalidSpecError keeps the e2e review gate in step with
+// the error this package builds.
+//
+// The gate refuses any pinned report carrying the invalid-spec marker unless the
+// case declares it, which is what stops an unrealistic fixture - one no ArgoCD
+// cluster would render - from being pinned as though it were a real diff. That
+// rule greps for a literal, so rewording invalidSpec's prefix would silently
+// disarm it: the reports would stop matching, every fixture would look fine
+// again, and nothing in either repository would say so. Hence this pin, which
+// reads the marker out of the gate itself rather than restating it.
+//
+// The sibling of TestReviewGateBansEveryFailureShape in internal/lint, for the
+// same reason and by the same method.
+func TestReviewGateMarksTheInvalidSpecError(t *testing.T) {
+	const script = "../../scripts/e2e/review-expected.sh"
+	source, err := os.ReadFile(script)
+	if err != nil {
+		t.Fatalf("cannot read the review gate (%s): %v", script, err)
+	}
+
+	// INVALID_SPEC_MARKER='<literal>'
+	assignment := regexp.MustCompile(`(?m)^INVALID_SPEC_MARKER='([^']*)'`)
+	m := assignment.FindStringSubmatch(string(source))
+	if m == nil {
+		t.Fatalf("no INVALID_SPEC_MARKER assignment in %s - has the rule been renamed or removed?", script)
+	}
+	marker := m[1]
+
+	app := &Application{Spec: ApplicationSpec{Source: &ApplicationSource{
+		RepoURL:        "oci://registry.example.com/artifacts/web",
+		TargetRevision: "1.2.3",
+	}}}
+	err = ValidateSourceSpec(app)
+	if err == nil {
+		t.Fatal("ValidateSourceSpec() = nil for a source with no path; this test needs a refused spec")
+	}
+	if !strings.Contains(err.Error(), marker) {
+		t.Errorf("the error %q does not contain the gate's marker %q (%s) - the gate would stop catching "+
+			"an unrealistic fixture, silently. Update both together.", err, marker, script)
+	}
 }
