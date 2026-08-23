@@ -116,7 +116,32 @@ wait_for_controller() {
   echo "waiting for $total Applications to be created and reach Synced+Healthy (timeout ${SYNC_TIMEOUT}s)..."
 
   deadline=$((SECONDS + SYNC_TIMEOUT))
+  local invalid="" prev_invalid=""
   while [ "$SECONDS" -lt "$deadline" ]; do
+    # A spec the CONTROLLER refuses never becomes Synced+Healthy, so the poll
+    # below would spend the entire budget waiting for something that cannot
+    # happen - which is exactly how a fixture whose artifact source had no `path`
+    # cost 900s and reported nothing but a timeout. ArgoCD's own verdict is on
+    # the resource within seconds of it being created, so read that instead of
+    # inferring it from silence. No rule is reimplemented here: whatever ArgoCD
+    # refuses, for whatever reason, is refused.
+    #
+    # Confirmed across two consecutive polls before failing, because this
+    # condition also covers a destination or project the control plane has not
+    # finished registering, which resolves itself; a refused SPEC does not.
+    prev_invalid="$invalid"
+    invalid="$(kubectl --context "$CTX" -n argocd get applications.argoproj.io \
+      -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{range .status.conditions[?(@.type=="InvalidSpecError")]}{.message}{end}{"\n"}{end}' 2>/dev/null \
+      | awk -F'\t' 'NF > 1 && $2 != ""')"
+    if [ -n "$invalid" ] && [ "$invalid" = "$prev_invalid" ]; then
+      echo "ERROR: the ArgoCD controller REFUSED an Application spec (InvalidSpecError);" >&2
+      echo "       it will never sync, so the catalog is wrong rather than slow:" >&2
+      printf '%s\n' "$invalid" | sed 's/^/    /' >&2
+      echo "       fix the entry in e2e/charts/apps/values-apps.yaml - every source needs a repoURL" >&2
+      echo "       and either a path or a chart (an OCI artifact source uses 'path: .' for its root)." >&2
+      exit 1
+    fi
+
     present="$(kubectl --context "$CTX" -n argocd get applications.argoproj.io \
       -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null | sort -u)"
     missing="$(comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$present"))"
@@ -133,7 +158,7 @@ wait_for_controller() {
   # A bare timeout says nothing about which half failed, so name both.
   echo "ERROR: the controller did not converge within ${SYNC_TIMEOUT}s" >&2
   [ -z "$missing" ] || { echo "  never created:" >&2; printf '    %s\n' $missing >&2; }
-  [ -z "$notready" ] || { echo "  not Synced+Healthy (name sync health):" >&2; printf '    %s\n' "$notready" >&2; }
+  [ -z "$notready" ] || { echo "  not Synced+Healthy (name sync health):" >&2; printf '%s\n' "$notready" | sed 's/^/    /' >&2; }
   echo "       raise the budget with E2E_SYNC_TIMEOUT, or inspect: kubectl --context $CTX -n argocd get applications" >&2
   exit 1
 }
