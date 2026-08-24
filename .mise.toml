@@ -6,13 +6,25 @@ kubectl = "1.31.1"
 yq = "4.44.3"
 helm = "3.19.4"
 kustomize = "5.8.1"
-# Release tooling. DO NOT bump blindly in a "update all tools" sweep: our
-# .goreleaser.yaml still uses the deprecated-but-functional `brews` (Formula)
-# generator, so a GoReleaser release that finally REMOVES `brews` would break
-# Homebrew publishing. Before bumping, run `goreleaser release --snapshot
-# --clean --skip=publish` and confirm dist/homebrew/Formula/argocdf.rb is still
-# written. Verified working as of 2.18.0.
-goreleaser = "2.18.0"
+# Release tooling. DO NOT bump blindly in a "update all tools" sweep, and verify
+# a bump on LINUX: two separate things break quietly here.
+#   1. .goreleaser.yaml still uses the deprecated-but-functional `brews`
+#      (Formula) generator, so a GoReleaser release that finally REMOVES it
+#      would break Homebrew publishing. Run `goreleaser release --snapshot
+#      --clean --skip=publish` and confirm dist/homebrew/Formula/argocdf.rb is
+#      still written.
+#   2. mise installs this through aqua, which verifies the release's GitHub
+#      artifact attestation. 2.18.0 is held back for exactly that: its Linux
+#      asset is attested under GitHub's immutable-releases identity
+#      ("https://dotcom.releases.github.com") while aqua's registry still
+#      expects goreleaser's own release workflow, so `mise install` FAILS on
+#      linux-x64 and the release job dies before GoReleaser runs. macOS does
+#      not reproduce it - the Darwin asset is not attested, so verification is
+#      skipped and a local install succeeds. Retry 2.18.0 once aqua's registry
+#      catches up; `ubi:goreleaser/goreleaser` also installs it, at the cost of
+#      no attestation verification at all.
+# Verified working on linux-x64 as of 2.17.1.
+goreleaser = "2.17.1"
 # e2e lint adapter dependencies (scripts/lint-*.sh in the e2e submodule)
 kyverno = "1.18.2"
 conftest = "0.68.2"
