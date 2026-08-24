@@ -35,7 +35,7 @@ func (p Provenance) suffix() string {
 		b.WriteString(" " + v)
 	}
 	if p.BaseSHA != "" && p.TargetSHA != "" {
-		b.WriteString(fmt.Sprintf(" (%s → %s)", shortSHA(p.BaseSHA), shortSHA(p.TargetSHA)))
+		fmt.Fprintf(&b, " (%s → %s)", shortSHA(p.BaseSHA), shortSHA(p.TargetSHA))
 	}
 	return b.String()
 }
