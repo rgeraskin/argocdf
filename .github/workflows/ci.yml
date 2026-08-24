@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 jobs:
-  test:
+  check:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -46,10 +46,6 @@ jobs:
           key: ${{ runner.os }}-go-${{ hashFiles('.mise.toml') }}-${{ hashFiles('**/go.sum') }}
           restore-keys: |
             ${{ runner.os }}-go-${{ hashFiles('.mise.toml') }}-
-          # test and lint deliberately SHARE this key: both want the same warm
-          # module cache, and one shared entry costs half the repo's 10GB cache
-          # budget of two. Whichever job finishes last logs a benign "cache
-          # already exists" warning on save — expected, not a failure.
       - name: Vet
         run: go vet ./...
       - name: Build
@@ -58,41 +54,10 @@ jobs:
         # -v so t.Skip()'d integration tests are visible in the log; combined
         # with mise installing helm+kustomize, none should skip anymore.
         run: go test -v ./...
-
-  lint:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          submodules: false
-      - name: Set up mise
-        uses: jdx/mise-action@v2
-        with:
-          install_args: go golangci-lint
-      - name: Resolve Go cache paths
-        # Computed rather than hardcoded to ~/go/pkg/mod: mise controls the Go
-        # install, and a path that does not exist caches NOTHING while still
-        # reporting success — a silent no-op is the failure mode to avoid here.
-        run: |
-          echo "GOMODCACHE=$(go env GOMODCACHE)" >> "$GITHUB_ENV"
-          echo "GOCACHE=$(go env GOCACHE)" >> "$GITHUB_ENV"
-      - name: Cache Go modules and build cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ${{ env.GOMODCACHE }}
-            ${{ env.GOCACHE }}
-          # .mise.toml is in the key because the build cache is TOOLCHAIN-specific:
-          # a Go bump must start a fresh lineage rather than restore entries the
-          # new compiler cannot reuse. go.sum keys the module half; restore-keys
-          # lets a dependency change still reuse the previous run's downloads.
-          key: ${{ runner.os }}-go-${{ hashFiles('.mise.toml') }}-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-go-${{ hashFiles('.mise.toml') }}-
-          # test and lint deliberately SHARE this key: both want the same warm
-          # module cache, and one shared entry costs half the repo's 10GB cache
-          # budget of two. Whichever job finishes last logs a benign "cache
-          # already exists" warning on save — expected, not a failure.
       - name: Lint
+        # Runs even when the steps above failed: a red test must not hide lint
+        # findings. `!cancelled()` rather than `always()`, so cancelling a run
+        # actually stops it. The steps above stay fail-fast on purpose — they
+        # share one compile, so a broken build reddening every step is noise.
+        if: ${{ !cancelled() }}
         run: golangci-lint run ./...
