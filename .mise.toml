@@ -6,6 +6,13 @@ kubectl = "1.31.1"
 yq = "4.44.3"
 helm = "3.19.4"
 kustomize = "5.8.1"
+# Release tooling. DO NOT bump blindly in a "update all tools" sweep: our
+# .goreleaser.yaml still uses the deprecated-but-functional `brews` (Formula)
+# generator, so a GoReleaser release that finally REMOVES `brews` would break
+# Homebrew publishing. Before bumping, run `goreleaser release --snapshot
+# --clean --skip=publish` and confirm dist/homebrew/Formula/argocdf.rb is still
+# written. Verified working as of 2.18.0.
+goreleaser = "2.18.0"
 # e2e lint adapter dependencies (scripts/lint-*.sh in the e2e submodule)
 kyverno = "1.18.2"
 conftest = "0.68.2"

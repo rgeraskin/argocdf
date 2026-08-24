@@ -60,8 +60,9 @@ changelog:
 # functional in the pinned GoReleaser version (it emits a warning, then writes a
 # real Formula). A Formula is the right abstraction for a CLI and, unlike a Cask,
 # its binary is not Gatekeeper-quarantined, so no xattr dequarantine hack is
-# needed. The GoReleaser version is pinned in .github/workflows/release.yml so a
-# future release that actually removes `brews` cannot break us unexpectedly.
+# needed. The GoReleaser version is pinned in .mise.toml (alongside its own "do
+# not bump blindly" note) so a future release that actually removes `brews`
+# cannot break us unexpectedly.
 brews:
   - name: argocdf
     homepage: https://github.com/rgeraskin/argocdf

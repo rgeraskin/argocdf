@@ -17,18 +17,38 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - name: Set up mise
+        uses: jdx/mise-action@v2
         with:
-          go-version: stable
+          # go compiles, goreleaser orchestrates — BOTH pinned in .mise.toml, so
+          # `mise exec -- goreleaser release --clean` reproduces this job byte for
+          # byte on a laptop. That is why goreleaser-action was dropped: its
+          # `version:` input put a second, invisible pin in a file nobody reads
+          # when reproducing a release. The GoReleaser pin's "do not bump
+          # blindly" rationale now lives beside the version, in .mise.toml.
+          # The release path runs no tests, so helm/kustomize/golangci-lint
+          # stay out.
+          install_args: go goreleaser
+      - name: Resolve Go module cache path
+        # Computed, not hardcoded to ~/go/pkg/mod: mise owns the Go install, and
+        # a cache path that does not exist stores NOTHING while still reporting
+        # success — a silent no-op is the failure mode worth spending 2 lines on.
+        run: echo "GOMODCACHE=$(go env GOMODCACHE)" >> "$GITHUB_ENV"
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          # Modules ONLY, deliberately not GOCACHE: a six-target cross-compile
+          # build cache is large and near-worthless across releases (every tag is
+          # a different commit), so caching it would burn the repo's shared 10GB
+          # budget and evict ci.yml's entries in exchange for nothing. Its own
+          # key namespace for the same reason — release must not overwrite the
+          # entry CI depends on.
+          path: ${{ env.GOMODCACHE }}
+          key: ${{ runner.os }}-gomod-release-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-gomod-release-
       - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v6
-        with:
-          # Pinned: our .goreleaser.yaml still uses the deprecated-but-functional
-          # `brews` (Formula). Do NOT use "~> v2" / "latest" here — a future
-          # release that removes `brews` would break publishing without warning.
-          version: "2.16.0"
-          args: release --clean
+        run: goreleaser release --clean
         env:
           # GH_PAT needs `contents: write` on this repo and the homebrew tap
           # repo so GoReleaser can push the generated Formula.

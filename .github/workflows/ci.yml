@@ -26,6 +26,30 @@ jobs:
           # render integration tests actually run instead of t.Skip()-ing.
           # kind/kubectl/yq stay out (e2e-only).
           install_args: go golangci-lint helm kustomize
+      - name: Resolve Go cache paths
+        # Computed rather than hardcoded to ~/go/pkg/mod: mise controls the Go
+        # install, and a path that does not exist caches NOTHING while still
+        # reporting success — a silent no-op is the failure mode to avoid here.
+        run: |
+          echo "GOMODCACHE=$(go env GOMODCACHE)" >> "$GITHUB_ENV"
+          echo "GOCACHE=$(go env GOCACHE)" >> "$GITHUB_ENV"
+      - name: Cache Go modules and build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.GOMODCACHE }}
+            ${{ env.GOCACHE }}
+          # .mise.toml is in the key because the build cache is TOOLCHAIN-specific:
+          # a Go bump must start a fresh lineage rather than restore entries the
+          # new compiler cannot reuse. go.sum keys the module half; restore-keys
+          # lets a dependency change still reuse the previous run's downloads.
+          key: ${{ runner.os }}-go-${{ hashFiles('.mise.toml') }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-${{ hashFiles('.mise.toml') }}-
+          # test and lint deliberately SHARE this key: both want the same warm
+          # module cache, and one shared entry costs half the repo's 10GB cache
+          # budget of two. Whichever job finishes last logs a benign "cache
+          # already exists" warning on save — expected, not a failure.
       - name: Vet
         run: go vet ./...
       - name: Build
@@ -46,5 +70,29 @@ jobs:
         uses: jdx/mise-action@v2
         with:
           install_args: go golangci-lint
+      - name: Resolve Go cache paths
+        # Computed rather than hardcoded to ~/go/pkg/mod: mise controls the Go
+        # install, and a path that does not exist caches NOTHING while still
+        # reporting success — a silent no-op is the failure mode to avoid here.
+        run: |
+          echo "GOMODCACHE=$(go env GOMODCACHE)" >> "$GITHUB_ENV"
+          echo "GOCACHE=$(go env GOCACHE)" >> "$GITHUB_ENV"
+      - name: Cache Go modules and build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.GOMODCACHE }}
+            ${{ env.GOCACHE }}
+          # .mise.toml is in the key because the build cache is TOOLCHAIN-specific:
+          # a Go bump must start a fresh lineage rather than restore entries the
+          # new compiler cannot reuse. go.sum keys the module half; restore-keys
+          # lets a dependency change still reuse the previous run's downloads.
+          key: ${{ runner.os }}-go-${{ hashFiles('.mise.toml') }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-${{ hashFiles('.mise.toml') }}-
+          # test and lint deliberately SHARE this key: both want the same warm
+          # module cache, and one shared entry costs half the repo's 10GB cache
+          # budget of two. Whichever job finishes last logs a benign "cache
+          # already exists" warning on save — expected, not a failure.
       - name: Lint
         run: golangci-lint run ./...
