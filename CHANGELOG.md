@@ -8,6 +8,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 >
 > Release dates are the GitHub release's publication date (UTC).
 
+## [Unreleased]
+
+### Added
+
+- The chart cache is bounded like the render cache
+
+  Downloaded charts under `<cache dir>/charts` were never evicted: the render cache had an age-and-size garbage collection, the chart cache only `argocdf cache clean`, and scoping it per credential source multiplied what accumulated. Every run now sweeps the whole `charts/` tree before rendering, under the same bounds as the render cache (entries older than 30 days first, then the oldest until the total fits 1 GiB). An entry is recognized by its shape - a directory named by its 64-character key - so the sweep also reaches the layouts earlier versions wrote (`charts/<key>` and `charts/cluster/<key>`), which nothing has read since and nothing else could reclaim, and the `argocdf-chart-*.tmp` staging directories a killed run leaves beside an entry. `--no-cache=charts` skips the sweep along with the cache; `argocdf cache clean` still removes everything at once.
+
+### Fixed
+
+- A failed chart-cache publish no longer leaves its staging directory behind
+
+  A chart is staged beside its cache entry and renamed into place; when the publish failed - a copy error, or the rename lost to a concurrent argocdf publishing the same chart - the staging directory stayed on disk forever, because the cleanup refused to remove anything outside the system temp directory and the cache is not there. It is removed now, and the garbage collection above sweeps the ones earlier versions left once they pass the age bound.
+
 ## [0.7.0] - 2026-08-24
 
 ### Added
