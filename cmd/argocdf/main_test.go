@@ -161,3 +161,67 @@ func TestBindEnvNoCacheLayer(t *testing.T) {
 		}
 	})
 }
+
+// newRootCmd is what the binary runs, so the flag set registerFlags installs is
+// worth asserting against directly: the probe commands the bindEnv tests build
+// are hand-written copies, and a flag dropped from registerFlags — or a
+// NoOptDefVal lost with it — would leave every one of them green.
+func TestNewRootCmdFlagSet(t *testing.T) {
+	cmd := newRootCmd()
+
+	// --no-cache takes an OPTIONAL value. Without NoOptDefVal, a bare
+	// --no-cache reads the next argument as its value instead of disabling
+	// both caches.
+	noCache := cmd.Flags().Lookup("no-cache")
+	if noCache == nil {
+		t.Fatal("--no-cache is not registered")
+	}
+	if noCache.NoOptDefVal != config.NoCacheAll {
+		t.Errorf("--no-cache NoOptDefVal = %q, want %q", noCache.NoOptDefVal, config.NoCacheAll)
+	}
+
+	// One flag per registration group, plus the shorthands the help text promises.
+	for name, shorthand := range map[string]string{
+		"kubeconfig":                "k",
+		"all-namespaces":            "A",
+		"repo-dir":                  "r",
+		"application-namespaces":    "",
+		"repo-creds":                "",
+		"kustomize-enable-helm":     "",
+		"kustomize-load-restrictor": "",
+		"no-api-versions":           "",
+		"file":                      "f",
+		"quiet":                     "q",
+		"verbose":                   "v",
+		"context-lines":             "U",
+		"lint":                      "",
+		"lint-kyverno":              "",
+		"lint-conftest":             "",
+		"exit-code":                 "",
+		"cache-dir":                 "",
+		"no-recursive":              "",
+		"concurrency":               "",
+	} {
+		f := cmd.Flags().Lookup(name)
+		if f == nil {
+			t.Errorf("--%s is not registered", name)
+			continue
+		}
+		if f.Shorthand != shorthand {
+			t.Errorf("--%s shorthand = %q, want %q", name, f.Shorthand, shorthand)
+		}
+	}
+
+	// The subcommands are part of the root command's contract too.
+	for _, name := range []string{"version", "cache"} {
+		found := false
+		for _, sub := range cmd.Commands() {
+			if sub.Name() == name {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("subcommand %q is missing", name)
+		}
+	}
+}

@@ -143,11 +143,8 @@ func warnRemovedEnvVars(logger *log.Logger) {
 	}
 }
 
-func main() {
-	rootCmd := &cobra.Command{
-		Use:   "argocdf",
-		Short: "Show diffs for ArgoCD applications affected by PR changes",
-		Long: `argocdf analyzes your git repository and ArgoCD cluster to show
+// rootLong is the root command's help text.
+const rootLong = `argocdf analyzes your git repository and ArgoCD cluster to show
 what manifest changes will occur when your PR is merged.
 
 It supports:
@@ -199,8 +196,16 @@ Examples:
   argocdf --lint 'conftest test - --policy policy/ --output json 2>/dev/null | jq -rn "input | .[] | .failures[]?.msg"'
 
   # Use external diff tool for side-by-side view
-  ARGOCDF_EXTERNAL_DIFF="delta --side-by-side" argocdf`,
-		RunE: runMain,
+  ARGOCDF_EXTERNAL_DIFF="delta --side-by-side" argocdf`
+
+// newRootCmd builds the root command: help text, flags and subcommands. It is
+// separate from main so the command can be constructed without executing it.
+func newRootCmd() *cobra.Command {
+	rootCmd := &cobra.Command{
+		Use:   "argocdf",
+		Short: "Show diffs for ArgoCD applications affected by PR changes",
+		Long:  rootLong,
+		RunE:  runMain,
 		// We map the Run result to a detailed exit code ourselves (see below), so
 		// suppress Cobra's default error printing and usage-on-error behavior for
 		// runtime errors. The sentinel ErrChangesPresent must stay invisible.
@@ -208,97 +213,7 @@ Examples:
 		SilenceUsage:  true,
 	}
 
-	// Kubernetes flags
-	rootCmd.Flags().StringVarP(&kubeconfigPath, "kubeconfig", "k", "", "Path to kubeconfig file")
-	rootCmd.Flags().StringVar(&kubeContext, "context", config.DefaultContext, "Kubernetes context to use")
-	rootCmd.Flags().StringVar(&argocdNamespace, "argocd-namespace", config.DefaultNamespace,
-		"ArgoCD control-plane namespace: repository secrets and settings are read here, "+
-			"and Applications are listed here unless --application-namespaces is set")
-	rootCmd.Flags().StringSliceVar(&applicationNamespaces, "application-namespaces", nil,
-		"Comma-separated list of namespaces to scan for Applications (exhaustive when set — "+
-			"include the ArgoCD namespace explicitly if wanted); entries may be literal names, "+
-			"globs like 'team-*', or /regex/")
-	rootCmd.Flags().BoolVarP(&allNamespaces, "all-namespaces", "A", false,
-		"Scan all namespaces (same as --application-namespaces='*')")
-
-	// Git flags
-	rootCmd.Flags().StringVarP(&repoPath, "repo-dir", "r", "", "Path to git repository (default: current directory)")
-	rootCmd.Flags().StringVar(&repoURL, "repo-url", "", "Repository URL for matching ArgoCD apps (overrides auto-detected URL)")
-	rootCmd.Flags().StringVar(&baseBranch, "base", "", "Base branch for comparison (default: main or master)")
-	rootCmd.Flags().StringVar(&targetBranch, "target", "", "Target branch for comparison (default: HEAD)")
-
-	// Rendering flags
-	rootCmd.Flags().StringVar(&kubeVersion, "kube-version", "", "Kubernetes version for rendering (auto-detected)")
-	rootCmd.Flags().StringVar(&repoCreds, "repo-creds", config.DefaultRepoCreds,
-		"Repository credential source: 'cluster' (ArgoCD repository secrets from --argocd-namespace; "+
-			"read failures are fatal), 'local' (your helm config: registry logins and repositories.yaml "+
-			"entries), or 'none' (anonymous)")
-
-	// Kustomize build options
-	rootCmd.Flags().BoolVar(&kustomizeEnableHelm, "kustomize-enable-helm", false,
-		"Enable Helm chart inflation via kustomize --enable-helm")
-	rootCmd.Flags().StringVar(&kustomizeBuildOptions, "kustomize-build-options", "",
-		"Additional kustomize build options (space-separated)")
-	rootCmd.Flags().StringVar(&kustomizeLoadRestrictor, "kustomize-load-restrictor", "",
-		"Load restrictor mode (e.g., 'LoadRestrictionsNone')")
-
-	// Helm options
-	rootCmd.Flags().BoolVar(&noAPIVersions, "no-api-versions", false,
-		"Do not pass cluster-discovered API versions to helm via --api-versions")
-
-	// Output flags
-	rootCmd.Flags().StringVar(&stdoutFormat, "stdout", config.DefaultStdoutFormat,
-		"Terminal output format: fields, summary, unified, none (set ARGOCDF_EXTERNAL_DIFF for side-by-side)")
-	rootCmd.Flags().StringArrayVarP(&fileOutputs, "file", "f", nil,
-		"File output in format[,option]:path (can be repeated). Formats: md-fields, html-side-by-side, md-unified, unified. "+
-			"Markdown formats accept split[=N] to split the report into PR-comment-sized parts (default 60000 bytes)")
-	rootCmd.Flags().BoolVarP(&quiet, "quiet", "q", false, "Suppress terminal output (same as --stdout none)")
-	rootCmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "Enable debug logging")
-	rootCmd.Flags().IntVarP(&unifiedContext, "context-lines", "U", config.DefaultUnifiedContext,
-		"Number of context lines in unified diff output (-1 for unlimited)")
-
-	// Lint flags
-	rootCmd.Flags().StringArrayVar(&lintCommands, "lint", nil,
-		"Shell command that lints rendered manifests (can be repeated): receives an app's rendered "+
-			"multi-doc YAML on stdin, each stdout line becomes a report warning; exit != 0 is reported "+
-			"as a lint execution error")
-	rootCmd.Flags().StringArrayVar(&lintKyverno, "lint-kyverno", nil,
-		"Lint rendered manifests with the kyverno policies in `DIR` (can be repeated): runs kyverno "+
-			"apply against the cluster being diffed and reports its findings, no shell pipeline or jq "+
-			"needed. A relative DIR resolves per side, so each side lints with its own version of "+
-			"the policies; an absolute DIR points both sides at one tree")
-	rootCmd.Flags().StringArrayVar(&lintConftest, "lint-conftest", nil,
-		"Lint rendered manifests with the rego policies in `DIR` (can be repeated): runs conftest test "+
-			"and reports its findings, no shell pipeline or jq needed. A relative DIR resolves per "+
-			"side, so each side lints with its own version of the policies; an absolute DIR points "+
-			"both sides at one tree")
-	rootCmd.Flags().DurationVar(&lintTimeout, "lint-timeout", config.DefaultLintTimeout,
-		"Timeout for each lint invocation (--lint, --lint-kyverno, --lint-conftest)")
-
-	// CI flags
-	rootCmd.Flags().BoolVar(&exitCode, "exit-code", false,
-		"Exit 0 if no changes, 1 on error, 2 if changes are present (like `diff`)")
-	rootCmd.Flags().StringVar(&marker, "marker", "",
-		"Marker id for the markdown PR-comment upsert marker (default: <!-- argocdf-diff -->)")
-
-	// Render cache flags
-	// --no-cache takes an OPTIONAL layer: bare (the historical spelling) disables
-	// both caches, a value disables one. NoOptDefVal is what makes the value
-	// optional, and it means the value must be attached with "=" (--no-cache=render);
-	// pflag would read a space-separated word as the next argument.
-	rootCmd.Flags().Var(config.NewNoCacheFlag(&noCache), "no-cache",
-		"Disable persistent caches: all (the default when given without a value), render, or charts; --no-cache=false re-enables both")
-	rootCmd.Flags().Lookup("no-cache").NoOptDefVal = config.NoCacheAll
-	rootCmd.Flags().StringVar(&cacheDir, "cache-dir", "",
-		"Base cache directory for render and chart caches (default: <user cache dir>/argocdf)")
-
-	// Recursion flags
-	rootCmd.Flags().BoolVar(&noRecursive, "no-recursive", false, "Disable apps-of-apps recursion")
-	rootCmd.Flags().IntVar(&maxDepth, "max-depth", config.DefaultMaxDepth, "Maximum recursion depth")
-
-	// Concurrency flag
-	rootCmd.Flags().IntVar(&concurrency, "concurrency", config.DefaultConcurrency(),
-		"Number of applications to render in parallel (1 = sequential)")
+	registerFlags(rootCmd)
 
 	// Version command
 	rootCmd.AddCommand(&cobra.Command{
@@ -311,6 +226,108 @@ Examples:
 
 	// Cache command
 	rootCmd.AddCommand(newCacheCmd())
+
+	return rootCmd
+}
+
+// registerFlags declares every root-command flag. Each one binds to the
+// package-level variable buildConfig reads it back from.
+func registerFlags(cmd *cobra.Command) {
+	// Kubernetes flags
+	cmd.Flags().StringVarP(&kubeconfigPath, "kubeconfig", "k", "", "Path to kubeconfig file")
+	cmd.Flags().StringVar(&kubeContext, "context", config.DefaultContext, "Kubernetes context to use")
+	cmd.Flags().StringVar(&argocdNamespace, "argocd-namespace", config.DefaultNamespace,
+		"ArgoCD control-plane namespace: repository secrets and settings are read here, "+
+			"and Applications are listed here unless --application-namespaces is set")
+	cmd.Flags().StringSliceVar(&applicationNamespaces, "application-namespaces", nil,
+		"Comma-separated list of namespaces to scan for Applications (exhaustive when set — "+
+			"include the ArgoCD namespace explicitly if wanted); entries may be literal names, "+
+			"globs like 'team-*', or /regex/")
+	cmd.Flags().BoolVarP(&allNamespaces, "all-namespaces", "A", false,
+		"Scan all namespaces (same as --application-namespaces='*')")
+
+	// Git flags
+	cmd.Flags().StringVarP(&repoPath, "repo-dir", "r", "", "Path to git repository (default: current directory)")
+	cmd.Flags().StringVar(&repoURL, "repo-url", "", "Repository URL for matching ArgoCD apps (overrides auto-detected URL)")
+	cmd.Flags().StringVar(&baseBranch, "base", "", "Base branch for comparison (default: main or master)")
+	cmd.Flags().StringVar(&targetBranch, "target", "", "Target branch for comparison (default: HEAD)")
+
+	// Rendering flags
+	cmd.Flags().StringVar(&kubeVersion, "kube-version", "", "Kubernetes version for rendering (auto-detected)")
+	cmd.Flags().StringVar(&repoCreds, "repo-creds", config.DefaultRepoCreds,
+		"Repository credential source: 'cluster' (ArgoCD repository secrets from --argocd-namespace; "+
+			"read failures are fatal), 'local' (your helm config: registry logins and repositories.yaml "+
+			"entries), or 'none' (anonymous)")
+
+	// Kustomize build options
+	cmd.Flags().BoolVar(&kustomizeEnableHelm, "kustomize-enable-helm", false,
+		"Enable Helm chart inflation via kustomize --enable-helm")
+	cmd.Flags().StringVar(&kustomizeBuildOptions, "kustomize-build-options", "",
+		"Additional kustomize build options (space-separated)")
+	cmd.Flags().StringVar(&kustomizeLoadRestrictor, "kustomize-load-restrictor", "",
+		"Load restrictor mode (e.g., 'LoadRestrictionsNone')")
+
+	// Helm options
+	cmd.Flags().BoolVar(&noAPIVersions, "no-api-versions", false,
+		"Do not pass cluster-discovered API versions to helm via --api-versions")
+
+	// Output flags
+	cmd.Flags().StringVar(&stdoutFormat, "stdout", config.DefaultStdoutFormat,
+		"Terminal output format: fields, summary, unified, none (set ARGOCDF_EXTERNAL_DIFF for side-by-side)")
+	cmd.Flags().StringArrayVarP(&fileOutputs, "file", "f", nil,
+		"File output in format[,option]:path (can be repeated). Formats: md-fields, html-side-by-side, md-unified, unified. "+
+			"Markdown formats accept split[=N] to split the report into PR-comment-sized parts (default 60000 bytes)")
+	cmd.Flags().BoolVarP(&quiet, "quiet", "q", false, "Suppress terminal output (same as --stdout none)")
+	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "Enable debug logging")
+	cmd.Flags().IntVarP(&unifiedContext, "context-lines", "U", config.DefaultUnifiedContext,
+		"Number of context lines in unified diff output (-1 for unlimited)")
+
+	// Lint flags
+	cmd.Flags().StringArrayVar(&lintCommands, "lint", nil,
+		"Shell command that lints rendered manifests (can be repeated): receives an app's rendered "+
+			"multi-doc YAML on stdin, each stdout line becomes a report warning; exit != 0 is reported "+
+			"as a lint execution error")
+	cmd.Flags().StringArrayVar(&lintKyverno, "lint-kyverno", nil,
+		"Lint rendered manifests with the kyverno policies in `DIR` (can be repeated): runs kyverno "+
+			"apply against the cluster being diffed and reports its findings, no shell pipeline or jq "+
+			"needed. A relative DIR resolves per side, so each side lints with its own version of "+
+			"the policies; an absolute DIR points both sides at one tree")
+	cmd.Flags().StringArrayVar(&lintConftest, "lint-conftest", nil,
+		"Lint rendered manifests with the rego policies in `DIR` (can be repeated): runs conftest test "+
+			"and reports its findings, no shell pipeline or jq needed. A relative DIR resolves per "+
+			"side, so each side lints with its own version of the policies; an absolute DIR points "+
+			"both sides at one tree")
+	cmd.Flags().DurationVar(&lintTimeout, "lint-timeout", config.DefaultLintTimeout,
+		"Timeout for each lint invocation (--lint, --lint-kyverno, --lint-conftest)")
+
+	// CI flags
+	cmd.Flags().BoolVar(&exitCode, "exit-code", false,
+		"Exit 0 if no changes, 1 on error, 2 if changes are present (like `diff`)")
+	cmd.Flags().StringVar(&marker, "marker", "",
+		"Marker id for the markdown PR-comment upsert marker (default: <!-- argocdf-diff -->)")
+
+	// Render cache flags
+	// --no-cache takes an OPTIONAL layer: bare (the historical spelling) disables
+	// both caches, a value disables one. NoOptDefVal is what makes the value
+	// optional, and it means the value must be attached with "=" (--no-cache=render);
+	// pflag would read a space-separated word as the next argument.
+	cmd.Flags().Var(config.NewNoCacheFlag(&noCache), "no-cache",
+		"Disable persistent caches: all (the default when given without a value), render, or charts; --no-cache=false re-enables both")
+	cmd.Flags().Lookup("no-cache").NoOptDefVal = config.NoCacheAll
+	cmd.Flags().StringVar(&cacheDir, "cache-dir", "",
+		"Base cache directory for render and chart caches (default: <user cache dir>/argocdf)")
+
+	// Recursion flags
+	cmd.Flags().BoolVar(&noRecursive, "no-recursive", false, "Disable apps-of-apps recursion")
+	cmd.Flags().IntVar(&maxDepth, "max-depth", config.DefaultMaxDepth, "Maximum recursion depth")
+
+	// Concurrency flag
+	cmd.Flags().IntVar(&concurrency, "concurrency", config.DefaultConcurrency(),
+		"Number of applications to render in parallel (1 = sequential)")
+}
+
+func main() {
+	rootCmd := newRootCmd()
 
 	err := rootCmd.Execute()
 	// Print real errors ourselves (Cobra's printing is silenced above), but keep
@@ -592,18 +609,11 @@ func configureDependencyLogging(logger *log.Logger, debug bool) {
 	}
 }
 
-func runMain(cmd *cobra.Command, args []string) error {
-	// Seed flags from ARGOCDF_* environment variables before anything reads them,
-	// so env values behave exactly like flags for the rest of the run.
-	if err := bindEnv(cmd); err != nil {
-		return err
-	}
-
-	// Setup context with cancellation
+// signalContext returns a context canceled on the first SIGINT or SIGTERM,
+// together with its cancel function so the caller can release it on return.
+func signalContext() (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
-	// Handle signals
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
@@ -611,19 +621,25 @@ func runMain(cmd *cobra.Command, args []string) error {
 		cancel()
 	}()
 
-	// Setup logger
+	return ctx, cancel
+}
+
+// newLogger builds argocdf's own logger, at debug level under --verbose.
+func newLogger(verbose bool) *log.Logger {
 	logLevel := log.InfoLevel
 	if verbose {
 		logLevel = log.DebugLevel
 	}
-	logger := log.NewWithOptions(os.Stderr, log.Options{
+	return log.NewWithOptions(os.Stderr, log.Options{
 		ReportTimestamp: true,
 		Level:           logLevel,
 	})
+}
 
-	configureDependencyLogging(logger, logLevel == log.DebugLevel)
-	warnRemovedEnvVars(logger)
-
+// buildConfig collects the flag variables into the run's configuration. It
+// must run after bindEnv, which is what seeds those variables from the
+// environment.
+func buildConfig() (*config.Config, error) {
 	// Handle quiet flag (alias for --stdout none)
 	if quiet {
 		stdoutFormat = "none"
@@ -634,7 +650,7 @@ func runMain(cmd *cobra.Command, args []string) error {
 	for _, spec := range fileOutputs {
 		fo, err := config.ParseFileOutput(spec)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		parsedFileOutputs = append(parsedFileOutputs, fo)
 	}
@@ -671,6 +687,28 @@ func runMain(cmd *cobra.Command, args []string) error {
 		LintConftest:            lintConftest,
 		LintTimeout:             lintTimeout,
 		Version:                 bareVersion(),
+	}
+
+	return cfg, nil
+}
+
+func runMain(cmd *cobra.Command, args []string) error {
+	// Seed flags from ARGOCDF_* environment variables before anything reads them,
+	// so env values behave exactly like flags for the rest of the run.
+	if err := bindEnv(cmd); err != nil {
+		return err
+	}
+
+	ctx, cancel := signalContext()
+	defer cancel()
+
+	logger := newLogger(verbose)
+	configureDependencyLogging(logger, verbose)
+	warnRemovedEnvVars(logger)
+
+	cfg, err := buildConfig()
+	if err != nil {
+		return err
 	}
 
 	// Auto-detect missing values
