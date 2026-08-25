@@ -3,9 +3,14 @@ package render
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
+	"time"
 
 	argogit "github.com/argoproj/argo-cd/v3/util/git"
 )
@@ -122,4 +127,198 @@ func chartCacheDecision(
 	}
 	cacheDir, chartDir = chartCachePaths(baseDir, repoURL, chart, version)
 	return cacheDir, chartDir, dirExists(chartDir), true
+}
+
+// chartCacheEntryRe matches a chart-cache ENTRY directory name: the 64
+// lowercase hex characters chartCacheKey produces. The shape IS the identity —
+// nothing else argocdf writes under charts/ is named like a sha256 — which is
+// what lets the GC below recognize an entry at any depth, and therefore sweep
+// the LEGACY layouts (charts/<key>/ and charts/cluster/<key>/, written before
+// the credential-source scoping existed) without knowing they ever existed.
+var chartCacheEntryRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// isChartCacheEntryDir reports whether a directory NAME is a chart cache entry.
+func isChartCacheEntryDir(name string) bool {
+	return chartCacheEntryRe.MatchString(name)
+}
+
+// Orphaned staging directories: publishChartToCache stages a chart in
+// os.MkdirTemp(parent, "argocdf-chart-*.tmp") — a SIBLING of the entry it is
+// about to claim by rename — so a staging directory can outlive the process
+// that made it. Two ways: the publish fails (a copy error, or a lost rename
+// race against a concurrent publisher), in which case its deferred cleanup is
+// SafeRemoveAll, which refuses any path outside os.TempDir() and the chart
+// cache is not there; or argocdf is killed mid-copy. Either way nothing else
+// ever looks at the directory again, so the GC sweeps it on age like an entry.
+// A successful publish renames the staging directory INTO place and leaves
+// nothing behind.
+const (
+	chartStagingPrefix = "argocdf-chart-"
+	chartStagingSuffix = ".tmp"
+)
+
+// isChartStagingDir reports whether a directory NAME has publishChartToCache's
+// staging shape. It cannot collide with an entry (64 hex characters contain no
+// dash or dot) nor with the unpacked chart inside one (the walk never descends
+// into an entry).
+func isChartStagingDir(name string) bool {
+	return strings.HasPrefix(name, chartStagingPrefix) && strings.HasSuffix(name, chartStagingSuffix)
+}
+
+// GCChartCache bounds the persistent chart download cache, mirroring
+// rendercache.Cache.GC pass for pass. root is the chart cache ROOT
+// (<cache dir>/charts), the common parent of every credential-source scope.
+//
+// An ENTRY is any directory whose base name is exactly 64 lowercase hex
+// characters — one chartCacheKey, holding one unpacked chart — found at ANY
+// depth below root. The walk does not descend into one: its content is the
+// chart. Detecting entries by SHAPE rather than by the layout that produced
+// them is what makes this sweep the current scoped tree
+// (charts/<mode>/[<instance>/]<key>/) and both LEGACY layouts (charts/<key>/
+// and charts/cluster/<key>/, written before the scoping existed and never read
+// again) under one rule. An entry's age is its directory's mtime, which is the
+// time it was published: publishChartToCache fills a staging sibling and
+// renames it into place, and a rename does not restamp the directory it moves
+// (both halves pinned by TestChartEntryMtimeIsThePublishTime, since a publish
+// path that stopped preserving it would leave every entry looking fresh and
+// nothing would ever age out). A cache HIT does not touch it, so age here means
+// "downloaded long ago", not "unused for a while". An entry's size is the sum
+// of the regular files inside it.
+//
+// Eviction runs in two passes, exactly like the render cache: first every entry
+// older than maxAge, then — if what remains still exceeds maxBytes in total —
+// the oldest entries by mtime until the total is within budget. A non-positive
+// maxAge disables age-based eviction; a non-positive maxBytes disables
+// size-based eviction. Orphaned staging directories left beside entries by an
+// interrupted or losing publish (see isChartStagingDir) are swept on the same
+// age rule, so an in-flight publish from a concurrent argocdf is never touched;
+// they are not counted toward the size budget, since they belong to no entry.
+//
+// removed counts the directories actually deleted, entries and swept staging
+// directories alike. GC is best-effort throughout: a missing root reports
+// (0, nil), an unreadable subtree is skipped rather than abandoning the sweep,
+// a directory that will not delete is simply kept, and anything that is neither
+// an entry nor a staging directory is left alone.
+func GCChartCache(root string, maxAge time.Duration, maxBytes int64) (removed int, err error) {
+	type cacheEntry struct {
+		path    string
+		size    int64
+		modTime time.Time
+	}
+
+	var (
+		entries []cacheEntry
+		staging []string
+		cutoff  = time.Now().Add(-maxAge)
+	)
+
+	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			// The root itself is the caller's problem (a missing cache is not an
+			// error, see below); anything deeper is skipped so one unreadable
+			// scope cannot cost the whole sweep.
+			if path == root {
+				return err
+			}
+			if d != nil && d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !d.IsDir() {
+			return nil
+		}
+		switch {
+		case isChartCacheEntryDir(d.Name()):
+			info, ierr := d.Info()
+			if ierr != nil {
+				return fs.SkipDir
+			}
+			entries = append(entries, cacheEntry{
+				path:    path,
+				size:    chartEntrySize(path),
+				modTime: info.ModTime(),
+			})
+			return fs.SkipDir
+		case isChartStagingDir(d.Name()):
+			info, ierr := d.Info()
+			if ierr == nil && maxAge > 0 && info.ModTime().Before(cutoff) {
+				staging = append(staging, path)
+			}
+			return fs.SkipDir
+		}
+		return nil
+	})
+	if walkErr != nil {
+		if os.IsNotExist(walkErr) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("failed to walk chart cache %s: %w", root, walkErr)
+	}
+
+	// Age-based eviction.
+	if maxAge > 0 {
+		kept := entries[:0:0]
+		for _, e := range entries {
+			if e.modTime.Before(cutoff) {
+				if rmErr := os.RemoveAll(e.path); rmErr == nil {
+					removed++
+					continue
+				}
+			}
+			kept = append(kept, e)
+		}
+		entries = kept
+	}
+
+	// Size-based eviction: oldest first until within budget.
+	if maxBytes > 0 {
+		var total int64
+		for _, e := range entries {
+			total += e.size
+		}
+		if total > maxBytes {
+			sort.Slice(entries, func(i, j int) bool {
+				return entries[i].modTime.Before(entries[j].modTime)
+			})
+			for _, e := range entries {
+				if total <= maxBytes {
+					break
+				}
+				if rmErr := os.RemoveAll(e.path); rmErr == nil {
+					removed++
+					total -= e.size
+				}
+			}
+		}
+	}
+
+	for _, p := range staging {
+		if rmErr := os.RemoveAll(p); rmErr == nil {
+			removed++
+		}
+	}
+
+	return removed, nil
+}
+
+// chartEntrySize sums the regular files inside one cache entry. Symlinks are
+// not followed and not counted: copyDir recreates them as links, so their
+// target's bytes either already count inside the entry or live outside it. An
+// unreadable subtree contributes what could be read — undercounting a size
+// budget is the harmless direction.
+func chartEntrySize(dir string) int64 {
+	var total int64
+	_ = filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !d.Type().IsRegular() {
+			return nil
+		}
+		info, ierr := d.Info()
+		if ierr != nil {
+			return nil
+		}
+		total += info.Size()
+		return nil
+	})
+	return total
 }

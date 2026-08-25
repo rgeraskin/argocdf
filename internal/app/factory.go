@@ -59,6 +59,11 @@ func (f *Factory) CreateRenderer(kubeVersion string, apiVersions []string, creds
 	if f.config.NoAPIVersions {
 		apiVersions = nil
 	}
+	// Bound the downloaded-chart cache before anything renders into it, under
+	// the SAME limits as the render cache (see CreateRenderCache): one pair of
+	// bounds governs the whole of <cache dir>, so a user reasons about one age
+	// and one size rather than two.
+	f.gcChartCache()
 	opts := render.RenderOptions{
 		RepoPath:                f.config.RepoPath,
 		RepoURL:                 f.config.RepoURL,
@@ -99,6 +104,44 @@ func (f *Factory) baseCacheDir() (string, error) {
 	return rendercache.BaseDir()
 }
 
+// chartCacheRoot returns the ROOT of the remote chart download cache
+// (<cache dir>/charts) — the common parent of every credential-source scope,
+// including the legacy unscoped ones — or "" when the chart cache is disabled
+// (--no-cache=all|charts) or the base dir cannot be resolved. It is what the
+// chart GC sweeps; chartCacheDir picks the scope inside it that this run writes.
+func (f *Factory) chartCacheRoot() string {
+	if !f.config.ChartCacheEnabled() {
+		return ""
+	}
+	base, err := f.baseCacheDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(base, "charts")
+}
+
+// gcChartCache bounds the chart cache best-effort, with the SAME age and size
+// limits the render cache uses (rendercache.DefaultMaxAge/DefaultMaxBytes —
+// one pair of bounds for both halves of the cache directory). Failures must
+// never block rendering, so they are only reported at DEBUG, exactly as
+// CreateRenderCache reports the render cache's own GC.
+func (f *Factory) gcChartCache() {
+	root := f.chartCacheRoot()
+	if root == "" {
+		return
+	}
+	removed, err := render.GCChartCache(root, rendercache.DefaultMaxAge, rendercache.DefaultMaxBytes)
+	if err != nil {
+		if f.logger != nil {
+			f.logger.Debug("Chart cache GC failed", "error", err)
+		}
+		return
+	}
+	if removed > 0 && f.logger != nil {
+		f.logger.Debug("Chart cache GC evicted entries", "removed", removed)
+	}
+}
+
 // chartCacheDir returns the directory for the remote chart download cache, or
 // "" when the chart cache is disabled (--no-cache=all|charts) or the base dir
 // cannot be resolved.
@@ -120,27 +163,26 @@ func (f *Factory) baseCacheDir() (string, error) {
 // The cost is a re-download per source instance (and a copy on disk each) for
 // charts that are byte-identical - the price of the verification being real.
 //
-// It is NOT bounded by garbage collection, and this comment used to claim otherwise:
-// rendercache.Cache.GC walks the render/ entries only, and nothing prunes charts/.
-// So chart-cache growth is bounded only by `argocdf cache clean`, which removes every
-// scope at once, and the per-source split multiplies what accumulates. Entries
-// written before these scopes existed sit at charts/<sha>/ (and charts/cluster/<sha>/)
-// and are now unreachable - never read, never evicted, removed by that same clean. A
-// chart-cache GC over the scope tree (age and size, mirroring the render one,
-// sweeping the legacy layouts) is the fix; until then this says what is true.
+// It IS bounded by garbage collection, under the same age and size limits as the
+// render cache: render.GCChartCache runs over the whole charts/ tree from
+// gcChartCache above, before anything renders. It finds entries by SHAPE - any
+// directory named like a chartCacheKey, at any depth - so the per-source split
+// cannot outrun it, and neither can the layouts that predate the split: entries
+// written before these scopes existed sit at charts/<sha>/ (and
+// charts/cluster/<sha>/), are never read again, and are now swept by the same
+// pass rather than accumulating forever. `argocdf cache clean` remains the way
+// to remove everything at once; the GC only reclaims what has aged out or what
+// overflows the size budget.
 func (f *Factory) chartCacheDir(credsInstance string) string {
-	if !f.config.ChartCacheEnabled() {
-		return ""
-	}
-	base, err := f.baseCacheDir()
-	if err != nil {
+	root := f.chartCacheRoot()
+	if root == "" {
 		return ""
 	}
 	mode := f.config.RepoCreds
 	if mode == "" {
 		mode = config.DefaultRepoCreds
 	}
-	dir := filepath.Join(base, "charts", mode)
+	dir := filepath.Join(root, mode)
 	if credsInstance != "" {
 		dir = filepath.Join(dir, instanceSegment(credsInstance))
 	}

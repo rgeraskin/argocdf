@@ -23,6 +23,11 @@ import (
 // GC defaults, used when the cache is created. They bound the cache both by age
 // and by total size; documented here rather than exposed as flags to keep the
 // CLI surface small.
+//
+// ONE pair of bounds governs BOTH halves of the cache directory: the factory
+// passes these to Cache.GC for render/ and to render.GCChartCache for charts/,
+// so a user reasons about one age and one size rather than two. They are not a
+// combined budget — each half is bounded to DefaultMaxBytes on its own.
 const (
 	// DefaultMaxAge evicts cache entries not modified within this window.
 	DefaultMaxAge = 30 * 24 * time.Hour // 30 days

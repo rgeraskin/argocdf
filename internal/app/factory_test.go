@@ -31,7 +31,9 @@ func TestCreateRendererErrorReturnsUntypedNil(t *testing.T) {
 	// failure without any stubbing.
 	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "missing"))
 
-	f := NewFactory(&config.Config{}, log.New(io.Discard))
+	// An explicit cache dir keeps the chart GC CreateRenderer now runs off the
+	// developer's real ~/Library/Caches/argocdf.
+	f := NewFactory(&config.Config{CacheDir: t.TempDir()}, log.New(io.Discard))
 	r, err := f.CreateRenderer("v1.30.0", nil, nil, "")
 	if err == nil {
 		t.Fatal("CreateRenderer() succeeded; the TMPDIR trick no longer forces a construction failure")
@@ -592,4 +594,82 @@ func TestSameRepoMatcherWithoutALocalRepoURL(t *testing.T) {
 			t.Errorf("match(%q) = true, want false", other)
 		}
 	}
+}
+
+// TestCreateRendererGCsTheChartCache pins the WIRING, which is the half that was
+// missing: render.GCChartCache can be perfect and the chart cache still grow
+// forever if nothing calls it. CreateRenderer is where it runs, before anything
+// renders into the cache, and it must run over the charts ROOT so the legacy
+// unscoped layouts are swept too — not only the scope this run happens to write.
+//
+// Offline throughout: constructing the engine touches no cluster and no network.
+func TestCreateRendererGCsTheChartCache(t *testing.T) {
+	// The engine creates its registry auth dir and OCI tarball root under
+	// os.TempDir; sandbox them so nothing leaks into the developer's /tmp.
+	t.Setenv("TMPDIR", t.TempDir())
+
+	const key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+	plant := func(t *testing.T, base, rel string, age time.Duration) string {
+		t.Helper()
+		entry := filepath.Join(base, "charts", rel)
+		if err := os.MkdirAll(filepath.Join(entry, "nginx"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(entry, "nginx", "Chart.yaml"), []byte("name: nginx\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		stamp := time.Now().Add(-age)
+		if err := os.Chtimes(entry, stamp, stamp); err != nil {
+			t.Fatal(err)
+		}
+		return entry
+	}
+
+	build := func(t *testing.T, cfg *config.Config) {
+		t.Helper()
+		r, err := NewFactory(cfg, log.New(io.Discard)).CreateRenderer("v1.30.0", nil, nil, "")
+		if err != nil {
+			t.Fatalf("CreateRenderer() error = %v", err)
+		}
+		// Restores the scrubbed HELM_* env and removes the per-run temp dirs.
+		if c, ok := r.(interface{ Cleanup() }); ok {
+			c.Cleanup()
+		}
+	}
+
+	t.Run("an aged-out entry is evicted, in every layout", func(t *testing.T) {
+		base := t.TempDir()
+		// The scope this run would write into...
+		scoped := plant(t, base, filepath.Join(config.RepoCredsCluster, key), 40*24*time.Hour)
+		// ...and the two layouts that predate the credential-source scoping,
+		// which nothing reads again and only the GC can reclaim.
+		legacyFlat := plant(t, base, key, 40*24*time.Hour)
+		legacyMode := plant(t, base, filepath.Join("cluster", key), 40*24*time.Hour)
+		fresh := plant(t, base, filepath.Join("local", key), time.Hour)
+
+		build(t, &config.Config{CacheDir: base, RepoCreds: config.RepoCredsCluster})
+
+		for _, p := range []string{scoped, legacyFlat, legacyMode} {
+			if _, err := os.Stat(p); !os.IsNotExist(err) {
+				t.Errorf("%s survived CreateRenderer: the chart cache is still unbounded", p)
+			}
+		}
+		if _, err := os.Stat(fresh); err != nil {
+			t.Errorf("a freshly published entry was evicted (%v); a run must never GC what it just downloaded", err)
+		}
+	})
+
+	t.Run("--no-cache=charts leaves the cache alone", func(t *testing.T) {
+		// The chart cache is disabled, so this run neither reads nor writes it;
+		// sweeping someone else's entries on the way past is not its business.
+		base := t.TempDir()
+		entry := plant(t, base, filepath.Join(config.RepoCredsCluster, key), 400*24*time.Hour)
+
+		build(t, &config.Config{CacheDir: base, RepoCreds: config.RepoCredsCluster, NoCache: config.NoCacheCharts})
+
+		if _, err := os.Stat(entry); err != nil {
+			t.Errorf("--no-cache=charts still ran the chart GC: %v", err)
+		}
+	})
 }
