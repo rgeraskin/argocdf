@@ -54,8 +54,11 @@ The tool follows a pipeline architecture orchestrated by `internal/app/app.go`:
 | `internal/helmconfig` | Local repo credentials from the user's helm config (`--repo-creds=local`) |
 | `internal/git` | Repository operations, change detection, URL normalization |
 | `internal/render` | Manifest rendering through ArgoCD's repo-server code, chart fetching via ArgoCD's chart client |
+| `internal/rendercache` | Persistent content-addressed render cache (`key.go` versions the key; bumps invalidate all entries) |
 | `internal/diff` | Manifest comparison, apps-of-apps discovery |
 | `internal/output` | Output writers (terminal, markdown, HTML, unified) |
+| `internal/lint` | `--lint` runners: shell adapters plus the built-in kyverno/conftest adapters |
+| `internal/types` | `AppDiff`/`SourceType` shared by `diff`, `render`, `output` and `app` (imports nothing internal, to stay cycle-free) |
 
 ### ArgoCD Types Dependency
 
@@ -84,7 +87,7 @@ Trade-off: This adds ~35MB to the binary size but eliminates maintenance burden 
 |--------|------|-------------|
 | `TerminalWriter` | `terminal.go` | Colored terminal output (fields/summary/unified modes) |
 | `MarkdownWriter` | `markdown.go` | GitHub/Atlantis markdown with collapsible sections |
-| `HTMLWriter` | `html.go` | Interactive HTML with diff2html side-by-side view |
+| `HTMLWriter` | `html.go` | Self-contained HTML report with a side-by-side diff table (no external assets) |
 | `UnifiedWriter` | `unified_writer.go` | Patch-compatible unified diff format |
 | `MultiWriter` | `output.go` | Fans out to multiple writers simultaneously |
 
@@ -129,7 +132,7 @@ All three modes run the identical pipeline; they differ only in what fills the c
 - The engine composes `q.Repos`/`q.HelmRepoCreds` per source with ArgoCD's `source.IsOCI()` gate (mirroring controller/state.go:300-315, including its degradations; note `type: helm` + `enableOCI` repos ride the HELM list UNCONDITIONALLY — that's how git-path charts get their private OCI dependency creds) and resolves `q.Repo` through `ResolveRepo`.
 - OCI registry auth NEVER goes through `helm registry login` (`internal/render/registryauth.go`): helm's ORAS credential store auto-detects platform native stores (any `docker-credential-*` helper in PATH — on macOS every login would land in the SHARED system keychain, where concurrent renders' login→build→logout cycles race: `-25299` duplicate items, and 401s when one render's logout deletes the credential another's dependency build is using; a fresh isolated config file does NOT prevent this). Instead the engine owns a per-run registry config (seeded with a placeholder entry — a "configured" file is what disables the native-store detection — plus every OCI credential from the lists, written argocdf-side under a mutex with atomic renames, 0600, removed via `Cleanup()`), points `HELM_REGISTRY_CONFIG` at it, and STRIPS username/password from OCI-flavored entries in `q.Repos`/`q.HelmRepoCreds` and from the repo handed to the chart client, so ArgoCD's login gates (username AND password non-empty) never fire and pulls read the file. Classic (non-OCI) repos keep their creds — they flow via `helm repo add`/`pull` argv, not the registry config. Auth keys are registry HOSTS (same-host repos with different creds collapse; upstream has the same granularity).
 - Chart fetches (`chartfetch.go`): credential-resolution failures are LOUD (no anonymous fallback — a swallowed error would resurface as a misleading 401 from helm); `ExtractChart` runs interruptibly (goroutine + background drain — ArgoCD's chart client takes no context); a cache hit skips fetching and auth entirely (pinned versions are immutable — intentional); cache-backed chart dirs are COPIED to a private temp dir before `GenerateManifests` (it mutates appPath, and `chartDepMutex` is process-local so it cannot protect the shared persistent cache from concurrent argocdf PROCESSES).
-- External git repositories: renderable sources and `$ref` sources living in OTHER repos are cloned at their `TargetRevision` via `git.CloneWithCreds` — HTTP(S) basic-auth/bearer credentials ride an `http.extraheader` passed through `GIT_CONFIG_*` env vars (never argv); one clone per (URL, revision) per app render (`externalrepo.go`). SSH remotes use ambient git config.
+- External git repositories: renderable sources and `$ref` sources living in OTHER repos are cloned at their `TargetRevision` via `git.Clone` — HTTP(S) basic-auth/bearer credentials ride an `http.extraheader` passed through `GIT_CONFIG_*` env vars (never argv); one clone per (URL, revision) per app render (`externalrepo.go`). SSH remotes use ambient git config.
 - The engine uses `app.InstanceName(ArgoCDNamespace)` — `"<ns>_<name>"` outside the control-plane namespace — for `AppName`/the default helm release name, and sets `ProjectName` (feeds `ARGOCD_APP_PROJECT_NAME`); remote-chart relative helm value files resolve against (and are contained to) the EXTRACTED chart dir, not the worktree.
 - IMPORT BOUNDARY: only `internal/cluster` and `internal/app` may import `util/db`/`util/settings`; `internal/render` sees only the lists + closure.
 
@@ -221,6 +224,4 @@ Two variables are read directly (no flag equivalent): `ARGOCDF_EXTERNAL_DIFF` (`
 
 ## Test Data
 
-`testdata/` contains real ArgoCD Application manifests for testing:
-- `apps.yaml` - Application manifests
-- `crd.yaml` - CRD definitions
+`testdata/` is a LOCAL, gitignored scratch directory (see `.gitignore`) for manual runs against a real cluster - it is not tracked and no Go test reads it. Package tests build their fixtures in code (`internal/testutil`, per-test `t.TempDir()` repositories) and the end-to-end fixtures live in the `e2e/` submodule.

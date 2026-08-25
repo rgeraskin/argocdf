@@ -510,7 +510,7 @@ mise run fmt
 # Run linter
 mise run lint
 
-# Run all checks (vet + lint + test), as CI does
+# Run all checks (vet + lint + test + test under the race detector)
 mise run check
 ```
 
@@ -543,10 +543,13 @@ argocdf/
 │   ├── render/                 # Helm/Kustomize rendering, multi-source, chart cache
 │   ├── rendercache/            # Persistent content-addressed render cache
 │   ├── diff/                   # Manifest comparison and recursive apps-of-apps discovery
+│   ├── lint/                   # --lint runners: shell adapters plus built-in kyverno/conftest
 │   ├── output/                 # Terminal, markdown, unified, and HTML writers
 │   ├── types/                  # Shared types
-│   └── errors/                 # Custom error types
+│   └── testutil/               # Fixtures shared by package tests
 ├── e2e/                        # End-to-end test fixtures (git submodule)
+├── scripts/e2e/                # Scripts behind the e2e:* mise tasks (bootstrap, run, review)
+├── examples/github-actions/    # PR-comment workflow examples
 ├── .goreleaser.yaml            # Release build configuration
 ├── .github/workflows/          # CI and release pipelines
 ├── .mise.toml                  # Toolchain versions and task definitions
