@@ -194,7 +194,7 @@ func (m *MarkdownWriter) writeAppDiffGitHub(appDiff *diff.AppDiff, _ int) error 
 
 	// Error message
 	if appDiff.Error != nil {
-		m.write(prefixLines("⚠️ "+html.EscapeString(appDiff.Error.Error()), "> ") + "\n\n")
+		m.write(prefixLines("⚠️ "+escapeProse(appDiff.Error.Error()), "> ") + "\n\n")
 	} else if result == nil {
 		m.write("_No diff available_\n\n")
 	} else {
@@ -202,7 +202,7 @@ func (m *MarkdownWriter) writeAppDiffGitHub(appDiff *diff.AppDiff, _ int) error 
 		if len(result.ParseErrors) > 0 {
 			m.write(fmt.Sprintf("> ⚠️ **%d YAML parse error(s):**\n", len(result.ParseErrors)))
 			for _, err := range result.ParseErrors {
-				m.write(fmt.Sprintf("> - %s\n", html.EscapeString(err)))
+				m.write(fmt.Sprintf("> - %s\n", escapeProse(err)))
 			}
 			m.write("\n")
 		}
@@ -211,7 +211,7 @@ func (m *MarkdownWriter) writeAppDiffGitHub(appDiff *diff.AppDiff, _ int) error 
 		if len(result.ParseWarnings) > 0 {
 			m.write(fmt.Sprintf("> ⚠️ **%d warning(s):**\n", len(result.ParseWarnings)))
 			for _, warn := range result.ParseWarnings {
-				m.write(fmt.Sprintf("> - %s\n", html.EscapeString(warn)))
+				m.write(fmt.Sprintf("> - %s\n", escapeProse(warn)))
 			}
 			m.write("\n")
 		}
@@ -287,7 +287,7 @@ func (m *MarkdownWriter) writeAppDiffAtlantis(appDiff *diff.AppDiff, _ int) erro
 
 	// Error message
 	if appDiff.Error != nil {
-		m.write(prefixLines("⚠️ "+html.EscapeString(appDiff.Error.Error()), "> ") + "\n\n")
+		m.write(prefixLines("⚠️ "+escapeProse(appDiff.Error.Error()), "> ") + "\n\n")
 	} else if result == nil {
 		m.write("_No diff available_\n\n")
 	} else {
@@ -295,7 +295,7 @@ func (m *MarkdownWriter) writeAppDiffAtlantis(appDiff *diff.AppDiff, _ int) erro
 		if len(result.ParseErrors) > 0 {
 			m.write(fmt.Sprintf("> ⚠️ **%d YAML parse error(s):**\n", len(result.ParseErrors)))
 			for _, err := range result.ParseErrors {
-				m.write(fmt.Sprintf("> - %s\n", html.EscapeString(err)))
+				m.write(fmt.Sprintf("> - %s\n", escapeProse(err)))
 			}
 			m.write("\n")
 		}
@@ -304,7 +304,7 @@ func (m *MarkdownWriter) writeAppDiffAtlantis(appDiff *diff.AppDiff, _ int) erro
 		if len(result.ParseWarnings) > 0 {
 			m.write(fmt.Sprintf("> ⚠️ **%d warning(s):**\n", len(result.ParseWarnings)))
 			for _, warn := range result.ParseWarnings {
-				m.write(fmt.Sprintf("> - %s\n", html.EscapeString(warn)))
+				m.write(fmt.Sprintf("> - %s\n", escapeProse(warn)))
 			}
 			m.write("\n")
 		}
@@ -529,7 +529,7 @@ func (m *MarkdownWriter) Flush() error {
 // part.
 func (m *MarkdownWriter) assembleParts() []string {
 	marker := CommentMarker(m.markerID) + "\n"
-	title := html.EscapeString(m.title)
+	title := escapeProse(m.title)
 	heading := "## " + title + "\n\n"
 
 	var whole strings.Builder
@@ -733,4 +733,87 @@ func removeStaleParts(path string, keep int) {
 			return
 		}
 	}
+}
+
+// escapeProse HTML-escapes text bound for a markdown paragraph - a blockquoted
+// note, a list item, the heading - while leaving backtick code spans VERBATIM.
+//
+// Two CommonMark rules meet in a render error. Outside a code span a `<tag>` is
+// raw inline HTML, which GitHub's sanitizer strips, so prose is escaped - or the
+// `<api versions removed>` marker upstream's helm wrapper leaves in its error
+// would vanish from the comment. INSIDE a code span every character is literal,
+// entities included: `&lt;309 elided&gt;` is what a PR comment displayed for a
+// kustomize failure, because ArgoCD's exec error quotes the failing argv in
+// backticks (`kustomize build ...` failed exit status 1: ...) and the writer
+// escaped the whole note. The quotes AFTER the span decoded fine, which is what
+// made the entities look like a bug in the elision rather than in the writer -
+// upstream's own marker had been pinned with the same display in
+// e2e/expected/helm-schema-fail, unnoticed. Spans pair as CommonMark pairs
+// them - a run of N backticks opens, the next run of EXACTLY N closes, a run
+// with no closer is prose - with one deliberate narrowing: a span never crosses
+// a LINE BREAK. Block structure is decided before inline structure, so a blank
+// line always ends the paragraph before such a span could form, and in a "> -"
+// item or the heading a continuation line that opens another block does too
+// (a line starting with </details> is an HTML block, whatever the inline
+// context) - leaving the would-be span's content as prose, where an unescaped
+// tag is raw HTML. No argocdf surface emits a multi-line span (exec errors
+// quote the argv on the first line, lint findings are folded onto one line by
+// construction), so the narrowing costs nothing and closes the leak for the
+// shapes that could. Backslash-escaped backticks are not special here; no tool
+// argocdf runs writes one, and mispairing costs only which half is
+// entity-escaped. Not for text placed inside raw HTML - the <summary> app
+// name - where a backtick is just a character and html.EscapeString is the
+// whole rule.
+func escapeProse(s string) string {
+	var b strings.Builder
+	for {
+		open := strings.IndexByte(s, '`')
+		if open < 0 {
+			b.WriteString(html.EscapeString(s))
+			return b.String()
+		}
+		n := backtickRun(s[open:])
+		line := s[open+n:]
+		if nl := strings.IndexByte(line, '\n'); nl >= 0 {
+			line = line[:nl]
+		}
+		end := closingBackticks(line, n)
+		if end < 0 {
+			// No closer: the backticks are prose, and so is whatever follows.
+			b.WriteString(html.EscapeString(s[:open+n]))
+			s = s[open+n:]
+			continue
+		}
+		span := open + n + end + n
+		b.WriteString(html.EscapeString(s[:open]))
+		b.WriteString(s[open:span])
+		s = s[span:]
+	}
+}
+
+// backtickRun returns the length of the backtick run s starts with.
+func backtickRun(s string) int {
+	n := 0
+	for n < len(s) && s[n] == '`' {
+		n++
+	}
+	return n
+}
+
+// closingBackticks returns the offset in s of the first backtick run of
+// exactly n backticks, or -1. A longer or shorter run does not close the span:
+// single backticks enclosing a doubled backtick are ONE span in CommonMark.
+func closingBackticks(s string, n int) int {
+	for i := 0; i < len(s); {
+		if s[i] != '`' {
+			i++
+			continue
+		}
+		run := backtickRun(s[i:])
+		if run == n {
+			return i
+		}
+		i += run
+	}
+	return -1
 }

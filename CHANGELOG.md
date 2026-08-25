@@ -22,6 +22,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
   A chart is staged beside its cache entry and renamed into place; when the publish failed - a copy error, or the rename lost to a concurrent argocdf publishing the same chart - the staging directory stayed on disk forever, because the cleanup refused to remove anything outside the system temp directory and the cache is not there. It is removed now, and the garbage collection above sweeps the ones earlier versions left once they pass the age bound.
 
+- Markdown reports no longer show HTML entities inside a quoted command
+
+  ArgoCD quotes the failing command of a render error in backticks - `` `kustomize build ...` failed exit status 1: ... `` - which markdown renders as a code span, and a code span's content is literal, entities included. The writer HTML-escaped the whole note, so a PR comment displayed `&lt;309 elided&gt;` for the elided API-version list (and `&lt;api versions removed&gt;` for helm's own marker, and `&#34;` for any quoted argument) where the text after the closing backtick decoded fine. Code spans are now copied verbatim into the error, warning and heading lines; the prose around them is still escaped, since a `<tag>` there is raw HTML that GitHub strips.
+
 ## [0.7.0] - 2026-08-24
 
 ### Added

@@ -69,6 +69,12 @@ func TestMarkdownWriter_WriteHeader(t *testing.T) {
 			title:    "<script>alert('xss')</script>",
 			contains: "&lt;script&gt;",
 		},
+		{
+			name:     "code span in the title",
+			format:   MarkdownFormatGitHub,
+			title:    "pre `<x>` <y>",
+			contains: "## pre `<x>` &lt;y&gt;",
+		},
 	}
 
 	for _, tt := range tests {
@@ -569,5 +575,92 @@ func TestMarkdownFormat_Values(t *testing.T) {
 	}
 	if MarkdownFormatAtlantis != "atlantis" {
 		t.Errorf("MarkdownFormatAtlantis = %q, want %q", MarkdownFormatAtlantis, "atlantis")
+	}
+}
+
+// TestEscapeProse pins the code-span rule: prose is HTML-escaped, a backtick
+// code span is copied verbatim, and spans pair by run length the way
+// CommonMark pairs them. An unmatched run is prose.
+func TestEscapeProse(t *testing.T) {
+	tests := []struct {
+		name, in, want string
+	}{
+		{"empty", "", ""},
+		{"plain", "plain text", "plain text"},
+		{"prose is escaped", `<b>&"'</b>`, "&lt;b&gt;&amp;&#34;&#39;&lt;/b&gt;"},
+		{"span is verbatim", "a `<x>` b", "a `<x>` b"},
+		{"prose around a span is escaped", "<a> `<b>` <c>", "&lt;a&gt; `<b>` &lt;c&gt;"},
+		{"two spans", "`<a>` and `<b>` <c>", "`<a>` and `<b>` &lt;c&gt;"},
+		{"unmatched backtick is prose", "a ` <b>", "a ` &lt;b&gt;"},
+		{"a double run closes only on a double run", "`` a ` <b> `` <c>", "`` a ` <b> `` &lt;c&gt;"},
+		{"a longer run does not close a single", "` a `` <b> ` <c>", "` a `` <b> ` &lt;c&gt;"},
+		{"a shorter run does not close a double", "`` a ` <b>", "`` a ` &lt;b&gt;"},
+		{"trailing unmatched run", "<a> ``", "&lt;a&gt; ``"},
+		{"a span never crosses a line break", "`<a>\n<b>` <c>", "`&lt;a&gt;\n&lt;b&gt;` &lt;c&gt;"},
+		{"a blank line inside a span is prose", "`<a>\n\n<b>`", "`&lt;a&gt;\n\n&lt;b&gt;`"},
+		{"the closer of a broken span opens the next one", "`<a>\n<b>` <c> `<d>`", "`&lt;a&gt;\n&lt;b&gt;` <c> `&lt;d&gt;`"},
+		{
+			"ArgoCD exec error",
+			"failed to render source 0: `kustomize build ./app --helm-api-versions <309 elided>` failed exit status 1: Error: loader.New \"cycle detected: candidate root './app'\"",
+			"failed to render source 0: `kustomize build ./app --helm-api-versions <309 elided>` failed exit status 1: Error: loader.New &#34;cycle detected: candidate root &#39;./app&#39;&#34;",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := escapeProse(tt.in); got != tt.want {
+				t.Errorf("escapeProse(%q)\n got %q\nwant %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestMarkdownWriter_CodeSpanContentIsNotEntityEscaped pins the shape of a
+// render error, a parse error and a warning in a PR comment. ArgoCD's exec error quotes the
+// failing argv in backticks - a markdown CODE SPAN, whose content GitHub
+// displays literally, entities included - so escaping the whole note put
+// `&lt;309 elided&gt;` in the comment while the quotes after the span decoded
+// fine. Both formats share the rule, and the prose around the span stays
+// escaped: an unescaped <tag> there is raw HTML the sanitizer would strip.
+func TestMarkdownWriter_CodeSpanContentIsNotEntityEscaped(t *testing.T) {
+	const errMsg = "failed to render base branch: `kustomize build ./app --helm-api-versions <309 elided>` failed exit status 1: Error: loader.New \"cycle detected\""
+	const wantErr = "> ⚠️ failed to render base branch: `kustomize build ./app --helm-api-versions <309 elided>` failed exit status 1: Error: loader.New &#34;cycle detected&#34;\n"
+	const warning = "[target] [lint#1] Deployment/web: image `<none>` is <unpinned>"
+	const wantWarn = "> - [target] [lint#1] Deployment/web: image `<none>` is &lt;unpinned&gt;\n"
+	const parseErr = "[base] document 2: `<kind>` is <missing>"
+	const wantParseErr = "> - [base] document 2: `<kind>` is &lt;missing&gt;\n"
+
+	for _, format := range []MarkdownFormat{MarkdownFormatGitHub, MarkdownFormatAtlantis} {
+		t.Run(string(format), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "test.md")
+			w, err := NewMarkdownWriter(path, format, 3)
+			if err != nil {
+				t.Fatalf("NewMarkdownWriter() error = %v", err)
+			}
+			if err := w.WriteAppDiff(&diff.AppDiff{Name: "failing", Error: errors.New(errMsg)}, 0); err != nil {
+				t.Fatalf("WriteAppDiff(error) error = %v", err)
+			}
+			warned := &diff.AppDiff{Name: "warned", Diff: &diff.ManifestSetDiff{
+				ParseErrors:   []string{parseErr},
+				ParseWarnings: []string{warning},
+			}}
+			if err := w.WriteAppDiff(warned, 0); err != nil {
+				t.Fatalf("WriteAppDiff(warning) error = %v", err)
+			}
+			if err := w.Flush(); err != nil {
+				t.Fatalf("Flush() error = %v", err)
+			}
+			content, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, want := range []string{wantErr, wantParseErr, wantWarn} {
+				if !strings.Contains(string(content), want) {
+					t.Errorf("report is missing the line\n%q\ngot:\n%s", want, content)
+				}
+			}
+			if strings.Contains(string(content), "&lt;309 elided&gt;") {
+				t.Errorf("the code span's content was entity-escaped:\n%s", content)
+			}
+		})
 	}
 }
