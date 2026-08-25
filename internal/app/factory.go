@@ -325,7 +325,7 @@ func (f *Factory) CreateOutputWriter() (output.Writer, error) {
 			writers = append(writers, mdWriter)
 
 		case "html-side-by-side":
-			htmlWriter, err := output.NewHTMLWriter(fo.Path, true, false, false)
+			htmlWriter, err := output.NewHTMLWriter(fo.Path)
 			if err != nil {
 				return nil, err
 			}

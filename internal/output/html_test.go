@@ -11,7 +11,6 @@ import (
 )
 
 func TestNewHTMLWriter(t *testing.T) {
-	// Create a temp file
 	tmpFile, err := os.CreateTemp("", "test-*.html")
 	if err != nil {
 		t.Fatalf("Failed to create temp file: %v", err)
@@ -21,45 +20,12 @@ func TestNewHTMLWriter(t *testing.T) {
 		_ = os.Remove(tmpFile.Name())
 	}()
 
-	tests := []struct {
-		name        string
-		sideBySide  bool
-		summaryOnly bool
-	}{
-		{
-			name:        "side-by-side mode",
-			sideBySide:  true,
-			summaryOnly: false,
-		},
-		{
-			name:        "summary only mode",
-			sideBySide:  false,
-			summaryOnly: true,
-		},
-		{
-			name:        "default mode",
-			sideBySide:  false,
-			summaryOnly: false,
-		},
+	w, err := NewHTMLWriter(tmpFile.Name())
+	if err != nil {
+		t.Fatalf("NewHTMLWriter() error = %v", err)
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			w, err := NewHTMLWriter(tmpFile.Name(), tt.sideBySide, tt.summaryOnly, false)
-			if err != nil {
-				t.Fatalf("NewHTMLWriter() error = %v", err)
-			}
-			defer func() {
-				_ = w.Flush()
-			}()
-
-			if w.sideBySide != tt.sideBySide {
-				t.Errorf("sideBySide = %v, want %v", w.sideBySide, tt.sideBySide)
-			}
-			if w.summaryOnly != tt.summaryOnly {
-				t.Errorf("summaryOnly = %v, want %v", w.summaryOnly, tt.summaryOnly)
-			}
-		})
+	if err := w.Flush(); err != nil {
+		t.Errorf("Flush() error = %v", err)
 	}
 }
 
@@ -73,7 +39,7 @@ func TestHTMLWriterWriteHeader(t *testing.T) {
 		_ = os.Remove(tmpFile.Name())
 	}()
 
-	w, err := NewHTMLWriter(tmpFile.Name(), false, false, false)
+	w, err := NewHTMLWriter(tmpFile.Name())
 	if err != nil {
 		t.Fatalf("NewHTMLWriter() error = %v", err)
 	}
@@ -112,7 +78,7 @@ func TestHTMLWriterWriteAppDiff(t *testing.T) {
 		_ = os.Remove(tmpFile.Name())
 	}()
 
-	w, err := NewHTMLWriter(tmpFile.Name(), false, false, false)
+	w, err := NewHTMLWriter(tmpFile.Name())
 	if err != nil {
 		t.Fatalf("NewHTMLWriter() error = %v", err)
 	}
@@ -177,7 +143,7 @@ func TestHTMLWriterWriteAppDiffWithError(t *testing.T) {
 		_ = os.Remove(tmpFile.Name())
 	}()
 
-	w, err := NewHTMLWriter(tmpFile.Name(), false, false, false)
+	w, err := NewHTMLWriter(tmpFile.Name())
 	if err != nil {
 		t.Fatalf("NewHTMLWriter() error = %v", err)
 	}
@@ -220,7 +186,7 @@ func TestHTMLWriterWriteSummary(t *testing.T) {
 		_ = os.Remove(tmpFile.Name())
 	}()
 
-	w, err := NewHTMLWriter(tmpFile.Name(), false, false, false)
+	w, err := NewHTMLWriter(tmpFile.Name())
 	if err != nil {
 		t.Fatalf("NewHTMLWriter() error = %v", err)
 	}
@@ -265,7 +231,7 @@ func TestHTMLWriterWriteFooter(t *testing.T) {
 		_ = os.Remove(tmpFile.Name())
 	}()
 
-	w, err := NewHTMLWriter(tmpFile.Name(), false, false, false)
+	w, err := NewHTMLWriter(tmpFile.Name())
 	if err != nil {
 		t.Fatalf("NewHTMLWriter() error = %v", err)
 	}

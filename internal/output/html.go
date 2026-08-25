@@ -15,25 +15,15 @@ import (
 // HTMLWriter writes diff output as an HTML report.
 type HTMLWriter struct {
 	baseFileWriter
-	sideBySide  bool
-	summaryOnly bool
 }
 
-// NewHTMLWriter creates a new HTMLWriter.
-// The sideBySide parameter controls whether to use side-by-side diff display.
-// The summaryOnly parameter controls whether to show only summary without details.
-// The third parameter is kept for backward compatibility but is ignored (use MarkdownWriter for markdown).
-func NewHTMLWriter(filePath string, sideBySide, summaryOnly, _ bool) (*HTMLWriter, error) {
+// NewHTMLWriter creates a new HTMLWriter writing a side-by-side report to filePath.
+func NewHTMLWriter(filePath string) (*HTMLWriter, error) {
 	base, err := newBaseFileWriter(filePath, "HTML")
 	if err != nil {
 		return nil, err
 	}
-
-	return &HTMLWriter{
-		baseFileWriter: base,
-		sideBySide:     sideBySide,
-		summaryOnly:    summaryOnly,
-	}, nil
+	return &HTMLWriter{baseFileWriter: base}, nil
 }
 
 // WriteHeader writes the HTML header.
@@ -78,11 +68,6 @@ func (h *HTMLWriter) WriteHeader(title string) error {
         .badge-modified { background-color: rgba(220, 220, 170, 0.2); color: var(--modified-color); }
         .badge-error { background-color: rgba(241, 76, 76, 0.2); color: var(--removed-color); }
         .badge-warning { background-color: rgba(220, 220, 170, 0.2); color: var(--modified-color); }
-        .diff-container { background-color: #1a1a1a; border-radius: 4px; overflow: hidden; margin-top: 10px; font-family: monospace; font-size: 0.85em; }
-        .diff-line { padding: 2px 10px; white-space: pre-wrap; word-wrap: break-word; }
-        .diff-add { background-color: rgba(78, 201, 176, 0.15); color: var(--added-color); }
-        .diff-del { background-color: rgba(241, 76, 76, 0.15); color: var(--removed-color); }
-        .diff-context { color: #888; }
         .summary { background-color: var(--code-bg); border: 1px solid var(--border-color); border-radius: 8px; padding: 20px; margin-top: 30px; }
         .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 15px; margin-top: 15px; }
         .summary-item { text-align: center; }
@@ -91,7 +76,6 @@ func (h *HTMLWriter) WriteHeader(title string) error {
         .error-message { color: var(--removed-color); padding: 10px; background-color: rgba(241, 76, 76, 0.1); border-radius: 4px; }
         .warning-message { color: var(--modified-color); padding: 10px; background-color: rgba(220, 220, 170, 0.1); border-radius: 4px; }
         .no-changes { color: #888; font-style: italic; }
-        .manifest-key { font-family: monospace; font-size: 0.9em; color: #888; }
         .timestamp { color: #666; font-size: 0.8em; margin-top: 30px; text-align: center; }
         details { margin-top: 10px; }
         summary { cursor: pointer; color: var(--header-color); }
@@ -184,52 +168,13 @@ func (h *HTMLWriter) writeAppDiffFull(appDiff *types.AppDiff, depth int) error {
 			if len(result.ParseErrors) == 0 {
 				h.write(`<p class="no-changes">No changes</p>`)
 			}
-		} else if !h.summaryOnly {
-			// Show detailed diff unless summaryOnly is set
-			if h.sideBySide {
-				h.writeDetailedDiffSideBySide(result)
-			} else {
-				h.writeDetailedDiff(result)
-			}
+		} else {
+			h.writeDetailedDiffSideBySide(result)
 		}
 	}
 
 	h.write(`</div>`)
 	return nil
-}
-
-// writeDetailedDiff writes the detailed diff.
-func (h *HTMLWriter) writeDetailedDiff(result *diff.ManifestSetDiff) {
-	// Added
-	if len(result.Added) > 0 {
-		h.write(`<details open><summary>Added Resources</summary>`)
-		for _, m := range result.Added {
-			h.write(fmt.Sprintf(`<div class="manifest-key diff-add">+ %s</div>`, html.EscapeString(m.Key())))
-		}
-		h.write(`</details>`)
-	}
-
-	// Removed
-	if len(result.Removed) > 0 {
-		h.write(`<details open><summary>Removed Resources</summary>`)
-		for _, m := range result.Removed {
-			h.write(fmt.Sprintf(`<div class="manifest-key diff-del">- %s</div>`, html.EscapeString(m.Key())))
-		}
-		h.write(`</details>`)
-	}
-
-	// Modified
-	if len(result.Modified) > 0 {
-		h.write(`<details open><summary>Modified Resources</summary>`)
-		for _, md := range result.Modified {
-			h.write(fmt.Sprintf(`<details><summary class="manifest-key">~ %s</summary>`, html.EscapeString(md.Key)))
-			if md.Diff != nil {
-				h.writeFieldChangesHTML(md.Diff)
-			}
-			h.write(`</details>`)
-		}
-		h.write(`</details>`)
-	}
 }
 
 // writeDetailedDiffSideBySide writes the diff as a pure HTML side-by-side view.
@@ -407,29 +352,6 @@ func splitLines(content string) []string {
 		lines = lines[:len(lines)-1]
 	}
 	return lines
-}
-
-// writeFieldChangesHTML writes field-level changes as HTML.
-func (h *HTMLWriter) writeFieldChangesHTML(result *diff.DiffResult) {
-	h.write(`<div class="diff-container">`)
-
-	for _, change := range result.Changes {
-		switch change.Type {
-		case diff.ChangeTypeAdded:
-			h.write(fmt.Sprintf(`<div class="diff-line diff-add">+ %s: %v</div>`,
-				html.EscapeString(change.Path), change.NewValue))
-		case diff.ChangeTypeRemoved:
-			h.write(fmt.Sprintf(`<div class="diff-line diff-del">- %s: %v</div>`,
-				html.EscapeString(change.Path), change.OldValue))
-		case diff.ChangeTypeModified:
-			h.write(fmt.Sprintf(`<div class="diff-line diff-context">~ %s:</div>`,
-				html.EscapeString(change.Path)))
-			h.write(fmt.Sprintf(`<div class="diff-line diff-del">  - %v</div>`, change.OldValue))
-			h.write(fmt.Sprintf(`<div class="diff-line diff-add">  + %v</div>`, change.NewValue))
-		}
-	}
-
-	h.write(`</div>`)
 }
 
 // WriteTree writes the full application tree.
