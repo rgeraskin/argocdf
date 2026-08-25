@@ -27,11 +27,6 @@ func Open(path string) (*Repository, error) {
 	return &Repository{path: path}, nil
 }
 
-// Path returns the repository root path.
-func (r *Repository) Path() string {
-	return r.path
-}
-
 // run executes a git command and returns stdout.
 func (r *Repository) run(args ...string) (string, error) {
 	return runGitCommand(r.path, args...)
@@ -55,33 +50,6 @@ func (r *Repository) HeadBranch() (string, error) {
 		return "", nil
 	}
 	return output, nil
-}
-
-// Checkout checks out the specified branch.
-func (r *Repository) Checkout(branchName string) error {
-	_, err := r.run("checkout", branchName)
-	return err
-}
-
-// CheckoutHash checks out a specific commit hash.
-func (r *Repository) CheckoutHash(hash string) error {
-	_, err := r.run("checkout", hash)
-	return err
-}
-
-// CurrentBranch returns the current branch name, or empty string if detached HEAD.
-func (r *Repository) CurrentBranch() (string, error) {
-	return r.HeadBranch()
-}
-
-// RemoteURL returns the URL of the origin remote.
-func (r *Repository) RemoteURL() (string, error) {
-	return r.run("remote", "get-url", "origin")
-}
-
-// BranchExists checks if a branch exists.
-func (r *Repository) BranchExists(branchName string) bool {
-	return r.runSilent("rev-parse", "--verify", "refs/heads/"+branchName)
 }
 
 // CommitHash returns the hash for a branch or ref.
@@ -149,33 +117,6 @@ func (r *Repository) FileContent(commit, path string) (string, error) {
 	return r.run("show", commit+":"+cleanPath)
 }
 
-// GetWorktreeForBranch returns the worktree path for a branch if it's checked out in a worktree.
-// Returns empty string if the branch is not in any worktree.
-func (r *Repository) GetWorktreeForBranch(branchName string) (string, error) {
-	output, err := r.run("worktree", "list", "--porcelain")
-	if err != nil {
-		// If worktree command fails, assume worktrees aren't in use
-		return "", nil
-	}
-
-	lines := strings.Split(strings.TrimSpace(output), "\n")
-	var currentWorktreePath string
-
-	for _, line := range lines {
-		if strings.HasPrefix(line, "worktree ") {
-			currentWorktreePath = strings.TrimPrefix(line, "worktree ")
-		} else if strings.HasPrefix(line, "branch ") {
-			branch := strings.TrimPrefix(line, "branch ")
-			branch = strings.TrimPrefix(branch, "refs/heads/")
-			if branch == branchName {
-				return currentWorktreePath, nil
-			}
-		}
-	}
-
-	return "", nil
-}
-
 // AddWorktree creates an ephemeral detached-HEAD git worktree checked out at
 // the given ref (branch name or commit hash) under a fresh temp directory.
 // It returns the worktree path and a cleanup function that removes the
@@ -214,83 +155,6 @@ func (r *Repository) AddWorktree(ref string) (string, func(), error) {
 	return worktreePath, cleanup, nil
 }
 
-// WithBranch executes a function while checked out to the specified branch,
-// then restores the original position afterward.
-// If the branch is already checked out in another worktree, it uses that worktree path instead.
-func (r *Repository) WithBranch(branchName string, fn func() error) (err error) {
-	// Check if the branch is already in a worktree
-	worktreePath, err := r.GetWorktreeForBranch(branchName)
-	if err != nil {
-		return fmt.Errorf("failed to check worktree status: %w", err)
-	}
-
-	if worktreePath != "" && worktreePath != r.path {
-		// Branch is in a different worktree - use that worktree's path
-		// Temporarily change the repository path for this operation,
-		// restoring it even if fn panics
-		originalPath := r.path
-		r.path = worktreePath
-		defer func() {
-			r.path = originalPath
-		}()
-		return fn()
-	}
-
-	// Branch is either in current worktree or not in any worktree - use standard checkout
-	// Save current position (branch name or commit hash)
-	originalBranch, _ := r.HeadBranch()
-	var originalRef string
-	if originalBranch == "" {
-		// Detached HEAD - save the hash
-		hash, headErr := r.Head()
-		if headErr != nil {
-			return fmt.Errorf("failed to get HEAD: %w", headErr)
-		}
-		originalRef = hash
-	} else {
-		originalRef = originalBranch
-	}
-
-	// Checkout target branch
-	if err := r.Checkout(branchName); err != nil {
-		return err
-	}
-
-	// Restore original position afterward, even if fn panics
-	defer func() {
-		restoreErr := r.Checkout(originalRef)
-		if restoreErr == nil {
-			return
-		}
-		if err != nil {
-			err = fmt.Errorf("function error: %v, restore error: %w", err, restoreErr)
-		} else {
-			err = fmt.Errorf("failed to restore original position: %w", restoreErr)
-		}
-	}()
-
-	// Execute function
-	return fn()
-}
-
-// FullPath returns the full path for a relative path within the repository.
-func (r *Repository) FullPath(relativePath string) string {
-	return filepath.Join(r.path, relativePath)
-}
-
-// FileExists checks if a file exists in the repository.
-func (r *Repository) FileExists(relativePath string) bool {
-	fullPath := r.FullPath(relativePath)
-	_, err := os.Stat(fullPath)
-	return err == nil
-}
-
-// ReadFile reads a file from the repository.
-func (r *Repository) ReadFile(relativePath string) ([]byte, error) {
-	fullPath := r.FullPath(relativePath)
-	return os.ReadFile(fullPath)
-}
-
 // NormalizeRepoURL normalizes a git URL for comparison.
 // It converts various URL formats to a consistent HTTPS format.
 func NormalizeRepoURL(url string) string {
@@ -321,15 +185,7 @@ func NormalizeRepoURL(url string) string {
 	return url
 }
 
-// Clone clones a repository to the specified path.
-// It first attempts a shallow clone of the revision; since --branch only
-// accepts branch or tag names, it falls back to a full clone followed by
-// a checkout when the revision is a commit SHA.
-func Clone(repoURL, revision, destPath string) error {
-	return CloneWithCreds(repoURL, revision, destPath, nil)
-}
-
-// CloneCreds carries optional HTTP(S) credentials for CloneWithCreds: basic
+// CloneCreds carries optional HTTP(S) credentials for Clone: basic
 // auth (username/password) or a bearer token. SSH remotes and other
 // credential kinds keep using the ambient git configuration.
 type CloneCreds struct {
@@ -361,9 +217,12 @@ func (c *CloneCreds) authEnv(repoURL string) []string {
 	}
 }
 
-// CloneWithCreds clones like Clone, authenticating HTTP(S) remotes with the
-// given credentials (nil renders anonymously / with ambient git config).
-func CloneWithCreds(repoURL, revision, destPath string, creds *CloneCreds) error {
+// Clone clones a repository at revision into destPath, authenticating HTTP(S)
+// remotes with creds (nil clones anonymously / with ambient git config). It
+// first attempts a shallow clone of the revision; since --branch only accepts
+// branch or tag names, it falls back to a full clone followed by a checkout
+// when the revision is a commit SHA.
+func Clone(repoURL, revision, destPath string, creds *CloneCreds) error {
 	env := append(os.Environ(), creds.authEnv(repoURL)...)
 
 	args := []string{"clone", "--depth", "1"}

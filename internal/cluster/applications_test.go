@@ -333,68 +333,6 @@ func TestConvertList_Empty(t *testing.T) {
 	}
 }
 
-func TestFilterByRepoURL(t *testing.T) {
-	apps := []Application{
-		{},
-		{},
-		{},
-	}
-	// Set up test apps manually using the struct
-	apps[0].Name = "app-matching"
-	apps[0].Spec.Source = &ApplicationSource{
-		RepoURL: "https://github.com/example/repo.git",
-	}
-
-	apps[1].Name = "app-different"
-	apps[1].Spec.Source = &ApplicationSource{
-		RepoURL: "https://github.com/other/repo.git",
-	}
-
-	apps[2].Name = "app-matching-no-git"
-	apps[2].Spec.Source = &ApplicationSource{
-		RepoURL: "https://github.com/example/repo", // Same repo, different format
-	}
-
-	tests := []struct {
-		name      string
-		repoURL   string
-		wantNames []string
-	}{
-		{
-			name:      "exact match with .git",
-			repoURL:   "https://github.com/example/repo.git",
-			wantNames: []string{"app-matching", "app-matching-no-git"},
-		},
-		{
-			name:      "match without .git suffix",
-			repoURL:   "https://github.com/example/repo",
-			wantNames: []string{"app-matching", "app-matching-no-git"},
-		},
-		{
-			name:      "no matches",
-			repoURL:   "https://github.com/nonexistent/repo",
-			wantNames: []string{},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			filtered := FilterByRepoURL(apps, tt.repoURL)
-
-			if len(filtered) != len(tt.wantNames) {
-				t.Errorf("FilterByRepoURL() returned %d apps, want %d", len(filtered), len(tt.wantNames))
-				return
-			}
-
-			for i, name := range tt.wantNames {
-				if filtered[i].Name != name {
-					t.Errorf("filtered[%d].Name = %q, want %q", i, filtered[i].Name, name)
-				}
-			}
-		})
-	}
-}
-
 // fakeApplicationObject builds a minimal unstructured Application for the
 // dynamic fake client.
 func fakeApplicationObject(name, namespace string) *unstructured.Unstructured {

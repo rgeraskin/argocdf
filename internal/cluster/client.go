@@ -7,8 +7,6 @@ import (
 	"sort"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -199,12 +197,4 @@ func (c *Client) ClusterServer() string {
 		return ""
 	}
 	return c.restConfig.Host
-}
-
-// GVR is a helper type for GroupVersionResource.
-type GVR = schema.GroupVersionResource
-
-// Scheme returns a runtime scheme (useful for conversions).
-func Scheme() *runtime.Scheme {
-	return runtime.NewScheme()
 }

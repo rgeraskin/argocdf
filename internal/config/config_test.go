@@ -436,26 +436,6 @@ func TestConfigWithDefaults(t *testing.T) {
 	}
 }
 
-func TestNew(t *testing.T) {
-	cfg := New()
-
-	if cfg.Context != DefaultContext {
-		t.Errorf("New() Context = %v, want %v", cfg.Context, DefaultContext)
-	}
-	if cfg.ArgoCDNamespace != DefaultNamespace {
-		t.Errorf("New() ArgoCDNamespace = %v, want %v", cfg.ArgoCDNamespace, DefaultNamespace)
-	}
-	if cfg.RepoCreds != DefaultRepoCreds {
-		t.Errorf("New() RepoCreds = %v, want %v", cfg.RepoCreds, DefaultRepoCreds)
-	}
-	if cfg.StdoutFormat != DefaultStdoutFormat {
-		t.Errorf("New() StdoutFormat = %v, want %v", cfg.StdoutFormat, DefaultStdoutFormat)
-	}
-	if cfg.MaxDepth != DefaultMaxDepth {
-		t.Errorf("New() MaxDepth = %v, want %v", cfg.MaxDepth, DefaultMaxDepth)
-	}
-}
-
 // contains checks if s contains substr
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsAt(s, substr))

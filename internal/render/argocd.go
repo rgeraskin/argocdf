@@ -809,7 +809,7 @@ func (r *ArgoCDRenderer) prepareRefSources(
 			return nil, nil, nil, fmt.Errorf("failed to create temp dir for ref %s: %w", source.Ref, err)
 		}
 		tempDirs = append(tempDirs, tempDir)
-		if err := git.CloneWithCreds(source.RepoURL, source.TargetRevision, tempDir, cloneCredsFromRepo(refRepo)); err != nil {
+		if err := git.Clone(source.RepoURL, source.TargetRevision, tempDir, cloneCredsFromRepo(refRepo)); err != nil {
 			cleanup()
 			return nil, nil, nil, fmt.Errorf("failed to clone ref source %s: %w", source.Ref, err)
 		}

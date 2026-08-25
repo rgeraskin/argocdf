@@ -224,17 +224,6 @@ func ParseFileOutput(spec string) (FileOutput, error) {
 	return fo, nil
 }
 
-// New creates a new Config with default values.
-func New() *Config {
-	return &Config{
-		// Context is left empty to use kubectl's current context
-		ArgoCDNamespace: DefaultNamespace,
-		StdoutFormat:    DefaultStdoutFormat,
-		MaxDepth:        DefaultMaxDepth,
-		RepoCreds:       DefaultRepoCreds,
-	}
-}
-
 // Validate checks if the configuration is valid and complete.
 func (c *Config) Validate() error {
 	if c.RepoPath == "" {

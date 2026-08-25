@@ -46,18 +46,3 @@ type AppDiff struct {
 	// Error holds any error that occurred while processing this app
 	Error error
 }
-
-// DiscoveredApp represents a newly discovered Application CRD from rendered manifests.
-type DiscoveredApp struct {
-	Name      string
-	Namespace string
-	Spec      map[string]interface{}
-}
-
-// RefSource represents a source with ref: field that provides values files to other sources.
-type RefSource struct {
-	RefName  string
-	RepoURL  string
-	Revision string
-	Path     string
-}

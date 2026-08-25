@@ -3,7 +3,6 @@ package output
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/pmezard/go-difflib/difflib"
 
@@ -79,18 +78,6 @@ func GenerateManifestUnifiedDiffs(result *diff.ManifestSetDiff, contextLines int
 	}
 
 	return diffs, nil
-}
-
-// CombineUnifiedDiffs combines multiple unified diffs into a single string.
-// This is useful for feeding to diff2html or external diff tools.
-func CombineUnifiedDiffs(diffs map[string]string, keys []string) string {
-	var parts []string
-	for _, key := range keys {
-		if d, ok := diffs[key]; ok && d != "" {
-			parts = append(parts, d)
-		}
-	}
-	return strings.Join(parts, "\n")
 }
 
 // GetSortedKeys returns the keys from the diff map in sorted order.

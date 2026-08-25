@@ -55,16 +55,6 @@ func BaseDir() (string, error) {
 	return filepath.Join(base, "argocdf"), nil
 }
 
-// DefaultDir returns the default render cache directory:
-// os.UserCacheDir()/argocdf/render.
-func DefaultDir() (string, error) {
-	base, err := BaseDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(base, "render"), nil
-}
-
 // DirStats walks dir recursively and returns the number of regular files and
 // their total size in bytes. A missing directory reports zero, nil.
 func DirStats(dir string) (entries int, bytes int64, err error) {

@@ -386,14 +386,3 @@ func buildManifestMap(manifests []Manifest) (map[string]Manifest, []string) {
 	}
 	return m, warnings
 }
-
-// ExtractApplications extracts ArgoCD Application manifests from parsed manifests.
-func ExtractApplications(manifests []Manifest) []Manifest {
-	var apps []Manifest
-	for _, m := range manifests {
-		if m.Kind == "Application" && strings.Contains(m.APIVersion, "argoproj.io") {
-			apps = append(apps, m)
-		}
-	}
-	return apps
-}

@@ -465,32 +465,6 @@ spec:
 	})
 }
 
-func TestExtractApplications(t *testing.T) {
-	manifests := []Manifest{
-		{APIVersion: "argoproj.io/v1alpha1", Kind: "Application", Name: "app1"},
-		{APIVersion: "v1", Kind: "ConfigMap", Name: "config1"},
-		{APIVersion: "argoproj.io/v1alpha1", Kind: "Application", Name: "app2"},
-		{APIVersion: "apps/v1", Kind: "Deployment", Name: "deploy1"},
-		{APIVersion: "argoproj.io/v1alpha1", Kind: "AppProject", Name: "project1"},
-	}
-
-	apps := ExtractApplications(manifests)
-
-	if len(apps) != 2 {
-		t.Errorf("ExtractApplications() returned %d, want 2", len(apps))
-	}
-
-	// Verify only Application kind with argoproj.io apiVersion are returned
-	for _, app := range apps {
-		if app.Kind != "Application" {
-			t.Errorf("Expected Kind=Application, got %s", app.Kind)
-		}
-		if app.APIVersion != "argoproj.io/v1alpha1" {
-			t.Errorf("Expected APIVersion=argoproj.io/v1alpha1, got %s", app.APIVersion)
-		}
-	}
-}
-
 func TestGetString(t *testing.T) {
 	m := map[string]interface{}{
 		"string": "value",

@@ -301,11 +301,6 @@ func RoundDuration(d time.Duration) time.Duration {
 	return d.Round(100 * time.Millisecond)
 }
 
-// Configured reports whether the runner has any linter to run.
-func (r *Runner) Configured() bool {
-	return len(r.Commands)+len(r.Kyverno)+len(r.Conftest) > 0
-}
-
 // toolOutput carries a built-in adapter's raw stdout, or the single warning line
 // that replaces it when the invocation itself failed.
 type toolOutput struct {

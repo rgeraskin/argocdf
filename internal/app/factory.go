@@ -351,13 +351,3 @@ func (f *Factory) CreateOutputWriter() (output.Writer, error) {
 
 	return output.NewMultiWriter(writers...), nil
 }
-
-// Config returns the configuration.
-func (f *Factory) Config() *config.Config {
-	return f.config
-}
-
-// Logger returns the logger.
-func (f *Factory) Logger() *log.Logger {
-	return f.logger
-}

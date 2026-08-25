@@ -92,25 +92,6 @@ func SafeRemoveAll(path string) error {
 	return os.RemoveAll(path)
 }
 
-// ResolveAndValidatePath resolves a path relative to base and validates it stays within allowed directory.
-// Returns the resolved absolute path or an error if validation fails.
-func ResolveAndValidatePath(allowedBase, pathToResolve string) (string, error) {
-	// If the path is already absolute, just validate it
-	var resolved string
-	if filepath.IsAbs(pathToResolve) {
-		resolved = pathToResolve
-	} else {
-		resolved = filepath.Join(allowedBase, pathToResolve)
-	}
-
-	// Validate the path stays within the allowed directory
-	if err := ValidatePathContainment(allowedBase, resolved); err != nil {
-		return "", err
-	}
-
-	return resolved, nil
-}
-
 // dirExists reports whether p exists and is a directory.
 func dirExists(p string) bool {
 	info, err := os.Stat(p)

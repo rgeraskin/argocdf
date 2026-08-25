@@ -354,26 +354,6 @@ func TestExecToolKubeconfigOverridesInherited(t *testing.T) {
 	}
 }
 
-func TestConfigured(t *testing.T) {
-	tests := []struct {
-		name string
-		r    Runner
-		want bool
-	}{
-		{name: "nothing", r: Runner{}, want: false},
-		{name: "shell command only", r: Runner{Commands: []string{"true"}}, want: true},
-		{name: "kyverno only", r: Runner{Kyverno: []string{"d"}}, want: true},
-		{name: "conftest only", r: Runner{Conftest: []string{"d"}}, want: true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.r.Configured(); got != tt.want {
-				t.Errorf("Configured() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
 // --lint-timeout must bound WALL-CLOCK, not just signal the child. A command that
 // forks leaves a descendant holding the inherited stdout pipe, and cmd.Wait blocks
 // on that pipe until the descendant exits on its own — so without WaitDelay a

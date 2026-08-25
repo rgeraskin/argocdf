@@ -69,7 +69,7 @@ func cloneExternalRepo(ctx context.Context, opts *RenderOptions, project string,
 	}
 	cleanup = func() { _ = SafeRemoveAll(tempDir) }
 
-	if err := git.CloneWithCreds(source.RepoURL, source.TargetRevision, tempDir, cloneCredsFromRepo(repo)); err != nil {
+	if err := git.Clone(source.RepoURL, source.TargetRevision, tempDir, cloneCredsFromRepo(repo)); err != nil {
 		cleanup()
 		return "", "", nil, fmt.Errorf("failed to clone source repository %s: %w", source.RepoURL, err)
 	}
