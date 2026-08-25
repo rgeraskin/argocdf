@@ -125,6 +125,87 @@ func resolveChartRevision(client chartClient, chart, revision string, enableOCI 
 	return argoversions.MaxVersion(revision, tags)
 }
 
+// chartClientForSource builds ArgoCD's chart client for a chart source and
+// reports whether its repository is an OCI registry — the verdict the client is
+// built with, and the one revision resolution needs too.
+func chartClientForSource(ctx context.Context, opts *RenderOptions, project string, source *cluster.ApplicationSource) (chartClient, bool, error) {
+	repo, err := resolveRepoOrBare(ctx, opts, project, source.RepoURL)
+	if err != nil {
+		return nil, false, err
+	}
+	// The resolved repo's EnableOCI is authoritative; the scheme-less URL
+	// heuristic stays as the fallback for unconfigured repos.
+	enableOCI := repo.EnableOCI || isOCIChartRepo(source.RepoURL)
+	// OCI credentials ride the engine's registry auth file instead of ArgoCD's
+	// `helm registry login` (which on macOS writes to the shared system
+	// keychain — see registryAuthFile). Recording them lazily here covers
+	// repos known only through ResolveRepo. Under --repo-creds=local there is
+	// no owned auth file: OCI auth is defined to ride the user's own registry
+	// config (the pierced HELM_REGISTRY_CONFIG), and inline username/password
+	// on an OCI-flavored entry — nothing `helm repo add` can produce — would
+	// reintroduce the login, so it is stripped the same way without seeding.
+	// The stripped copy makes ExtractChart skip its login/logout entirely; the
+	// helm pull then authenticates from the effective registry config.
+	// Failures are LOUD, per the no-anonymous-fallback contract above.
+	if enableOCI && repo.Username != "" && repo.Password != "" {
+		auth := opts.registryAuth
+		if auth != nil {
+			if err := auth.Ensure(repo.Repo, repo.Username, repo.Password); err != nil {
+				return nil, false, fmt.Errorf("failed to record registry credentials for %s: %w", source.RepoURL, err)
+			}
+		}
+		if auth != nil || opts.HelmRegistryConfig != "" {
+			repo = repo.DeepCopy()
+			repo.Username = ""
+			repo.Password = ""
+		}
+	}
+	return newChartClient(repo, enableOCI), enableOCI, nil
+}
+
+// resolveChartVersion returns the version to PULL and the revision the render is
+// LABELLED with, alongside the resolution error the caller reads to decide
+// whether that version can re-decide the download cache.
+//
+// Resolve the revision the way the repo-server does, and pull THAT: the version
+// is both the pin for `helm pull --version` and the value of
+// ARGOCD_APP_REVISION*, so resolving once is what keeps the label and the pulled
+// chart from disagreeing.
+//
+// An UNRESOLVABLE revision is not fatal here, and that is deliberate: the two
+// shapes that reach it are argocdf's own "HEAD/empty means latest" (a documented
+// deviation — upstream's resolution rejects both, since neither is a version or
+// a semver constraint) and a genuine registry failure, which the pull reports
+// loudly a moment later against the same registry. Failing the render here would
+// turn the first case, which renders today, into an error while adding nothing
+// to the second. The fallback keeps the pull exactly as it was and labels the
+// build env with what the application DECLARED — never with the git commit,
+// which is the bug being fixed.
+func resolveChartVersion(client chartClient, opts *RenderOptions, app *cluster.Application, source *cluster.ApplicationSource, enableOCI bool) (version, resolved string, resolveErr error) {
+	version = source.TargetRevision
+	if version == "HEAD" {
+		version = "" // like empty, HEAD means "latest" for chart sources
+	}
+	resolved, resolveErr = resolveChartRevision(client, source.Chart, source.TargetRevision, enableOCI)
+	if resolveErr == nil {
+		version = resolved
+	} else {
+		resolved = source.TargetRevision
+		// Say so once, at DEBUG: the fallback is silent by design but it changes
+		// a user-visible value (ARGOCD_APP_REVISION reports the declared revision
+		// rather than a resolved version), and nothing else in the run explains
+		// why.
+		if opts.Logger != nil {
+			opts.Logger.Debug("Chart revision not resolved; labelling the render with the declared revision",
+				"app", app.Name,
+				"chart", source.Chart,
+				"revision", source.TargetRevision,
+				"reason", resolveErr)
+		}
+	}
+	return version, resolved, resolveErr
+}
+
 // fetchRemoteChart materializes a source's remote chart as a local unpacked
 // directory through ArgoCD's chart client, wrapped in argocdf's persistent
 // chart cache (pinned versions only; a hit skips fetching — and auth —
@@ -157,74 +238,12 @@ func fetchRemoteChart(ctx context.Context, opts *RenderOptions, app *cluster.App
 	default:
 	}
 
-	repo, err := resolveRepoOrBare(ctx, opts, app.Spec.Project, source.RepoURL)
+	client, enableOCI, err := chartClientForSource(ctx, opts, app.Spec.Project, source)
 	if err != nil {
 		return "", "", false, nil, err
 	}
-	// The resolved repo's EnableOCI is authoritative; the scheme-less URL
-	// heuristic stays as the fallback for unconfigured repos.
-	enableOCI := repo.EnableOCI || isOCIChartRepo(source.RepoURL)
-	// OCI credentials ride the engine's registry auth file instead of ArgoCD's
-	// `helm registry login` (which on macOS writes to the shared system
-	// keychain — see registryAuthFile). Recording them lazily here covers
-	// repos known only through ResolveRepo. Under --repo-creds=local there is
-	// no owned auth file: OCI auth is defined to ride the user's own registry
-	// config (the pierced HELM_REGISTRY_CONFIG), and inline username/password
-	// on an OCI-flavored entry — nothing `helm repo add` can produce — would
-	// reintroduce the login, so it is stripped the same way without seeding.
-	// The stripped copy makes ExtractChart skip its login/logout entirely; the
-	// helm pull then authenticates from the effective registry config.
-	// Failures are LOUD, per the no-anonymous-fallback contract above.
-	if enableOCI && repo.Username != "" && repo.Password != "" {
-		auth := opts.registryAuth
-		if auth != nil {
-			if err := auth.Ensure(repo.Repo, repo.Username, repo.Password); err != nil {
-				return "", "", false, nil, fmt.Errorf("failed to record registry credentials for %s: %w", source.RepoURL, err)
-			}
-		}
-		if auth != nil || opts.HelmRegistryConfig != "" {
-			repo = repo.DeepCopy()
-			repo.Username = ""
-			repo.Password = ""
-		}
-	}
-	client := newChartClient(repo, enableOCI)
 
-	version := source.TargetRevision
-	if version == "HEAD" {
-		version = "" // like empty, HEAD means "latest" for chart sources
-	}
-	// Resolve the revision the way the repo-server does, and pull THAT: the
-	// version is both the pin for `helm pull --version` and the value of
-	// ARGOCD_APP_REVISION*, so resolving once is what keeps the label and the
-	// pulled chart from disagreeing.
-	//
-	// An UNRESOLVABLE revision is not fatal here, and that is deliberate: the
-	// two shapes that reach it are argocdf's own "HEAD/empty means latest" (a
-	// documented deviation — upstream's resolution rejects both, since neither
-	// is a version or a semver constraint) and a genuine registry failure, which
-	// the pull below reports loudly a moment later against the same registry.
-	// Failing the render here would turn the first case, which renders today,
-	// into an error while adding nothing to the second. The fallback keeps the
-	// pull exactly as it was and labels the build env with what the application
-	// DECLARED — never with the git commit, which is the bug being fixed.
-	resolved, resolveErr := resolveChartRevision(client, source.Chart, source.TargetRevision, enableOCI)
-	if resolveErr == nil {
-		version = resolved
-	} else {
-		resolved = source.TargetRevision
-		// Say so once, at DEBUG: the fallback is silent by design but it changes
-		// a user-visible value (ARGOCD_APP_REVISION reports the declared revision
-		// rather than a resolved version), and nothing else in the run explains
-		// why.
-		if opts.Logger != nil {
-			opts.Logger.Debug("Chart revision not resolved; labelling the render with the declared revision",
-				"app", app.Name,
-				"chart", source.Chart,
-				"revision", source.TargetRevision,
-				"reason", resolveErr)
-		}
-	}
+	version, resolved, resolveErr := resolveChartVersion(client, opts, app, source, enableOCI)
 
 	// A CONSTRAINT is not cacheable as written — it resolves against the mutable
 	// registry index, so the same string can mean different content next week —
