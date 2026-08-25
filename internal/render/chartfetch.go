@@ -402,7 +402,12 @@ func publishChartToCache(extracted, cacheDir, chartDir string) bool {
 	if err != nil {
 		return false
 	}
-	defer func() { _ = SafeRemoveAll(staging) }()
+	// Plain RemoveAll, not SafeRemoveAll: staging is a directory this function
+	// just created under the CACHE dir, and SafeRemoveAll refuses anything outside
+	// os.TempDir() - so every failed publish (a copy error, a rename lost to a
+	// concurrent publisher) used to leave its argocdf-chart-*.tmp behind for good.
+	// On success the rename has already moved it and this is a no-op.
+	defer func() { _ = os.RemoveAll(staging) }()
 
 	// chartDir is cacheDir/<chart base name>; recreate that shape in staging.
 	// copyDir copies directory CONTENTS, so the destination root is created

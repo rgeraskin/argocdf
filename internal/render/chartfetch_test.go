@@ -688,3 +688,52 @@ func TestChartFetchErrorKeepsChain(t *testing.T) {
 		}
 	}
 }
+
+// TestPublishChartToCache_FailureRemovesStaging: a publish that does not land
+// must not leave its staging directory beside the entries. It used to, on every
+// failure: the deferred cleanup went through SafeRemoveAll, which refuses paths
+// outside os.TempDir(), and the chart cache lives under the user cache dir. Both
+// failure shapes are covered - the rename lost to a concurrent publisher (which
+// still reports success) and a copy that fails outright.
+func TestPublishChartToCache_FailureRemovesStaging(t *testing.T) {
+	stagingDirs := func(t *testing.T, parent string) []string {
+		t.Helper()
+		matches, err := filepath.Glob(filepath.Join(parent, "argocdf-chart-*.tmp"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return matches
+	}
+
+	t.Run("rename lost to a concurrent publisher", func(t *testing.T) {
+		extracted := chartFixture(t, "mychart")
+		parent := t.TempDir()
+		cacheDir := filepath.Join(parent, "sha")
+		chartDir := filepath.Join(cacheDir, "mychart")
+		if err := os.MkdirAll(chartDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if !publishChartToCache(extracted, cacheDir, chartDir) {
+			t.Fatal("publishChartToCache() = false, want true (entry already populated)")
+		}
+		if left := stagingDirs(t, parent); len(left) != 0 {
+			t.Errorf("staging directories left behind: %v", left)
+		}
+	})
+
+	t.Run("copy fails", func(t *testing.T) {
+		parent := t.TempDir()
+		cacheDir := filepath.Join(parent, "sha")
+		chartDir := filepath.Join(cacheDir, "mychart")
+		missing := filepath.Join(t.TempDir(), "does-not-exist")
+		if publishChartToCache(missing, cacheDir, chartDir) {
+			t.Fatal("publishChartToCache() = true, want false when the source cannot be copied")
+		}
+		if left := stagingDirs(t, parent); len(left) != 0 {
+			t.Errorf("staging directories left behind: %v", left)
+		}
+		if dirExists(cacheDir) {
+			t.Errorf("no entry must exist after a failed publish, found %s", cacheDir)
+		}
+	})
+}

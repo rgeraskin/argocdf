@@ -145,13 +145,14 @@ func isChartCacheEntryDir(name string) bool {
 // Orphaned staging directories: publishChartToCache stages a chart in
 // os.MkdirTemp(parent, "argocdf-chart-*.tmp") — a SIBLING of the entry it is
 // about to claim by rename — so a staging directory can outlive the process
-// that made it. Two ways: the publish fails (a copy error, or a lost rename
-// race against a concurrent publisher), in which case its deferred cleanup is
-// SafeRemoveAll, which refuses any path outside os.TempDir() and the chart
-// cache is not there; or argocdf is killed mid-copy. Either way nothing else
-// ever looks at the directory again, so the GC sweeps it on age like an entry.
-// A successful publish renames the staging directory INTO place and leaves
-// nothing behind.
+// that made it when argocdf is killed mid-copy, before the deferred cleanup
+// runs. Earlier versions also left one behind on EVERY failed publish (a copy
+// error, or a lost rename race against a concurrent publisher): the cleanup was
+// SafeRemoveAll, which refuses any path outside os.TempDir(), and the chart
+// cache is not there. That is fixed, but the directories it left are still on
+// disk. Either way nothing else ever looks at such a directory again, so the GC
+// sweeps it on age like an entry. A successful publish renames the staging
+// directory INTO place and leaves nothing behind.
 const (
 	chartStagingPrefix = "argocdf-chart-"
 	chartStagingSuffix = ".tmp"
