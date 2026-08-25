@@ -1,6 +1,9 @@
 [tools]
 go = "1.27.0"
 golangci-lint = "2.13.1"
+# Whole-program dead-code check (`mise run deadcode`, and a CI step). Installed
+# through mise's go backend so the pin lives here with the rest of the toolchain.
+"go:golang.org/x/tools/cmd/deadcode" = "0.49.0"
 kind = "0.31.0"
 kubectl = "1.31.1"
 yq = "4.44.3"
@@ -69,7 +72,7 @@ description = "Run tests"
 run = "go test -v ./..."
 
 [tasks.test-race]
-description = "Run tests under the race detector. Separate from `test` because it is ~10x slower; `check` runs it, CI (.github/workflows/ci.yml) currently does not."
+description = "Run tests under the race detector. Separate from `test` because it is ~10x slower; `check` and the CI job both run it"
 run = "go test -race ./..."
 
 [tasks.test-coverage]
@@ -96,6 +99,21 @@ goimports -w .
 description = "Run go vet"
 run = "go vet ./..."
 
+[tasks.deadcode]
+description = "Whole-program dead-code check (golang.org/x/tools/cmd/deadcode, test roots included). The one allowed unreachable symbol is baseFileWriter.persistent: the PersistentWriter marker method is never called, only type-asserted, which reachability analysis cannot see"
+run = """
+#!/usr/bin/env bash
+set -uo pipefail
+if ! raw=$(deadcode -test ./... 2>&1); then echo "$raw"; exit 1; fi
+out=$(grep -vF 'unreachable func: baseFileWriter.persistent' <<<"$raw" || true)
+if [ -n "$out" ]; then
+  echo "$out"
+  echo "deadcode: unreachable symbols found - delete them, or extend the allowlist in this task if one is a deliberate marker"
+  exit 1
+fi
+echo "deadcode: nothing unreachable beyond the PersistentWriter marker"
+"""
+
 [tasks.deps]
 description = "Download dependencies"
 run = "go mod download"
@@ -119,8 +137,8 @@ run = "go run ./cmd/argocdf"
 
 [tasks.check]
 alias = "ci"
-description = "Run all checks (vet, lint, test, test-race)"
-depends = ["vet", "lint", "test", "test-race"]
+description = "Run the same checks as the CI `check` job (.github/workflows/ci.yml runs these tasks one step each): vet, build, test, test-race, deadcode, lint. Add a task here and a step there together"
+depends = ["vet", "build", "test", "test-race", "deadcode", "lint"]
 
 [tasks."e2e:bootstrap"]
 description = "Bootstrap the e2e cluster with the REAL ArgoCD controller (the baseline: production-shaped). Requires e2e master pushed, because the controller syncs the remote at targetRevision HEAD. Waits until every Application is Synced+Healthy (E2E_SYNC_TIMEOUT bounds it). REFUSES to run when the cluster is already alive - reuse it with e2e:bootstrap-static, or e2e:clean first"

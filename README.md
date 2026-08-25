@@ -510,7 +510,7 @@ mise run fmt
 # Run linter
 mise run lint
 
-# Run all checks (vet + lint + test + test under the race detector)
+# Run the same checks as the CI job (vet, build, test, test-race, deadcode, lint)
 mise run check
 ```
 
