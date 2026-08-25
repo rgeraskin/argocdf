@@ -910,3 +910,264 @@ func TestComputeKeyUnknownLocalRepoKeepsEveryLocalSource(t *testing.T) {
 		t.Error("with no repository classification the key ignored the local tree; both diff sides would share it")
 	}
 }
+
+// goldenCase is one fully-specified KeyInput and the key it must produce.
+type goldenCase struct {
+	name string
+	in   KeyInput
+	want string
+}
+
+// goldenCases builds one input per branch of ComputeKey's per-source dispatch,
+// plus the run-level blocks (aliases, API versions, credential source). Every
+// input is written out in full rather than derived from baseInput(), so an edit
+// to a shared test helper cannot silently move the pinned bytes.
+func goldenCases() []goldenCase {
+	return []goldenCase{
+		{
+			// Kustomize/directory source: the commit ROOT tree, with the
+			// alias, API-version and credential-source blocks all non-empty.
+			name: "kustomize directory with aliases and api versions",
+			in: KeyInput{
+				AppName:   "dir-app",
+				Namespace: "argocd",
+				Spec: &cluster.ApplicationSpec{
+					Source: &cluster.ApplicationSource{
+						RepoURL:        "https://github.com/owner/repo",
+						Path:           "apps/kustomize",
+						TargetRevision: "HEAD",
+					},
+				},
+				KubeVersion: "1.29.0",
+				Options: KeyOptions{
+					KustomizeEnableHelm:     true,
+					KustomizeBuildOptions:   "--enable-alpha-plugins",
+					KustomizeLoadRestrictor: "LoadRestrictionsNone",
+				},
+				Commit:            "deadbeef",
+				ResolveTree:       mapResolver(map[string]string{"": "root-tree"}),
+				SameRepo:          allRepo,
+				RepoCredsMode:     "cluster",
+				RepoCredsInstance: "https://prod.example.com\x00argocd",
+				APIVersions:       []string{"cert-manager.io/v1", "batch/v1", "batch/v1"},
+				HelmRepoAliases: []HelmRepoAlias{
+					{Name: "stable", URL: "https://charts.example.com/stable"},
+					{Name: "internal", URL: "https://charts.example.com/internal"},
+				},
+			},
+			want: "4c68a94add75d559d4e8c7c1e3195197e59eca4a426cfeb218e1a18b00f5f92c",
+		},
+		{
+			// Local helm chart: tree hash, hermetic deps via a committed
+			// Chart.lock, and every value-file shape - in-path, escaping,
+			// repo-root-absolute, absent (sentinel) and a fileParameter.
+			name: "local helm chart with value files and a file parameter",
+			in: KeyInput{
+				AppName:   "helm-app",
+				Namespace: "team-a",
+				Spec: &cluster.ApplicationSpec{
+					Source: &cluster.ApplicationSource{
+						RepoURL:        "https://github.com/owner/repo",
+						Path:           "apps/foo",
+						TargetRevision: "HEAD",
+						Helm: &cluster.ApplicationSourceHelm{
+							ValueFiles: []string{
+								"values.yaml",
+								"../shared/prod.yaml",
+								"/config/global.yaml",
+								"values/missing.yaml",
+							},
+							FileParameters: []cluster.HelmFileParameter{
+								{Name: "tls.crt", Path: "files/tls.crt"},
+							},
+						},
+					},
+				},
+				KubeVersion: "1.29.0",
+				Commit:      "deadbeef",
+				ResolveTree: mapResolver(map[string]string{
+					"apps/foo":               "tree-foo",
+					"apps/foo/Chart.yaml":    "blob-chart-yaml",
+					"apps/foo/Chart.lock":    "blob-chart-lock",
+					"apps/foo/values.yaml":   "blob-values",
+					"apps/shared/prod.yaml":  "blob-shared-prod",
+					"config/global.yaml":     "blob-global",
+					"apps/foo/files/tls.crt": "blob-tls",
+				}),
+				SameRepo: allRepo,
+			},
+			want: "14f5669576aa9dd8b98d0f50d157e75e474327612baad8b7628fb681e12ddce0",
+		},
+		{
+			// A $ref value file resolving against the ref repository ROOT,
+			// beside the ref source's own (directory) contribution.
+			name: "helm chart with a ref value file",
+			in: KeyInput{
+				AppName:   "ref-app",
+				Namespace: "argocd",
+				Spec: &cluster.ApplicationSpec{
+					Sources: []cluster.ApplicationSource{
+						{
+							RepoURL:        "https://github.com/owner/repo",
+							Path:           "chart",
+							TargetRevision: "HEAD",
+							Helm: &cluster.ApplicationSourceHelm{
+								ValueFiles: []string{"$values/env/prod.yaml"},
+							},
+						},
+						{
+							RepoURL:        "https://github.com/owner/repo",
+							Ref:            "values",
+							Path:           "config",
+							TargetRevision: "HEAD",
+						},
+					},
+				},
+				KubeVersion: "1.29.0",
+				Commit:      "deadbeef",
+				ResolveTree: mapResolver(map[string]string{
+					"chart":         "tree-chart",
+					"env/prod.yaml": "blob-ref-values",
+					"":              "root-tree",
+				}),
+				SameRepo: allRepo,
+			},
+			want: "a0a46869319de6495e4f11667a65b4c097195e128fe3ccf4ee9c853be1647e41",
+		},
+		{
+			// Remote chart at one exact immutable version.
+			name: "remote chart",
+			in: KeyInput{
+				AppName:   "chart-app",
+				Namespace: "argocd",
+				Spec: &cluster.ApplicationSpec{
+					Source: &cluster.ApplicationSource{
+						RepoURL:        "https://charts.example.com",
+						Chart:          "nginx",
+						TargetRevision: "1.2.3",
+					},
+				},
+				KubeVersion:   "1.29.0",
+				Commit:        "deadbeef",
+				RepoCredsMode: "local",
+			},
+			want: "c707327cd5745c4f9d08a8cf579adae65d31c2a2c005934aa7ad2d0744949bc2",
+		},
+		{
+			// OCI artifact: registry URL + revision + the path INSIDE it.
+			name: "oci artifact",
+			in: KeyInput{
+				AppName:   "oci-app",
+				Namespace: "argocd",
+				Spec: &cluster.ApplicationSpec{
+					Source: &cluster.ApplicationSource{
+						RepoURL:        "oci://ghcr.io/acme/artifactchart",
+						TargetRevision: "6.7.0",
+						Path:           "manifests/prod",
+					},
+				},
+				KubeVersion: "1.29.0",
+				Commit:      "deadbeef",
+			},
+			want: "8a8284c416206e2c261b6e995e7e244e1061b19abe2995ea3dfdca868929f2b9",
+		},
+		{
+			// A renderable source in ANOTHER git repository at an immutable
+			// revision: repo + revision + path, no local tree.
+			name: "external git source",
+			in: KeyInput{
+				AppName:   "ext-app",
+				Namespace: "argocd",
+				Spec: &cluster.ApplicationSpec{
+					Source: &cluster.ApplicationSource{
+						RepoURL:        "https://github.com/other/repo",
+						Path:           "kustomize",
+						TargetRevision: "v1.2.3",
+					},
+				},
+				KubeVersion: "1.29.0",
+				Commit:      "deadbeef",
+				ResolveTree: fixedResolver("local-treehash"),
+				SameRepo:    func(u string) bool { return u == "https://github.com/owner/repo" },
+			},
+			want: "0c8a5e70a18208521487809be662c84777ed5dbaa2a10251604cc9fd07413d03",
+		},
+		{
+			// Every branch in ONE spec, which additionally pins the order the
+			// per-source loop contributes them in.
+			name: "multi-source spanning every branch",
+			in: KeyInput{
+				AppName:   "mixed-app",
+				Namespace: "argocd",
+				Spec: &cluster.ApplicationSpec{
+					Sources: []cluster.ApplicationSource{
+						{
+							RepoURL:        "oci://ghcr.io/acme/artifactchart",
+							TargetRevision: "6.7.0",
+							Path:           ".",
+						},
+						{
+							RepoURL:        "https://charts.example.com",
+							Chart:          "nginx",
+							TargetRevision: "1.2.3",
+						},
+						{
+							RepoURL:        "https://github.com/other/repo",
+							Path:           "kustomize",
+							TargetRevision: "0123456789abcdef0123456789abcdef01234567",
+						},
+						{
+							RepoURL:        "https://github.com/owner/repo",
+							Path:           "apps/foo",
+							TargetRevision: "HEAD",
+							Helm: &cluster.ApplicationSourceHelm{
+								ValueFiles: []string{"values.yaml"},
+							},
+						},
+						{
+							RepoURL:        "https://github.com/owner/repo",
+							Path:           "apps/kustomize",
+							TargetRevision: "HEAD",
+						},
+					},
+				},
+				KubeVersion: "1.30.1",
+				Commit:      "deadbeef",
+				ResolveTree: mapResolver(map[string]string{
+					"":                     "root-tree",
+					"apps/foo":             "tree-foo",
+					"apps/foo/values.yaml": "blob-values",
+				}),
+				SameRepo:          func(u string) bool { return u == "https://github.com/owner/repo" },
+				RepoCredsMode:     "cluster",
+				RepoCredsInstance: "https://prod.example.com\x00argocd",
+				APIVersions:       []string{"batch/v1"},
+				HelmRepoAliases:   []HelmRepoAlias{{Name: "stable", URL: "https://charts.example.com/stable"}},
+			},
+			want: "ed3bc28f9233694a1980966bbc3c6ae64cd460dca4e6110b2caa6422d7dc906d",
+		},
+	}
+}
+
+// TestComputeKeyGolden pins the exact bytes ComputeKey hashes. Every other test
+// in this file compares two keys to each other, so a refactor that reordered or
+// respelled a field - invalidating every entry on every user's disk without a
+// SchemaVersion bump - would keep all of them green.
+//
+// A SchemaVersion bump legitimately changes these literals: that is what the
+// bump is for, and the same commit must update them. Any OTHER change that
+// moves them is a silent cache-wide invalidation, and is either a bug to revert
+// or a version bump to make explicit.
+func TestComputeKeyGolden(t *testing.T) {
+	for _, c := range goldenCases() {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := ComputeKey(c.in)
+			if !ok {
+				t.Fatal("ComputeKey: expected ok=true")
+			}
+			if got != c.want {
+				t.Errorf("cache key changed:\n got %s\nwant %s", got, c.want)
+			}
+		})
+	}
+}

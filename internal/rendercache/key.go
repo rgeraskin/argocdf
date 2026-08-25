@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"hash"
 	"io"
 	"path"
 	"slices"
@@ -22,7 +23,7 @@ import (
 //
 // v2: keys now hash render inputs that live OUTSIDE a source path — helm
 // valueFiles/fileParameters (including $ref references) and, for
-// kustomize/directory sources, the whole commit tree (see ComputeKey).
+// kustomize/directory sources, the whole commit tree (see writeSourceIdentity).
 //
 // v3: the native render engine (and its --helm-skip-refresh/--helm-add-repos
 // flags) is gone — everything renders through ArgoCD's repo-server code, and
@@ -158,10 +159,47 @@ type KeyInput struct {
 	HelmRepoAliases []HelmRepoAlias
 	// ReadFile returns the content of a repo-relative file at the given commit.
 	// It is used to inspect a local chart's Chart.yaml dependencies for cache
-	// soundness (see the hermeticity note in ComputeKey). It must return
-	// ok=false when the file cannot be read. When nil, charts that would need
-	// inspection are conservatively bypassed.
+	// soundness (see the hermeticity note in writeLocalHelmSource). It must
+	// return ok=false when the file cannot be read. When nil, charts that would
+	// need inspection are conservatively bypassed.
 	ReadFile func(commit, path string) (content string, ok bool)
+}
+
+// keyWriter accumulates the bytes a cache key hashes. Fields go in
+// delimiter-separated - every part is followed by a 0 byte - so that the
+// concatenation stays unambiguous and two different field sequences cannot
+// produce the same stream.
+//
+// Everything written through it IS the on-disk cache's identity: reordering or
+// respelling what the writers below emit invalidates every entry on every
+// user's machine, silently, with no SchemaVersion bump to explain it.
+// TestComputeKeyGolden pins those bytes for exactly that reason.
+type keyWriter struct {
+	h hash.Hash
+}
+
+func newKeyWriter() *keyWriter {
+	return &keyWriter{h: sha256.New()}
+}
+
+// field writes one or more string parts, each terminated by the delimiter.
+func (w *keyWriter) field(parts ...string) {
+	for _, p := range parts {
+		_, _ = io.WriteString(w.h, p)
+		_, _ = w.h.Write([]byte{0})
+	}
+}
+
+// blob writes raw bytes (the marshalled spec) followed by the same delimiter a
+// string part gets, so it concatenates exactly like one.
+func (w *keyWriter) blob(b []byte) {
+	_, _ = w.h.Write(b)
+	_, _ = w.h.Write([]byte{0})
+}
+
+// sum returns the accumulated key in hex.
+func (w *keyWriter) sum() string {
+	return hex.EncodeToString(w.h.Sum(nil))
 }
 
 // ComputeKey computes the sha256 hex cache key for a render. It returns
@@ -172,22 +210,9 @@ type KeyInput struct {
 // (whose content is not present locally). Callers treat a false result as
 // "bypass the cache for this render", never as an error.
 //
-// Soundness of out-of-source-path inputs:
-//   - Helm local-chart sources additionally hash every resolved valueFiles and
-//     fileParameters path (relative paths resolve against the chart dir; $ref
-//     paths resolve against the ref repository root, ArgoCD's semantics). A
-//     value file that is absent at the commit contributes an "absent" sentinel
-//     rather than a bypass, because absence is itself part of the render
-//     identity.
-//   - Helm dependency resolution must be hermetic at the commit to be
-//     cacheable: a chart whose dependency uses a version RANGE with no
-//     committed Chart.lock resolves against the mutable repo index, so it
-//     bypasses the cache (see chartDepsHermetic).
-//   - Kustomize / directory / unknown sources can reference arbitrary repo
-//     paths (bases, components, patches) that cannot be cheaply enumerated. To
-//     stay sound we hash the commit's ROOT tree instead of the source-path
-//     tree. Trade-off: cache hits then only occur when re-rendering the exact
-//     same commit (still the dominant repeat-run case), and are never stale.
+// The key is the run-level inputs (writeRunInputs, writeHelmRepoAliases,
+// writeAPIVersions) followed by one content identity per source, in spec order
+// (writeSourceIdentity). Each of those documents the soundness rule it carries.
 func ComputeKey(in KeyInput) (string, bool) {
 	if in.Spec == nil {
 		return "", false
@@ -198,57 +223,10 @@ func ComputeKey(in KeyInput) (string, bool) {
 		return "", false
 	}
 
-	h := sha256.New()
-	// writeField writes a length-independent, delimiter-separated field to keep
-	// the concatenation unambiguous.
-	writeField := func(parts ...string) {
-		for _, p := range parts {
-			_, _ = io.WriteString(h, p)
-			_, _ = h.Write([]byte{0})
-		}
-	}
-
-	writeField(SchemaVersion)
-	writeField(in.AppName, in.Namespace)
-	_, _ = h.Write(specJSON)
-	_, _ = h.Write([]byte{0})
-	writeField(in.KubeVersion)
-	writeField(
-		strconv.FormatBool(in.Options.KustomizeEnableHelm),
-		in.Options.KustomizeBuildOptions,
-		in.Options.KustomizeLoadRestrictor,
-	)
-
-	// Helm repository aliases, sorted so the key does not depend on the order the
-	// credential source happened to list them, and length-prefixed so "no aliases"
-	// cannot collide with a list whose entries hash to the same bytes.
-	aliases := make([]HelmRepoAlias, len(in.HelmRepoAliases))
-	copy(aliases, in.HelmRepoAliases)
-	sort.Slice(aliases, func(i, j int) bool {
-		if aliases[i].Name != aliases[j].Name {
-			return aliases[i].Name < aliases[j].Name
-		}
-		return aliases[i].URL < aliases[j].URL
-	})
-	writeField("repocreds", in.RepoCredsMode)
-	writeField("repocredsinstance", in.RepoCredsInstance)
-	writeField("repoaliases", strconv.Itoa(len(aliases)))
-	for _, a := range aliases {
-		writeField("repoalias", a.Name, a.URL)
-	}
-
-	// The API-version set, sorted and deduplicated so the key reflects the SET
-	// (discovery order is not a render input), and length-prefixed like the
-	// aliases. Nil and empty are identical on purpose: both mean "helm gets no
-	// --api-versions".
-	apiVersions := make([]string, 0, len(in.APIVersions))
-	apiVersions = append(apiVersions, in.APIVersions...)
-	sort.Strings(apiVersions)
-	apiVersions = slices.Compact(apiVersions)
-	writeField("apiversions", strconv.Itoa(len(apiVersions)))
-	for _, v := range apiVersions {
-		writeField("apiversion", v)
-	}
+	w := newKeyWriter()
+	w.writeRunInputs(in, specJSON)
+	w.writeHelmRepoAliases(in.RepoCredsMode, in.RepoCredsInstance, in.HelmRepoAliases)
+	w.writeAPIVersions(in.APIVersions)
 
 	sources := in.Spec.GetSources()
 
@@ -263,136 +241,233 @@ func ComputeKey(in KeyInput) (string, bool) {
 
 	// Per-source content identity.
 	for i := range sources {
-		src := sources[i]
-
-		// OCI-artifact source, tested BEFORE Chart for the same reason the
-		// renderer dispatches in that order (argocd.go renderSource): an oci://
-		// URL that also carries a chart: field renders as an ARTIFACT and
-		// ignores the chart, so keying it as a chart would describe a render
-		// that never happens. Nothing in the local repository participates —
-		// the content lives in the registry — so the path is part of the
-		// artifact's identity, not a tree to hash.
-		if src.IsOCI() {
-			if !render.IsImmutableOCIRevision(src.TargetRevision) {
-				return "", false
-			}
-			writeField("oci", src.RepoURL, src.TargetRevision, src.Path)
-			continue
-		}
-
-		if src.Chart != "" {
-			// Remote chart: identity is repo + chart + target revision — but only
-			// when that revision names ONE immutable version. HEAD, "*", "" and
-			// constraint ranges (^2.0.0, 1.x) resolve against the mutable registry
-			// index, so the same key inputs can legitimately render differently
-			// after the publisher moves the resolved version; such renders bypass.
-			// Same predicate as the chart-download cache, so the two caches cannot
-			// disagree about what "pinned" means.
-			if !render.IsImmutableChartVersion(src.TargetRevision) {
-				return "", false
-			}
-			writeField("chart", src.RepoURL, src.Chart, src.TargetRevision)
-			continue
-		}
-
-		// A source in ANOTHER repository: nothing local describes its content, so
-		// the local tree hash the branches below would take is a hash of the wrong
-		// repository — which is exactly what the v6 note above condemns for OCI
-		// artifacts. Identity is the repository, the revision, and the path
-		// rendered from it, and the revision has to name fixed content: a branch
-		// name or HEAD can advance between two runs whose local trees are
-		// identical.
-		//
-		// The two emptiness guards make this test a literal mirror of
-		// render.isExternalSource, which is what decides where the render actually
-		// reads from: an unknown repository — either side of the comparison — means
-		// LOCAL there, and sourcePathsExist spells out the same convention for the
-		// third consumer of it. A key that classified a source differently than
-		// the renderer does is the bug this whole series is about, one layer
-		// further in: it would describe a repository the render never opened.
-		//
-		// A nil SameRepo means the caller cannot classify repositories at all (it
-		// passes nil precisely when the local repository URL is unknown); the
-		// source then takes the local path below, which is both the renderer's
-		// answer and the behavior every version before v7 had. (The $ref
-		// value-file rule reads nil the other way — conservatively — because there
-		// the question is whether a FILE's content is available locally, and
-		// guessing yes would hash the wrong bytes.)
-		//
-		// Helm value files are deliberately NOT resolved for these sources: they
-		// live in the external repository (relative and repo-root-absolute entries
-		// both resolve against ITS root during the render), so the revision covers
-		// them. Resolving them against the diffed repo — what the helm branch below
-		// did — described files the render never reads. A `$ref` entry into a third
-		// repository is covered by that ref SOURCE's own key contribution, which is
-		// subject to this same rule.
-		if src.RepoURL != "" && in.SameRepo != nil && !in.SameRepo(src.RepoURL) {
-			if !render.IsImmutableGitRevision(src.TargetRevision) {
-				return "", false
-			}
-			writeField("extgit", src.RepoURL, src.TargetRevision, src.Path)
-			continue
-		}
-
-		if in.ResolveTree == nil {
+		if !w.writeSourceIdentity(sources[i], in, refSources) {
 			return "", false
 		}
-
-		if isHelmLikeSource(src, in.Commit, in.ResolveTree) {
-			// Local helm chart: hash the chart path tree plus every value file
-			// and file parameter it pulls in (which may live outside the path).
-			treeHash, ok := in.ResolveTree(in.Commit, src.Path)
-			if !ok {
-				return "", false
-			}
-			writeField("helm", src.Path, treeHash)
-
-			// Dependency hermeticity: a committed Chart.lock pins dependency
-			// resolution and is already part of the tree hash above. Without a
-			// lock, a dependency whose version is a RANGE resolves against the
-			// mutable repo index (the engine's dependency build refreshes it in
-			// an isolated helm home on every render), so the same commit can
-			// legitimately render differently over time — such renders must
-			// bypass the cache. Exactly-pinned versions resolve
-			// deterministically and stay cacheable.
-			if !chartDepsHermetic(src.Path, in.Commit, in.ResolveTree, in.ReadFile) {
-				return "", false
-			}
-
-			if src.Helm != nil {
-				extra := make([]string, 0, len(src.Helm.ValueFiles)+len(src.Helm.FileParameters))
-				extra = append(extra, src.Helm.ValueFiles...)
-				for _, fp := range src.Helm.FileParameters {
-					extra = append(extra, fp.Path)
-				}
-				for _, ref := range extra {
-					relPath, bypass := resolveKeyValueFilePath(ref, src.Path, refSources, in.SameRepo)
-					if bypass {
-						return "", false
-					}
-					if hash, ok := in.ResolveTree(in.Commit, relPath); ok {
-						writeField("vf", ref, relPath, hash)
-					} else {
-						// Absent at this commit: absence is part of the render
-						// identity, so record a stable sentinel instead of
-						// bypassing.
-						writeField("vf", ref, relPath, "absent")
-					}
-				}
-			}
-			continue
-		}
-
-		// Kustomize / directory / unknown source: use the commit root tree for
-		// soundness (see the doc comment above).
-		rootHash, ok := in.ResolveTree(in.Commit, "")
-		if !ok {
-			return "", false
-		}
-		writeField("dir", src.Path, rootHash)
 	}
 
-	return hex.EncodeToString(h.Sum(nil)), true
+	return w.sum(), true
+}
+
+// writeRunInputs hashes what describes the render as a whole rather than any
+// one source: the schema version, the application's identity, its marshalled
+// spec (which carries every helm parameter, kustomize override and directory
+// option ArgoCD reads), the cluster's Kubernetes version, and the kustomize
+// options argocdf passes on top.
+func (w *keyWriter) writeRunInputs(in KeyInput, specJSON []byte) {
+	w.field(SchemaVersion)
+	w.field(in.AppName, in.Namespace)
+	w.blob(specJSON)
+	w.field(in.KubeVersion)
+	w.field(
+		strconv.FormatBool(in.Options.KustomizeEnableHelm),
+		in.Options.KustomizeBuildOptions,
+		in.Options.KustomizeLoadRestrictor,
+	)
+}
+
+// writeHelmRepoAliases hashes the credential SOURCE — its mode and its instance,
+// see KeyInput.RepoCredsMode/RepoCredsInstance for why each is a key input — and
+// the helm repository aliases that source produced.
+//
+// The aliases are sorted so the key does not depend on the order the credential
+// source happened to list them, and length-prefixed so "no aliases" cannot
+// collide with a list whose entries hash to the same bytes.
+func (w *keyWriter) writeHelmRepoAliases(credsMode, credsInstance string, in []HelmRepoAlias) {
+	aliases := make([]HelmRepoAlias, len(in))
+	copy(aliases, in)
+	sort.Slice(aliases, func(i, j int) bool {
+		if aliases[i].Name != aliases[j].Name {
+			return aliases[i].Name < aliases[j].Name
+		}
+		return aliases[i].URL < aliases[j].URL
+	})
+	w.field("repocreds", credsMode)
+	w.field("repocredsinstance", credsInstance)
+	w.field("repoaliases", strconv.Itoa(len(aliases)))
+	for _, a := range aliases {
+		w.field("repoalias", a.Name, a.URL)
+	}
+}
+
+// writeAPIVersions hashes the API-version set, sorted and deduplicated so the
+// key reflects the SET (discovery order is not a render input), and
+// length-prefixed like the aliases. Nil and empty are identical on purpose:
+// both mean "helm gets no --api-versions".
+func (w *keyWriter) writeAPIVersions(in []string) {
+	apiVersions := make([]string, 0, len(in))
+	apiVersions = append(apiVersions, in...)
+	sort.Strings(apiVersions)
+	apiVersions = slices.Compact(apiVersions)
+	w.field("apiversions", strconv.Itoa(len(apiVersions)))
+	for _, v := range apiVersions {
+		w.field("apiversion", v)
+	}
+}
+
+// writeSourceIdentity hashes one source's content identity, dispatching on
+// source kind in the renderer's order (render.renderSource, itself mirroring
+// ArgoCD's runRepoOperation). It reports ok=false when this source cannot be
+// keyed soundly, which bypasses the cache for the whole render.
+func (w *keyWriter) writeSourceIdentity(
+	src cluster.ApplicationSource,
+	in KeyInput,
+	refSources map[string]cluster.ApplicationSource,
+) bool {
+	// OCI-artifact source, tested BEFORE Chart for the same reason the
+	// renderer dispatches in that order (argocd.go renderSource): an oci://
+	// URL that also carries a chart: field renders as an ARTIFACT and
+	// ignores the chart, so keying it as a chart would describe a render
+	// that never happens. Nothing in the local repository participates —
+	// the content lives in the registry — so the path is part of the
+	// artifact's identity, not a tree to hash.
+	if src.IsOCI() {
+		if !render.IsImmutableOCIRevision(src.TargetRevision) {
+			return false
+		}
+		w.field("oci", src.RepoURL, src.TargetRevision, src.Path)
+		return true
+	}
+
+	if src.Chart != "" {
+		// Remote chart: identity is repo + chart + target revision — but only
+		// when that revision names ONE immutable version. HEAD, "*", "" and
+		// constraint ranges (^2.0.0, 1.x) resolve against the mutable registry
+		// index, so the same key inputs can legitimately render differently
+		// after the publisher moves the resolved version; such renders bypass.
+		// Same predicate as the chart-download cache, so the two caches cannot
+		// disagree about what "pinned" means.
+		if !render.IsImmutableChartVersion(src.TargetRevision) {
+			return false
+		}
+		w.field("chart", src.RepoURL, src.Chart, src.TargetRevision)
+		return true
+	}
+
+	// A source in ANOTHER repository: nothing local describes its content, so
+	// the local tree hash the branches below would take is a hash of the wrong
+	// repository — which is exactly what the v6 note above condemns for OCI
+	// artifacts. Identity is the repository, the revision, and the path
+	// rendered from it, and the revision has to name fixed content: a branch
+	// name or HEAD can advance between two runs whose local trees are
+	// identical.
+	//
+	// The two emptiness guards make this test a literal mirror of
+	// render.isExternalSource, which is what decides where the render actually
+	// reads from: an unknown repository — either side of the comparison — means
+	// LOCAL there, and sourcePathsExist spells out the same convention for the
+	// third consumer of it. A key that classified a source differently than
+	// the renderer does is the bug this whole series is about, one layer
+	// further in: it would describe a repository the render never opened.
+	//
+	// A nil SameRepo means the caller cannot classify repositories at all (it
+	// passes nil precisely when the local repository URL is unknown); the
+	// source then takes the local path below, which is both the renderer's
+	// answer and the behavior every version before v7 had. (The $ref
+	// value-file rule reads nil the other way — conservatively — because there
+	// the question is whether a FILE's content is available locally, and
+	// guessing yes would hash the wrong bytes.)
+	//
+	// Helm value files are deliberately NOT resolved for these sources: they
+	// live in the external repository (relative and repo-root-absolute entries
+	// both resolve against ITS root during the render), so the revision covers
+	// them. Resolving them against the diffed repo — what the helm branch below
+	// did — described files the render never reads. A `$ref` entry into a third
+	// repository is covered by that ref SOURCE's own key contribution, which is
+	// subject to this same rule.
+	if src.RepoURL != "" && in.SameRepo != nil && !in.SameRepo(src.RepoURL) {
+		if !render.IsImmutableGitRevision(src.TargetRevision) {
+			return false
+		}
+		w.field("extgit", src.RepoURL, src.TargetRevision, src.Path)
+		return true
+	}
+
+	if in.ResolveTree == nil {
+		return false
+	}
+
+	if isHelmLikeSource(src, in.Commit, in.ResolveTree) {
+		return w.writeLocalHelmSource(src, in, refSources)
+	}
+
+	// Kustomize / directory / unknown source: such a source can reference
+	// arbitrary repo paths (bases, components, patches) that cannot be cheaply
+	// enumerated, so for soundness we hash the commit's ROOT tree instead of
+	// the source-path tree. Trade-off: cache hits then only occur when
+	// re-rendering the exact same commit (still the dominant repeat-run case),
+	// and are never stale.
+	rootHash, ok := in.ResolveTree(in.Commit, "")
+	if !ok {
+		return false
+	}
+	w.field("dir", src.Path, rootHash)
+	return true
+}
+
+// writeLocalHelmSource hashes a helm chart living in the repository being
+// diffed: the chart path's tree, plus every value file and file parameter it
+// pulls in — which may live outside that path. It reports ok=false when the
+// source cannot be keyed soundly.
+//
+// Two soundness rules ride along:
+//   - Every resolved valueFiles and fileParameters path is hashed (relative
+//     paths resolve against the chart dir; $ref paths against the ref
+//     repository root, ArgoCD's semantics). A value file that is absent at the
+//     commit contributes an "absent" sentinel rather than a bypass, because
+//     absence is itself part of the render identity.
+//   - Helm dependency resolution must be hermetic at the commit to be
+//     cacheable: a chart whose dependency uses a version RANGE with no
+//     committed Chart.lock resolves against the mutable repo index, so it
+//     bypasses the cache (see chartDepsHermetic).
+func (w *keyWriter) writeLocalHelmSource(
+	src cluster.ApplicationSource,
+	in KeyInput,
+	refSources map[string]cluster.ApplicationSource,
+) bool {
+	treeHash, ok := in.ResolveTree(in.Commit, src.Path)
+	if !ok {
+		return false
+	}
+	w.field("helm", src.Path, treeHash)
+
+	// Dependency hermeticity: a committed Chart.lock pins dependency
+	// resolution and is already part of the tree hash above. Without a
+	// lock, a dependency whose version is a RANGE resolves against the
+	// mutable repo index (the engine's dependency build refreshes it in
+	// an isolated helm home on every render), so the same commit can
+	// legitimately render differently over time — such renders must
+	// bypass the cache. Exactly-pinned versions resolve
+	// deterministically and stay cacheable.
+	if !chartDepsHermetic(src.Path, in.Commit, in.ResolveTree, in.ReadFile) {
+		return false
+	}
+
+	if src.Helm == nil {
+		return true
+	}
+
+	extra := make([]string, 0, len(src.Helm.ValueFiles)+len(src.Helm.FileParameters))
+	extra = append(extra, src.Helm.ValueFiles...)
+	for _, fp := range src.Helm.FileParameters {
+		extra = append(extra, fp.Path)
+	}
+	for _, ref := range extra {
+		relPath, bypass := resolveKeyValueFilePath(ref, src.Path, refSources, in.SameRepo)
+		if bypass {
+			return false
+		}
+		// Named fileHash, not hash: the package of that name is imported here.
+		if fileHash, ok := in.ResolveTree(in.Commit, relPath); ok {
+			w.field("vf", ref, relPath, fileHash)
+		} else {
+			// Absent at this commit: absence is part of the render
+			// identity, so record a stable sentinel instead of
+			// bypassing.
+			w.field("vf", ref, relPath, "absent")
+		}
+	}
+	return true
 }
 
 // isHelmLikeSource reports whether a (non-remote-chart) source should be
