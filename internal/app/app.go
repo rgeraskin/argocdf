@@ -950,8 +950,8 @@ func helmRepoAliases(creds *cluster.RepoCredentials) []rendercache.HelmRepoAlias
 }
 
 // processApplications processes all affected applications with recursion.
-func (a *App) processApplications(ctx context.Context, apps []cluster.Application) ([]*types.AppDiff, error) {
-	results := make(map[string]*types.AppDiff)
+func (a *App) processApplications(ctx context.Context, apps []cluster.Application) ([]*diff.AppDiff, error) {
+	results := make(map[string]*diff.AppDiff)
 	queue := a.factory.CreateAppQueue()
 
 	// Add initial apps to queue
@@ -992,7 +992,7 @@ func (a *App) processApplications(ctx context.Context, apps []cluster.Applicatio
 			results[key] = appDiff
 
 			// Look for new and modified Application CRDs in the diff (apps-of-apps pattern)
-			diffResult, _ := appDiff.DiffResult.(*diff.ManifestSetDiff)
+			diffResult := appDiff.Diff
 			if a.cfg.NoRecursive || appDiff.Error != nil || diffResult == nil || !diffResult.HasChanges {
 				continue
 			}
@@ -1154,7 +1154,7 @@ func (a *App) processApplications(ctx context.Context, apps []cluster.Applicatio
 	// Convert map to slice, sorted by (namespace, name) so reports are
 	// deterministic run-to-run (map iteration order is randomized). Stable
 	// ordering lets report outputs be compared byte-for-byte across runs.
-	var resultSlice []*types.AppDiff
+	var resultSlice []*diff.AppDiff
 	for _, r := range results {
 		resultSlice = append(resultSlice, r)
 	}
@@ -1188,8 +1188,8 @@ func (a *App) processApplications(ctx context.Context, apps []cluster.Applicatio
 // with wave; render errors are captured as AppDiff.Error rather than aborting
 // the wave. Each goroutine writes to a distinct output index, and the shared
 // cache counters are atomic, so no additional locking is required.
-func (a *App) processWave(ctx context.Context, wave []*diff.QueuedApp) []*types.AppDiff {
-	out := make([]*types.AppDiff, len(wave))
+func (a *App) processWave(ctx context.Context, wave []*diff.QueuedApp) []*diff.AppDiff {
+	out := make([]*diff.AppDiff, len(wave))
 
 	concurrency := a.cfg.Concurrency
 	if concurrency < 1 {
@@ -1214,7 +1214,7 @@ func (a *App) processWave(ctx context.Context, wave []*diff.QueuedApp) []*types.
 			appDiff, err := a.processOneApp(ctx, queuedApp)
 			if err != nil {
 				a.logger.Warn("Error processing application", "name", queuedApp.Name, "error", err)
-				appDiff = &types.AppDiff{
+				appDiff = &diff.AppDiff{
 					Name:               queuedApp.Name,
 					Namespace:          queuedApp.Namespace,
 					ParentAppName:      queuedApp.ParentApp,
@@ -1260,7 +1260,7 @@ func (a *App) processWave(ctx context.Context, wave []*diff.QueuedApp) []*types.
 // appends to its OWN application's ParseWarnings - distinct AppDiffs hold distinct
 // ManifestSetDiffs - and builds its lines locally before the single append, so the
 // slice is never written concurrently.
-func (a *App) lintResults(ctx context.Context, results []*types.AppDiff) {
+func (a *App) lintResults(ctx context.Context, results []*diff.AppDiff) {
 	if a.linter == nil {
 		return
 	}
@@ -1278,14 +1278,14 @@ func (a *App) lintResults(ctx context.Context, results []*types.AppDiff) {
 	for _, r := range results {
 		// An application that failed to render carries no ManifestSetDiff, and
 		// has nothing to lint - its error is already the report's finding.
-		diffResult, ok := r.DiffResult.(*diff.ManifestSetDiff)
-		if !ok || diffResult == nil {
+		diffResult := r.Diff
+		if diffResult == nil {
 			continue
 		}
 
 		wg.Add(1)
 		sem <- struct{}{}
-		go func(r *types.AppDiff, d *diff.ManifestSetDiff) {
+		go func(r *diff.AppDiff, d *diff.ManifestSetDiff) {
 			defer wg.Done()
 			defer func() { <-sem }()
 
@@ -1307,8 +1307,8 @@ func (a *App) lintResults(ctx context.Context, results []*types.AppDiff) {
 }
 
 // processOneApp processes a single application and returns its diff.
-func (a *App) processOneApp(ctx context.Context, queuedApp *diff.QueuedApp) (*types.AppDiff, error) {
-	appDiff := &types.AppDiff{
+func (a *App) processOneApp(ctx context.Context, queuedApp *diff.QueuedApp) (*diff.AppDiff, error) {
+	appDiff := &diff.AppDiff{
 		Name:               queuedApp.Name,
 		Namespace:          queuedApp.Namespace,
 		ParentAppName:      queuedApp.ParentApp,
@@ -1392,7 +1392,7 @@ func (a *App) processOneApp(ctx context.Context, queuedApp *diff.QueuedApp) (*ty
 	// NOT linted here: an application can be rendered more than once, and only
 	// its LAST render reaches the report. See App.lintResults, which runs once the
 	// discovery queue has drained.
-	appDiff.DiffResult = diffResult
+	appDiff.Diff = diffResult
 
 	return appDiff, nil
 }

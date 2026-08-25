@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/rgeraskin/argocdf/internal/diff"
-	"github.com/rgeraskin/argocdf/internal/types"
 )
 
 // HTMLWriter writes diff output as an HTML report.
@@ -90,12 +89,12 @@ func (h *HTMLWriter) WriteHeader(title string) error {
 }
 
 // WriteAppDiff writes the diff for an application.
-func (h *HTMLWriter) WriteAppDiff(appDiff *types.AppDiff, depth int) error {
+func (h *HTMLWriter) WriteAppDiff(appDiff *diff.AppDiff, depth int) error {
 	return h.writeAppDiffFull(appDiff, depth)
 }
 
 // writeAppDiffFull writes app diff with full HTML/CSS (for standalone file).
-func (h *HTMLWriter) writeAppDiffFull(appDiff *types.AppDiff, depth int) error {
+func (h *HTMLWriter) writeAppDiffFull(appDiff *diff.AppDiff, depth int) error {
 	var class string
 	if depth > 0 {
 		class = "app-children"
@@ -108,13 +107,12 @@ func (h *HTMLWriter) writeAppDiffFull(appDiff *types.AppDiff, depth int) error {
 		h.write(fmt.Sprintf(`<span class="app-namespace">(%s)</span>`, html.EscapeString(appDiff.Namespace)))
 	}
 
-	// Type assert DiffResult
-	result, ok := appDiff.DiffResult.(*diff.ManifestSetDiff)
+	result := appDiff.Diff
 
 	// Badges
 	if appDiff.Error != nil {
 		h.write(`<span class="badge badge-error">Error</span>`)
-	} else if ok && result != nil {
+	} else if result != nil {
 		// Show parse errors
 		if len(result.ParseErrors) > 0 {
 			h.write(fmt.Sprintf(`<span class="badge badge-error">⚠ %d parse error(s)</span>`, len(result.ParseErrors)))
@@ -141,7 +139,7 @@ func (h *HTMLWriter) writeAppDiffFull(appDiff *types.AppDiff, depth int) error {
 	// Error message
 	if appDiff.Error != nil {
 		h.write(fmt.Sprintf(`<div class="error-message">%s</div>`, html.EscapeString(appDiff.Error.Error())))
-	} else if !ok || result == nil {
+	} else if result == nil {
 		h.write(`<p class="no-changes">No diff available</p>`)
 	} else {
 		// Show parse errors if present
@@ -357,9 +355,7 @@ func splitLines(content string) []string {
 // WriteTree writes the full application tree.
 func (h *HTMLWriter) WriteTree(tree *diff.AppTree) error {
 	tree.Walk(func(node *diff.AppTreeNode, depth int) {
-		if appDiff, ok := node.AppDiff.(*types.AppDiff); ok {
-			_ = h.WriteAppDiff(appDiff, depth)
-		}
+		_ = h.WriteAppDiff(node.AppDiff, depth)
 	})
 	return nil
 }

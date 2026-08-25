@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/rgeraskin/argocdf/internal/diff"
-	"github.com/rgeraskin/argocdf/internal/types"
 )
 
 // TestFileOnly verifies that FileOnly keeps only persistent (file-backed)
@@ -69,7 +68,7 @@ func TestNullWriter(t *testing.T) {
 		t.Errorf("WriteHeader() error = %v, want nil", err)
 	}
 
-	if err := w.WriteAppDiff(&types.AppDiff{}, 0); err != nil {
+	if err := w.WriteAppDiff(&diff.AppDiff{}, 0); err != nil {
 		t.Errorf("WriteAppDiff() error = %v, want nil", err)
 	}
 
@@ -100,7 +99,7 @@ type mockWriter struct {
 	flushCalled   bool
 	shouldError   bool
 	lastTitle     string
-	lastAppDiff   *types.AppDiff
+	lastAppDiff   *diff.AppDiff
 	lastSummary   Summary
 }
 
@@ -113,7 +112,7 @@ func (m *mockWriter) WriteHeader(title string) error {
 	return nil
 }
 
-func (m *mockWriter) WriteAppDiff(appDiff *types.AppDiff, depth int) error {
+func (m *mockWriter) WriteAppDiff(appDiff *diff.AppDiff, depth int) error {
 	m.appDiffCalled = true
 	m.lastAppDiff = appDiff
 	if m.shouldError {
@@ -172,7 +171,7 @@ func TestMultiWriter_FansOutToAllWriters(t *testing.T) {
 	}
 
 	// Test WriteAppDiff
-	appDiff := &types.AppDiff{Name: "test-app"}
+	appDiff := &diff.AppDiff{Name: "test-app"}
 	if err := multi.WriteAppDiff(appDiff, 0); err != nil {
 		t.Errorf("WriteAppDiff() error = %v", err)
 	}
@@ -249,7 +248,7 @@ func TestMultiWriter_EmptyWriters(t *testing.T) {
 	if err := multi.WriteHeader("Test"); err != nil {
 		t.Errorf("WriteHeader() with no writers error = %v", err)
 	}
-	if err := multi.WriteAppDiff(&types.AppDiff{}, 0); err != nil {
+	if err := multi.WriteAppDiff(&diff.AppDiff{}, 0); err != nil {
 		t.Errorf("WriteAppDiff() with no writers error = %v", err)
 	}
 	if err := multi.WriteTree(&diff.AppTree{}); err != nil {
@@ -269,17 +268,17 @@ func TestMultiWriter_EmptyWriters(t *testing.T) {
 func TestComputeSummary(t *testing.T) {
 	tests := []struct {
 		name  string
-		diffs []*types.AppDiff
+		diffs []*diff.AppDiff
 		want  Summary
 	}{
 		{
 			name:  "empty diffs",
-			diffs: []*types.AppDiff{},
+			diffs: []*diff.AppDiff{},
 			want:  Summary{TotalApps: 0},
 		},
 		{
 			name: "app with error",
-			diffs: []*types.AppDiff{
+			diffs: []*diff.AppDiff{
 				{Name: "app1", Error: errors.New("render failed")},
 			},
 			want: Summary{
@@ -289,10 +288,10 @@ func TestComputeSummary(t *testing.T) {
 		},
 		{
 			name: "app with no changes",
-			diffs: []*types.AppDiff{
+			diffs: []*diff.AppDiff{
 				{
 					Name: "app1",
-					DiffResult: &diff.ManifestSetDiff{
+					Diff: &diff.ManifestSetDiff{
 						HasChanges: false,
 					},
 				},
@@ -304,10 +303,10 @@ func TestComputeSummary(t *testing.T) {
 		},
 		{
 			name: "app with changes",
-			diffs: []*types.AppDiff{
+			diffs: []*diff.AppDiff{
 				{
 					Name: "app1",
-					DiffResult: &diff.ManifestSetDiff{
+					Diff: &diff.ManifestSetDiff{
 						HasChanges: true,
 						Added: []diff.Manifest{
 							{Kind: "ConfigMap", Name: "cm1"},
@@ -333,18 +332,18 @@ func TestComputeSummary(t *testing.T) {
 		},
 		{
 			name: "multiple apps mixed",
-			diffs: []*types.AppDiff{
+			diffs: []*diff.AppDiff{
 				{Name: "app1", Error: errors.New("error")},
 				{
 					Name: "app2",
-					DiffResult: &diff.ManifestSetDiff{
+					Diff: &diff.ManifestSetDiff{
 						HasChanges: true,
 						Added:      []diff.Manifest{{Kind: "ConfigMap"}},
 					},
 				},
 				{
 					Name: "app3",
-					DiffResult: &diff.ManifestSetDiff{
+					Diff: &diff.ManifestSetDiff{
 						HasChanges: false,
 					},
 				},
@@ -358,8 +357,8 @@ func TestComputeSummary(t *testing.T) {
 		},
 		{
 			name: "nil diff result",
-			diffs: []*types.AppDiff{
-				{Name: "app1", DiffResult: nil},
+			diffs: []*diff.AppDiff{
+				{Name: "app1", Diff: nil},
 			},
 			want: Summary{
 				TotalApps: 1,
@@ -367,10 +366,10 @@ func TestComputeSummary(t *testing.T) {
 		},
 		{
 			name: "app with parse errors",
-			diffs: []*types.AppDiff{
+			diffs: []*diff.AppDiff{
 				{
 					Name: "app1",
-					DiffResult: &diff.ManifestSetDiff{
+					Diff: &diff.ManifestSetDiff{
 						HasChanges:  false,
 						ParseErrors: []string{"yaml: duplicate key"},
 					},
@@ -383,10 +382,10 @@ func TestComputeSummary(t *testing.T) {
 		},
 		{
 			name: "app with multiple parse errors counts as one errored app",
-			diffs: []*types.AppDiff{
+			diffs: []*diff.AppDiff{
 				{
 					Name: "app1",
-					DiffResult: &diff.ManifestSetDiff{
+					Diff: &diff.ManifestSetDiff{
 						HasChanges: false,
 						ParseErrors: []string{
 							"yaml: duplicate key on line 10",
@@ -403,10 +402,10 @@ func TestComputeSummary(t *testing.T) {
 		},
 		{
 			name: "app with both changes and parse errors",
-			diffs: []*types.AppDiff{
+			diffs: []*diff.AppDiff{
 				{
 					Name: "app1",
-					DiffResult: &diff.ManifestSetDiff{
+					Diff: &diff.ManifestSetDiff{
 						HasChanges: true,
 						Added: []diff.Manifest{
 							{Kind: "ConfigMap", Name: "cm1"},
@@ -424,10 +423,10 @@ func TestComputeSummary(t *testing.T) {
 		},
 		{
 			name: "app with parse warnings is NOT counted as errored",
-			diffs: []*types.AppDiff{
+			diffs: []*diff.AppDiff{
 				{
 					Name: "app1",
-					DiffResult: &diff.ManifestSetDiff{
+					Diff: &diff.ManifestSetDiff{
 						HasChanges: true,
 						Added: []diff.Manifest{
 							{Kind: "ConfigMap", Name: "cm1"},

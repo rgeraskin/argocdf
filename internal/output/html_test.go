@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/rgeraskin/argocdf/internal/diff"
-	"github.com/rgeraskin/argocdf/internal/types"
 )
 
 func TestNewHTMLWriter(t *testing.T) {
@@ -87,10 +86,10 @@ func TestHTMLWriterWriteAppDiff(t *testing.T) {
 	_ = w.WriteHeader("Test")
 
 	// Test app with changes
-	appDiff := &types.AppDiff{
+	appDiff := &diff.AppDiff{
 		Name:      "test-app",
 		Namespace: "test-ns",
-		DiffResult: &diff.ManifestSetDiff{
+		Diff: &diff.ManifestSetDiff{
 			HasChanges: true,
 			Added: []diff.Manifest{
 				{Kind: "ConfigMap", Name: "new-config"},
@@ -151,7 +150,7 @@ func TestHTMLWriterWriteAppDiffWithError(t *testing.T) {
 	_ = w.WriteHeader("Test")
 
 	// Test app with error
-	appDiff := &types.AppDiff{
+	appDiff := &diff.AppDiff{
 		Name:      "error-app",
 		Namespace: "test-ns",
 		Error:     &testError{msg: "render failed"},

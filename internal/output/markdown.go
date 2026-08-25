@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/rgeraskin/argocdf/internal/diff"
-	"github.com/rgeraskin/argocdf/internal/types"
 )
 
 // MarkdownFormat represents the markdown output format style.
@@ -133,7 +132,7 @@ func (m *MarkdownWriter) WriteHeader(title string) error {
 }
 
 // WriteAppDiff writes the diff for an application.
-func (m *MarkdownWriter) WriteAppDiff(appDiff *types.AppDiff, depth int) error {
+func (m *MarkdownWriter) WriteAppDiff(appDiff *diff.AppDiff, depth int) error {
 	if m.format == MarkdownFormatAtlantis {
 		return m.writeAppDiffAtlantis(appDiff, depth)
 	}
@@ -141,20 +140,19 @@ func (m *MarkdownWriter) WriteAppDiff(appDiff *types.AppDiff, depth int) error {
 }
 
 // writeAppDiffGitHub writes app diff in GitHub format.
-func (m *MarkdownWriter) writeAppDiffGitHub(appDiff *types.AppDiff, _ int) error {
+func (m *MarkdownWriter) writeAppDiffGitHub(appDiff *diff.AppDiff, _ int) error {
 	appName := appDiff.Name
 	if appDiff.Namespace != "" {
 		appName += fmt.Sprintf(" (%s)", appDiff.Namespace)
 	}
 
-	// Type assert DiffResult
-	result, ok := appDiff.DiffResult.(*diff.ManifestSetDiff)
+	result := appDiff.Diff
 
 	// Build summary line with emoji badges
 	var badges []string
 	if appDiff.Error != nil {
 		badges = append(badges, "❌ Error")
-	} else if ok && result != nil {
+	} else if result != nil {
 		// Show parse errors
 		if len(result.ParseErrors) > 0 {
 			badges = append(badges, fmt.Sprintf("⚠️ %d parse error(s)", len(result.ParseErrors)))
@@ -197,7 +195,7 @@ func (m *MarkdownWriter) writeAppDiffGitHub(appDiff *types.AppDiff, _ int) error
 	// Error message
 	if appDiff.Error != nil {
 		m.write(prefixLines("⚠️ "+html.EscapeString(appDiff.Error.Error()), "> ") + "\n\n")
-	} else if !ok || result == nil {
+	} else if result == nil {
 		m.write("_No diff available_\n\n")
 	} else {
 		// Show parse errors if present
@@ -235,20 +233,19 @@ func (m *MarkdownWriter) writeAppDiffGitHub(appDiff *types.AppDiff, _ int) error
 }
 
 // writeAppDiffAtlantis writes app diff in Atlantis style.
-func (m *MarkdownWriter) writeAppDiffAtlantis(appDiff *types.AppDiff, _ int) error {
+func (m *MarkdownWriter) writeAppDiffAtlantis(appDiff *diff.AppDiff, _ int) error {
 	appName := appDiff.Name
 	if appDiff.Namespace != "" {
 		appName += fmt.Sprintf(" (%s)", appDiff.Namespace)
 	}
 
-	// Type assert DiffResult
-	result, ok := appDiff.DiffResult.(*diff.ManifestSetDiff)
+	result := appDiff.Diff
 
 	// Build summary line with emoji badges
 	var badges []string
 	if appDiff.Error != nil {
 		badges = append(badges, "❌")
-	} else if ok && result != nil {
+	} else if result != nil {
 		// Show parse errors
 		if len(result.ParseErrors) > 0 {
 			badges = append(badges, fmt.Sprintf("⚠️%d", len(result.ParseErrors)))
@@ -291,7 +288,7 @@ func (m *MarkdownWriter) writeAppDiffAtlantis(appDiff *types.AppDiff, _ int) err
 	// Error message
 	if appDiff.Error != nil {
 		m.write(prefixLines("⚠️ "+html.EscapeString(appDiff.Error.Error()), "> ") + "\n\n")
-	} else if !ok || result == nil {
+	} else if result == nil {
 		m.write("_No diff available_\n\n")
 	} else {
 		// Show parse errors if present
@@ -433,9 +430,7 @@ func (m *MarkdownWriter) detailedDiffBlocksAtlantis(result *diff.ManifestSetDiff
 // WriteTree writes the full application tree.
 func (m *MarkdownWriter) WriteTree(tree *diff.AppTree) error {
 	tree.Walk(func(node *diff.AppTreeNode, depth int) {
-		if appDiff, ok := node.AppDiff.(*types.AppDiff); ok {
-			_ = m.WriteAppDiff(appDiff, depth)
-		}
+		_ = m.WriteAppDiff(node.AppDiff, depth)
 	})
 	return nil
 }

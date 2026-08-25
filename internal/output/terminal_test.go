@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/rgeraskin/argocdf/internal/diff"
-	"github.com/rgeraskin/argocdf/internal/types"
 )
 
 func TestNewTerminalWriter(t *testing.T) {
@@ -69,14 +68,14 @@ func TestTerminalWriterWriteAppDiff(t *testing.T) {
 	tests := []struct {
 		name       string
 		format     string
-		appDiff    *types.AppDiff
+		appDiff    *diff.AppDiff
 		wantOutput []string // strings that should be in output
 		notOutput  []string // strings that should NOT be in output
 	}{
 		{
 			name:   "app with error",
 			format: "fields",
-			appDiff: &types.AppDiff{
+			appDiff: &diff.AppDiff{
 				Name:      "test-app",
 				Namespace: "argocd",
 				Error:     &testError{"render failed"},
@@ -86,10 +85,10 @@ func TestTerminalWriterWriteAppDiff(t *testing.T) {
 		{
 			name:   "app with no changes",
 			format: "fields",
-			appDiff: &types.AppDiff{
+			appDiff: &diff.AppDiff{
 				Name:      "test-app",
 				Namespace: "argocd",
-				DiffResult: &diff.ManifestSetDiff{
+				Diff: &diff.ManifestSetDiff{
 					HasChanges: false,
 				},
 			},
@@ -98,10 +97,10 @@ func TestTerminalWriterWriteAppDiff(t *testing.T) {
 		{
 			name:   "app with parse warnings renders them but keeps diffing",
 			format: "fields",
-			appDiff: &types.AppDiff{
+			appDiff: &diff.AppDiff{
 				Name:      "test-app",
 				Namespace: "argocd",
-				DiffResult: &diff.ManifestSetDiff{
+				Diff: &diff.ManifestSetDiff{
 					HasChanges: true,
 					Added: []diff.Manifest{
 						{Kind: "ConfigMap", Namespace: "default", Name: "newcm"},
@@ -116,10 +115,10 @@ func TestTerminalWriterWriteAppDiff(t *testing.T) {
 		{
 			name:   "app with changes in fields format",
 			format: "fields",
-			appDiff: &types.AppDiff{
+			appDiff: &diff.AppDiff{
 				Name:      "test-app",
 				Namespace: "argocd",
-				DiffResult: &diff.ManifestSetDiff{
+				Diff: &diff.ManifestSetDiff{
 					HasChanges: true,
 					Added: []diff.Manifest{
 						{Kind: "ConfigMap", Namespace: "default", Name: "newcm"},
@@ -137,10 +136,10 @@ func TestTerminalWriterWriteAppDiff(t *testing.T) {
 		{
 			name:   "app in summary mode shows only counts",
 			format: "summary",
-			appDiff: &types.AppDiff{
+			appDiff: &diff.AppDiff{
 				Name:      "test-app",
 				Namespace: "argocd",
-				DiffResult: &diff.ManifestSetDiff{
+				Diff: &diff.ManifestSetDiff{
 					HasChanges: true,
 					Added: []diff.Manifest{
 						{Kind: "ConfigMap", Namespace: "default", Name: "cm1"},
@@ -163,10 +162,10 @@ func TestTerminalWriterWriteAppDiff(t *testing.T) {
 		{
 			name:   "app in unified mode shows unified diff",
 			format: "unified",
-			appDiff: &types.AppDiff{
+			appDiff: &diff.AppDiff{
 				Name:      "test-app",
 				Namespace: "argocd",
-				DiffResult: &diff.ManifestSetDiff{
+				Diff: &diff.ManifestSetDiff{
 					HasChanges: true,
 					Modified: []diff.ManifestDiff{
 						{

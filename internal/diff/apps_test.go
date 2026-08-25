@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/rgeraskin/argocdf/internal/cluster"
-	"github.com/rgeraskin/argocdf/internal/types"
 )
 
 func TestDiscoverApplications(t *testing.T) {
@@ -1431,7 +1430,7 @@ func TestNewAppTree(t *testing.T) {
 	t.Run("attaches children to correct same-named parents across namespaces", func(t *testing.T) {
 		// Two parents share the name "parent" but live in different namespaces.
 		// Each has a child that must attach to the correct parent.
-		diffs := []*types.AppDiff{
+		diffs := []*AppDiff{
 			{Name: "parent", Namespace: "team-a"},
 			{Name: "parent", Namespace: "team-b"},
 			{
@@ -1456,12 +1455,12 @@ func TestNewAppTree(t *testing.T) {
 
 		// Map each parent node (by namespace) to its single child's name.
 		for _, root := range tree.Root {
-			rootDiff := root.AppDiff.(*types.AppDiff)
+			rootDiff := root.AppDiff
 			if len(root.Children) != 1 {
 				t.Fatalf("parent %s/%s has %d children, want 1",
 					rootDiff.Namespace, rootDiff.Name, len(root.Children))
 			}
-			childDiff := root.Children[0].AppDiff.(*types.AppDiff)
+			childDiff := root.Children[0].AppDiff
 			wantChild := "child-a"
 			if rootDiff.Namespace == "team-b" {
 				wantChild = "child-b"
@@ -1478,7 +1477,7 @@ func TestNewAppTree(t *testing.T) {
 	})
 
 	t.Run("orphan with missing parent appears as a root", func(t *testing.T) {
-		diffs := []*types.AppDiff{
+		diffs := []*AppDiff{
 			{Name: "real-root", Namespace: "argocd"},
 			{
 				Name:               "orphan",
@@ -1496,7 +1495,7 @@ func TestNewAppTree(t *testing.T) {
 
 		found := false
 		for _, root := range tree.Root {
-			if root.AppDiff.(*types.AppDiff).Name == "orphan" {
+			if root.AppDiff.Name == "orphan" {
 				found = true
 			}
 		}

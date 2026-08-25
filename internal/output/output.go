@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/rgeraskin/argocdf/internal/diff"
-	"github.com/rgeraskin/argocdf/internal/types"
 )
 
 // Provenance identifies the run that produced a report. It is stamped into
@@ -74,7 +73,7 @@ type Writer interface {
 	WriteHeader(title string) error
 
 	// WriteAppDiff writes the diff for a single application.
-	WriteAppDiff(appDiff *types.AppDiff, depth int) error
+	WriteAppDiff(appDiff *diff.AppDiff, depth int) error
 
 	// WriteTree writes the full application tree.
 	WriteTree(tree *diff.AppTree) error
@@ -153,7 +152,7 @@ func NewNullWriter() *NullWriter {
 func (n *NullWriter) WriteHeader(title string) error { return nil }
 
 // WriteAppDiff is a no-op.
-func (n *NullWriter) WriteAppDiff(appDiff *types.AppDiff, depth int) error { return nil }
+func (n *NullWriter) WriteAppDiff(appDiff *diff.AppDiff, depth int) error { return nil }
 
 // WriteTree is a no-op.
 func (n *NullWriter) WriteTree(tree *diff.AppTree) error { return nil }
@@ -188,7 +187,7 @@ func (m *MultiWriter) WriteHeader(title string) error {
 }
 
 // WriteAppDiff writes the app diff to all writers.
-func (m *MultiWriter) WriteAppDiff(appDiff *types.AppDiff, depth int) error {
+func (m *MultiWriter) WriteAppDiff(appDiff *diff.AppDiff, depth int) error {
 	for _, w := range m.writers {
 		if err := w.WriteAppDiff(appDiff, depth); err != nil {
 			return err
@@ -246,7 +245,7 @@ func (m *MultiWriter) Flush() error {
 //
 // Applications with errors are counted separately and don't contribute to
 // resource change counts.
-func ComputeSummary(diffs []*types.AppDiff) Summary {
+func ComputeSummary(diffs []*diff.AppDiff) Summary {
 	summary := Summary{
 		TotalApps: len(diffs),
 	}
@@ -257,9 +256,8 @@ func ComputeSummary(diffs []*types.AppDiff) Summary {
 			continue
 		}
 
-		// Type assert DiffResult
-		result, ok := d.DiffResult.(*diff.ManifestSetDiff)
-		if !ok || result == nil {
+		result := d.Diff
+		if result == nil {
 			continue
 		}
 

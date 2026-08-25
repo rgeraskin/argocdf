@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/rgeraskin/argocdf/internal/diff"
-	"github.com/rgeraskin/argocdf/internal/types"
 )
 
 // UnifiedWriter writes diff output in unified diff format to a file.
@@ -39,7 +38,7 @@ func (u *UnifiedWriter) WriteHeader(title string) error {
 }
 
 // WriteAppDiff writes the diff for an application in unified diff format.
-func (u *UnifiedWriter) WriteAppDiff(appDiff *types.AppDiff, _ int) error {
+func (u *UnifiedWriter) WriteAppDiff(appDiff *diff.AppDiff, _ int) error {
 	// Write app header as comment
 	appName := appDiff.Name
 	if appDiff.Namespace != "" {
@@ -53,9 +52,8 @@ func (u *UnifiedWriter) WriteAppDiff(appDiff *types.AppDiff, _ int) error {
 		return nil
 	}
 
-	// Type assert DiffResult
-	result, ok := appDiff.DiffResult.(*diff.ManifestSetDiff)
-	if !ok || result == nil {
+	result := appDiff.Diff
+	if result == nil {
 		u.write("# No diff available\n\n")
 		return nil
 	}
@@ -112,9 +110,7 @@ func (u *UnifiedWriter) WriteAppDiff(appDiff *types.AppDiff, _ int) error {
 // WriteTree writes the full application tree.
 func (u *UnifiedWriter) WriteTree(tree *diff.AppTree) error {
 	tree.Walk(func(node *diff.AppTreeNode, depth int) {
-		if appDiff, ok := node.AppDiff.(*types.AppDiff); ok {
-			_ = u.WriteAppDiff(appDiff, depth)
-		}
+		_ = u.WriteAppDiff(node.AppDiff, depth)
 	})
 	return nil
 }

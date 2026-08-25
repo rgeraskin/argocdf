@@ -9,12 +9,11 @@ import (
 	"testing"
 
 	"github.com/rgeraskin/argocdf/internal/diff"
-	"github.com/rgeraskin/argocdf/internal/types"
 )
 
 // splitTestApp builds an app diff with the given number of added resources,
 // each carrying a raw manifest of roughly rawSize bytes.
-func splitTestApp(name string, resources, rawSize int) *types.AppDiff {
+func splitTestApp(name string, resources, rawSize int) *diff.AppDiff {
 	var added []diff.Manifest
 	for i := 0; i < resources; i++ {
 		added = append(added, diff.Manifest{
@@ -25,15 +24,15 @@ func splitTestApp(name string, resources, rawSize int) *types.AppDiff {
 				strings.Repeat("x", rawSize)),
 		})
 	}
-	return &types.AppDiff{
-		Name:       name,
-		DiffResult: &diff.ManifestSetDiff{HasChanges: true, Added: added},
+	return &diff.AppDiff{
+		Name: name,
+		Diff: &diff.ManifestSetDiff{HasChanges: true, Added: added},
 	}
 }
 
 // renderSplitReport runs the full WriteHeader→Flush cycle and returns the
 // contents of all produced part files, part 1 first.
-func renderSplitReport(t *testing.T, path string, format MarkdownFormat, splitMax int, apps []*types.AppDiff) []string {
+func renderSplitReport(t *testing.T, path string, format MarkdownFormat, splitMax int, apps []*diff.AppDiff) []string {
 	t.Helper()
 
 	w, err := NewMarkdownWriter(path, format, 3)
@@ -122,7 +121,7 @@ func stripPartPreamble(t *testing.T, part string) string {
 
 func TestMarkdownWriter_Split_FitsInOnePart(t *testing.T) {
 	tempDir := t.TempDir()
-	apps := []*types.AppDiff{splitTestApp("app-a", 2, 100), splitTestApp("app-b", 1, 100)}
+	apps := []*diff.AppDiff{splitTestApp("app-a", 2, 100), splitTestApp("app-b", 1, 100)}
 
 	unsplit := renderSplitReport(t, filepath.Join(tempDir, "plain.md"), MarkdownFormatGitHub, 0, apps)
 	split := renderSplitReport(t, filepath.Join(tempDir, "split.md"), MarkdownFormatGitHub, 60000, apps)
@@ -145,7 +144,7 @@ func TestMarkdownWriter_Split_MultiPart(t *testing.T) {
 			tempDir := t.TempDir()
 			const limit = 3000
 
-			var apps []*types.AppDiff
+			var apps []*diff.AppDiff
 			for i := 0; i < 8; i++ {
 				apps = append(apps, splitTestApp(fmt.Sprintf("app-%d", i), 1, 600))
 			}
@@ -207,7 +206,7 @@ func TestMarkdownWriter_Split_GiantApp(t *testing.T) {
 	tempDir := t.TempDir()
 	const limit = 3000
 
-	apps := []*types.AppDiff{
+	apps := []*diff.AppDiff{
 		splitTestApp("small-before", 1, 200),
 		splitTestApp("giant", 10, 600), // ~6KB section, alone exceeds the limit
 		splitTestApp("small-after", 1, 200),
@@ -256,7 +255,7 @@ func TestMarkdownWriter_Split_GiantResource(t *testing.T) {
 	tempDir := t.TempDir()
 	const limit = 3000
 
-	apps := []*types.AppDiff{
+	apps := []*diff.AppDiff{
 		splitTestApp("small", 1, 200),
 		splitTestApp("huge-res", 1, 5000), // single resource block alone exceeds the limit
 	}
@@ -291,7 +290,7 @@ func TestMarkdownWriter_Split_RemovesStaleParts(t *testing.T) {
 		}
 	}
 
-	apps := []*types.AppDiff{splitTestApp("app-a", 1, 100)}
+	apps := []*diff.AppDiff{splitTestApp("app-a", 1, 100)}
 	parts := renderSplitReport(t, path, MarkdownFormatGitHub, 60000, apps)
 
 	if len(parts) != 1 {
@@ -317,7 +316,7 @@ func TestMarkdownWriter_Split_RemovesStalePartsAfterMultiPartRun(t *testing.T) {
 
 	// This run produces at least 2 parts; parts it writes are overwritten,
 	// parts beyond its count are removed.
-	var apps []*types.AppDiff
+	var apps []*diff.AppDiff
 	for i := 0; i < 6; i++ {
 		apps = append(apps, splitTestApp(fmt.Sprintf("app-%d", i), 1, 600))
 	}
@@ -516,10 +515,10 @@ func TestMarkdownWriter_Split_MixedAppsAndCustomMarker(t *testing.T) {
 	tempDir := t.TempDir()
 	const limit = 3000
 
-	apps := []*types.AppDiff{
+	apps := []*diff.AppDiff{
 		{Name: "broken", Error: fmt.Errorf("helm template failed: %s", strings.Repeat("e", 100))},
 		splitTestApp("app-a", 1, 600),
-		{Name: "unchanged", DiffResult: &diff.ManifestSetDiff{HasChanges: false}},
+		{Name: "unchanged", Diff: &diff.ManifestSetDiff{HasChanges: false}},
 		splitTestApp("app-b", 1, 600),
 		splitTestApp("app-c", 1, 600),
 		splitTestApp("app-d", 1, 600),

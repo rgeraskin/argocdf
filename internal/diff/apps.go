@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/rgeraskin/argocdf/internal/cluster"
-	"github.com/rgeraskin/argocdf/internal/types"
 )
 
 // appKey returns a unique key for an application in the format "namespace/name".
@@ -381,12 +380,12 @@ type AppTree struct {
 
 // AppTreeNode represents a node in the application tree.
 type AppTreeNode struct {
-	AppDiff  interface{} // *types.AppDiff - using interface{} to avoid import cycle in output pkg
+	AppDiff  *AppDiff
 	Children []*AppTreeNode
 }
 
 // NewAppTree creates a new AppTree from a slice of AppDiffs.
-func NewAppTree(diffs []*types.AppDiff) *AppTree {
+func NewAppTree(diffs []*AppDiff) *AppTree {
 	tree := &AppTree{
 		Root:     make([]*AppTreeNode, 0),
 		allNodes: make(map[string]*AppTreeNode),

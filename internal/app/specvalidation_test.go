@@ -171,16 +171,16 @@ func TestInvalidSpecFailsThePerSideRender(t *testing.T) {
 				"spec.source.repoURL and either spec.source.path or spec.source.chart are required") {
 				t.Errorf("AppDiff.Error = %q, want ArgoCD's own InvalidSpecError message", bad.Error)
 			}
-			if bad.DiffResult != nil {
-				t.Errorf("AppDiff.DiffResult = %v, want nil (a refused spec renders nothing)", bad.DiffResult)
+			if bad.Diff != nil {
+				t.Errorf("AppDiff.Diff = %v, want nil (a refused spec renders nothing)", bad.Diff)
 			}
 
 			// One bad application must not cost the wave its other diffs.
 			if good.Error != nil {
 				t.Errorf("healthy-app AppDiff.Error = %v, want nil", good.Error)
 			}
-			if good.DiffResult == nil {
-				t.Error("healthy-app AppDiff.DiffResult = nil, want the application to have diffed normally")
+			if good.Diff == nil {
+				t.Error("healthy-app AppDiff.Diff = nil, want the application to have diffed normally")
 			}
 
 			// Renders of the refused application: the healthy one adds two of its
@@ -355,7 +355,7 @@ func TestInvalidChildSpecIsReportedThroughDiscovery(t *testing.T) {
 		t.Fatalf("processApplications() error: %v", err)
 	}
 
-	byName := map[string]*types.AppDiff{}
+	byName := map[string]*diff.AppDiff{}
 	for _, d := range diffs {
 		byName[d.Name] = d
 	}
@@ -384,8 +384,8 @@ func TestInvalidChildSpecIsReportedThroughDiscovery(t *testing.T) {
 	if parentDiff.Error != nil {
 		t.Errorf("parent Error = %v, want nil", parentDiff.Error)
 	}
-	if parentDiff.DiffResult == nil {
-		t.Error("parent DiffResult = nil, want the changed child CR to have diffed")
+	if parentDiff.Diff == nil {
+		t.Error("parent Diff = nil, want the changed child CR to have diffed")
 	}
 
 	// The child's BASE side was valid and did render; only the target was refused.

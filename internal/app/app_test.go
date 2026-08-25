@@ -911,7 +911,7 @@ func TestProcessApplicationsWaveBarrier(t *testing.T) {
 		t.Fatalf("processApplications() error: %v", err)
 	}
 
-	byName := make(map[string]*types.AppDiff, len(diffs))
+	byName := make(map[string]*diff.AppDiff, len(diffs))
 	for _, d := range diffs {
 		if d.Error != nil {
 			t.Errorf("app %q finished with error: %v", d.Name, d.Error)
@@ -1223,7 +1223,7 @@ func TestProcessApplicationsNewChildSkipsBaseRender(t *testing.T) {
 		t.Fatalf("processApplications() error: %v", err)
 	}
 
-	byName := make(map[string]*types.AppDiff, len(diffs))
+	byName := make(map[string]*diff.AppDiff, len(diffs))
 	for _, d := range diffs {
 		byName[d.Name] = d
 	}
@@ -1252,9 +1252,9 @@ func TestProcessApplicationsNewChildSkipsBaseRender(t *testing.T) {
 	if !strings.Contains(childDiff.RenderedNew, "new-child-cm") {
 		t.Errorf("new-child RenderedNew missing expected manifest:\n%s", childDiff.RenderedNew)
 	}
-	setDiff, ok := childDiff.DiffResult.(*diff.ManifestSetDiff)
-	if !ok {
-		t.Fatalf("new-child DiffResult is %T, want *diff.ManifestSetDiff", childDiff.DiffResult)
+	setDiff := childDiff.Diff
+	if setDiff == nil {
+		t.Fatal("new-child Diff is nil, want a manifest diff")
 	}
 	if len(setDiff.Added) != 1 || len(setDiff.Removed) != 0 || len(setDiff.Modified) != 0 {
 		t.Errorf("new-child diff = +%d -%d ~%d, want +1 -0 ~0",
@@ -1367,7 +1367,7 @@ func TestProcessApplicationsRemovedChildSkipsTargetRender(t *testing.T) {
 		t.Fatalf("processApplications() error: %v", err)
 	}
 
-	byName := make(map[string]*types.AppDiff, len(diffs))
+	byName := make(map[string]*diff.AppDiff, len(diffs))
 	for _, d := range diffs {
 		if d.Error != nil {
 			t.Errorf("app %q finished with error: %v", d.Name, d.Error)
@@ -1397,9 +1397,9 @@ func TestProcessApplicationsRemovedChildSkipsTargetRender(t *testing.T) {
 	if !strings.Contains(childDiff.RenderedOld, "doomed-child-cm") {
 		t.Errorf("doomed-child RenderedOld missing expected manifest:\n%s", childDiff.RenderedOld)
 	}
-	setDiff, ok := childDiff.DiffResult.(*diff.ManifestSetDiff)
-	if !ok {
-		t.Fatalf("doomed-child DiffResult is %T, want *diff.ManifestSetDiff", childDiff.DiffResult)
+	setDiff := childDiff.Diff
+	if setDiff == nil {
+		t.Fatal("doomed-child Diff is nil, want a manifest diff")
 	}
 	if len(setDiff.Added) != 0 || len(setDiff.Removed) != 2 || len(setDiff.Modified) != 0 {
 		t.Errorf("doomed-child diff = +%d -%d ~%d, want +0 -2 ~0",
@@ -1417,7 +1417,7 @@ func TestProcessApplicationsRemovedChildSkipsTargetRender(t *testing.T) {
 	if grandchildDiff.RenderedNew != "" {
 		t.Errorf("doomed-grandchild RenderedNew = %q, want empty", grandchildDiff.RenderedNew)
 	}
-	gcSetDiff := grandchildDiff.DiffResult.(*diff.ManifestSetDiff)
+	gcSetDiff := grandchildDiff.Diff
 	if len(gcSetDiff.Removed) != 1 {
 		t.Errorf("doomed-grandchild diff removed %d resources, want 1", len(gcSetDiff.Removed))
 	}
@@ -1434,7 +1434,7 @@ func TestProcessApplicationsRemovedChildSkipsTargetRender(t *testing.T) {
 	}
 }
 
-func slicesOfNames(diffs []*types.AppDiff) []string {
+func slicesOfNames(diffs []*diff.AppDiff) []string {
 	names := make([]string, 0, len(diffs))
 	for _, d := range diffs {
 		names = append(names, d.Name)
@@ -1496,7 +1496,7 @@ func TestProcessOneAppRemovedSkipsTargetRender(t *testing.T) {
 	if appDiff.RenderedNew != "" {
 		t.Errorf("RenderedNew = %q, want empty", appDiff.RenderedNew)
 	}
-	setDiff := appDiff.DiffResult.(*diff.ManifestSetDiff)
+	setDiff := appDiff.Diff
 	if len(setDiff.Added) != 0 || len(setDiff.Removed) != 2 || len(setDiff.Modified) != 0 {
 		t.Errorf("diff = +%d -%d ~%d, want +0 -2 ~0",
 			len(setDiff.Added), len(setDiff.Removed), len(setDiff.Modified))
@@ -1548,7 +1548,7 @@ func TestProcessApplicationsRemovedChildRequeuesProcessed(t *testing.T) {
 		t.Fatalf("processApplications() error: %v", err)
 	}
 
-	byName := make(map[string]*types.AppDiff, len(diffs))
+	byName := make(map[string]*diff.AppDiff, len(diffs))
 	for _, d := range diffs {
 		byName[d.Name] = d
 	}
@@ -1669,11 +1669,11 @@ func TestLintResultsLintsBothSides(t *testing.T) {
 	if err != nil {
 		t.Fatalf("processOneApp() error: %v", err)
 	}
-	a.lintResults(context.Background(), []*types.AppDiff{appDiff})
+	a.lintResults(context.Background(), []*diff.AppDiff{appDiff})
 
-	setDiff, ok := appDiff.DiffResult.(*diff.ManifestSetDiff)
-	if !ok {
-		t.Fatalf("DiffResult is %T, want *diff.ManifestSetDiff", appDiff.DiffResult)
+	setDiff := appDiff.Diff
+	if setDiff == nil {
+		t.Fatal("Diff is nil, want a manifest diff")
 	}
 	want := []string{
 		"[base] revision: base-rev",
@@ -1693,17 +1693,17 @@ func TestLintResultsLintsBothSides(t *testing.T) {
 
 // TestLintResultsSkipsUnrenderableResults pins the guard that keeps an
 // application whose render FAILED out of the linter: processWave turns a render
-// error into an AppDiff carrying only Error, with no DiffResult, so there is no
+// error into an AppDiff carrying only Error, with a nil Diff, so there is no
 // ParseWarnings to attach a finding to and nothing meaningful to lint.
 //
 // The errored result deliberately carries NON-EMPTY rendered strings, which a real
 // render failure would not. That is what makes this a pin on the guard rather than
-// on emptiness: were the type assertion dropped, the empty-render checks would not
-// save it - it would lint, and then panic attaching the warnings.
+// on emptiness: were the nil check dropped, the empty-render checks would not save
+// it - it would lint, and then panic attaching the warnings.
 //
-// A DiffResult of some OTHER type is covered too. Nothing produces one today, but
-// the field is `any`, so the assertion is the only thing standing between a future
-// differ and a panic in the lint phase.
+// A third case used to sit here: a diff result holding some OTHER type, back when
+// the field was `any`. Typing it as *diff.ManifestSetDiff makes that shape
+// unrepresentable, so the compiler now covers what the assertion did.
 func TestLintResultsSkipsUnrenderableResults(t *testing.T) {
 	logger := log.New(nil)
 	logger.SetLevel(log.FatalLevel)
@@ -1725,28 +1725,23 @@ func TestLintResultsSkipsUnrenderableResults(t *testing.T) {
 		},
 	}
 
-	healthy := &types.AppDiff{
+	healthy := &diff.AppDiff{
 		Name: "healthy", Namespace: "argocd",
 		RenderedNew: "kind: ConfigMap\n",
-		DiffResult:  &diff.ManifestSetDiff{},
+		Diff:        &diff.ManifestSetDiff{},
 	}
-	errored := &types.AppDiff{
+	errored := &diff.AppDiff{
 		Name: "errored", Namespace: "argocd",
 		RenderedOld: "kind: ConfigMap\n",
 		RenderedNew: "kind: ConfigMap\n",
 		Error:       errors.New("failed to render base branch"),
 	}
-	foreign := &types.AppDiff{
-		Name: "foreign", Namespace: "argocd",
-		RenderedNew: "kind: ConfigMap\n",
-		DiffResult:  "not a *diff.ManifestSetDiff",
-	}
 
-	a.lintResults(context.Background(), []*types.AppDiff{healthy, errored, foreign})
+	a.lintResults(context.Background(), []*diff.AppDiff{healthy, errored})
 
 	// Exactly one invocation: the healthy app's target side. Asserting the count
-	// rather than "no panic" is what rules out linting the other two - a spurious
-	// run on either would be silent, its findings having nowhere to land.
+	// rather than "no panic" is what rules out linting the errored one - a spurious
+	// run on it would be silent, its findings having nowhere to land.
 	entries, err := os.ReadDir(callDir)
 	if err != nil {
 		t.Fatalf("reading call dir: %v", err)
@@ -1757,7 +1752,7 @@ func TestLintResultsSkipsUnrenderableResults(t *testing.T) {
 
 	// And the healthy app really was linted, so the count above cannot pass by
 	// linting nothing at all.
-	setDiff := healthy.DiffResult.(*diff.ManifestSetDiff)
+	setDiff := healthy.Diff
 	if len(setDiff.ParseWarnings) != 1 || setDiff.ParseWarnings[0] != "[target] linted" {
 		t.Errorf("healthy ParseWarnings = %v, want [[target] linted]", setDiff.ParseWarnings)
 	}
@@ -1801,9 +1796,9 @@ func TestLintResultsSkipsEmptyBase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("processOneApp() error: %v", err)
 	}
-	a.lintResults(context.Background(), []*types.AppDiff{appDiff})
+	a.lintResults(context.Background(), []*diff.AppDiff{appDiff})
 
-	setDiff := appDiff.DiffResult.(*diff.ManifestSetDiff)
+	setDiff := appDiff.Diff
 	if len(setDiff.ParseWarnings) != 1 || setDiff.ParseWarnings[0] != "[target] revision: target-rev" {
 		t.Errorf("ParseWarnings = %v, want only the [target] lint line", setDiff.ParseWarnings)
 	}
@@ -1868,9 +1863,9 @@ func TestLintResultsSkipsEmptyTarget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("processOneApp() error: %v", err)
 	}
-	a.lintResults(context.Background(), []*types.AppDiff{appDiff})
+	a.lintResults(context.Background(), []*diff.AppDiff{appDiff})
 
-	setDiff := appDiff.DiffResult.(*diff.ManifestSetDiff)
+	setDiff := appDiff.Diff
 	if len(setDiff.ParseWarnings) != 1 || setDiff.ParseWarnings[0] != "[base] revision: base-rev" {
 		t.Errorf("ParseWarnings = %v, want only the [base] lint line", setDiff.ParseWarnings)
 	}
@@ -2271,7 +2266,7 @@ func TestProcessApplicationsNewChildRequeuesClusterQueued(t *testing.T) {
 		t.Fatalf("processApplications() error: %v", err)
 	}
 
-	byName := make(map[string]*types.AppDiff, len(diffs))
+	byName := make(map[string]*diff.AppDiff, len(diffs))
 	for _, d := range diffs {
 		byName[d.Name] = d
 	}
@@ -2290,9 +2285,9 @@ func TestProcessApplicationsNewChildRequeuesClusterQueued(t *testing.T) {
 		t.Errorf("early-child ParentAppName = %q, want %q", childDiff.ParentAppName, "parent")
 	}
 
-	setDiff, ok := childDiff.DiffResult.(*diff.ManifestSetDiff)
-	if !ok {
-		t.Fatalf("early-child DiffResult is %T, want *diff.ManifestSetDiff", childDiff.DiffResult)
+	setDiff := childDiff.Diff
+	if setDiff == nil {
+		t.Fatal("early-child Diff is nil, want a manifest diff")
 	}
 	if len(setDiff.Added) != 1 || len(setDiff.Modified) != 0 || len(setDiff.Removed) != 0 {
 		t.Errorf("early-child diff = +%d -%d ~%d, want +1 -0 ~0 (added, not modified)",

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rgeraskin/argocdf/internal/types"
+	"github.com/rgeraskin/argocdf/internal/diff"
 )
 
 // multiLineRenderError is the shape helm actually produces: a first line, then
@@ -53,7 +53,7 @@ func TestUnifiedWriterCommentsEveryErrorLine(t *testing.T) {
 		t.Fatalf("NewUnifiedWriter() error = %v", err)
 	}
 	_ = w.WriteHeader("Test")
-	if err := w.WriteAppDiff(&types.AppDiff{
+	if err := w.WriteAppDiff(&diff.AppDiff{
 		Name:      "schema-app",
 		Namespace: "argocd",
 		Error:     &testError{msg: multiLineRenderError},
@@ -85,7 +85,7 @@ func TestMarkdownWriterQuotesEveryErrorLine(t *testing.T) {
 				t.Fatalf("NewMarkdownWriter() error = %v", err)
 			}
 			_ = w.WriteHeader("Test")
-			if err := w.WriteAppDiff(&types.AppDiff{
+			if err := w.WriteAppDiff(&diff.AppDiff{
 				Name:      "schema-app",
 				Namespace: "argocd",
 				Error:     &testError{msg: multiLineRenderError},

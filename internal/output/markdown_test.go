@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/rgeraskin/argocdf/internal/diff"
-	"github.com/rgeraskin/argocdf/internal/types"
 )
 
 func TestNewMarkdownWriter(t *testing.T) {
@@ -156,12 +155,12 @@ func TestMarkdownWriter_WriteHeader_Marker(t *testing.T) {
 func TestMarkdownWriter_WriteAppDiff_GitHub(t *testing.T) {
 	tests := []struct {
 		name     string
-		appDiff  *types.AppDiff
+		appDiff  *diff.AppDiff
 		contains []string
 	}{
 		{
 			name: "app with error",
-			appDiff: &types.AppDiff{
+			appDiff: &diff.AppDiff{
 				Name:      "test-app",
 				Namespace: "test-ns",
 				Error:     errors.New("render failed"),
@@ -176,9 +175,9 @@ func TestMarkdownWriter_WriteAppDiff_GitHub(t *testing.T) {
 		},
 		{
 			name: "app with no changes",
-			appDiff: &types.AppDiff{
+			appDiff: &diff.AppDiff{
 				Name: "test-app",
-				DiffResult: &diff.ManifestSetDiff{
+				Diff: &diff.ManifestSetDiff{
 					HasChanges: false,
 				},
 			},
@@ -190,9 +189,9 @@ func TestMarkdownWriter_WriteAppDiff_GitHub(t *testing.T) {
 		},
 		{
 			name: "app with changes",
-			appDiff: &types.AppDiff{
+			appDiff: &diff.AppDiff{
 				Name: "test-app",
-				DiffResult: &diff.ManifestSetDiff{
+				Diff: &diff.ManifestSetDiff{
 					HasChanges: true,
 					Added: []diff.Manifest{
 						{Kind: "ConfigMap", Name: "cm1", Raw: "apiVersion: v1\nkind: ConfigMap"},
@@ -259,10 +258,10 @@ func TestMarkdownWriter_WriteAppDiff_Atlantis(t *testing.T) {
 	filePath := filepath.Join(tempDir, "test.md")
 	w, _ := NewMarkdownWriter(filePath, MarkdownFormatAtlantis, 3)
 
-	appDiff := &types.AppDiff{
+	appDiff := &diff.AppDiff{
 		Name:      "test-app",
 		Namespace: "test-ns",
-		DiffResult: &diff.ManifestSetDiff{
+		Diff: &diff.ManifestSetDiff{
 			HasChanges: true,
 			Modified: []diff.ManifestDiff{
 				{Key: "Deployment/test"},
@@ -446,17 +445,17 @@ func TestMarkdownWriter_WriteTree(t *testing.T) {
 	w, _ := NewMarkdownWriter(filePath, MarkdownFormatGitHub, 3)
 
 	// Create a tree with parent and child apps
-	diffs := []*types.AppDiff{
+	diffs := []*diff.AppDiff{
 		{
-			Name:       "parent-app",
-			Namespace:  "argocd",
-			DiffResult: &diff.ManifestSetDiff{HasChanges: false},
+			Name:      "parent-app",
+			Namespace: "argocd",
+			Diff:      &diff.ManifestSetDiff{HasChanges: false},
 		},
 		{
 			Name:          "child-app",
 			Namespace:     "default",
 			ParentAppName: "parent-app",
-			DiffResult:    &diff.ManifestSetDiff{HasChanges: false},
+			Diff:          &diff.ManifestSetDiff{HasChanges: false},
 		},
 	}
 
@@ -485,7 +484,7 @@ func TestMarkdownWriter_HTMLEscaping(t *testing.T) {
 	w, _ := NewMarkdownWriter(filePath, MarkdownFormatGitHub, 3)
 
 	// App name with special characters
-	appDiff := &types.AppDiff{
+	appDiff := &diff.AppDiff{
 		Name:  "<script>alert('xss')</script>",
 		Error: errors.New("<malicious> error & message"),
 	}

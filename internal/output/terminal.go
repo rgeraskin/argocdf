@@ -11,7 +11,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/rgeraskin/argocdf/internal/diff"
-	"github.com/rgeraskin/argocdf/internal/types"
 )
 
 // Colors and styles for terminal output.
@@ -94,7 +93,7 @@ func (t *TerminalWriter) WriteHeader(title string) error {
 }
 
 // WriteAppDiff writes the diff for an application.
-func (t *TerminalWriter) WriteAppDiff(appDiff *types.AppDiff, depth int) error {
+func (t *TerminalWriter) WriteAppDiff(appDiff *diff.AppDiff, depth int) error {
 	// For unified diff mode, output patch-compatible format with colors
 	if t.unifiedDiff {
 		return t.writeAppDiffUnified(appDiff)
@@ -123,9 +122,8 @@ func (t *TerminalWriter) WriteAppDiff(appDiff *types.AppDiff, depth int) error {
 		return nil
 	}
 
-	// Type assert DiffResult
-	result, ok := appDiff.DiffResult.(*diff.ManifestSetDiff)
-	if !ok || result == nil {
+	result := appDiff.Diff
+	if result == nil {
 		_, _ = fmt.Fprintf(t.out, "%s  %s\n", indent, dimStyle.Render("No diff available"))
 		return nil
 	}
@@ -187,7 +185,7 @@ func (t *TerminalWriter) WriteAppDiff(appDiff *types.AppDiff, depth int) error {
 // writeAppDiffUnified writes the diff for an application in patch-compatible unified diff format.
 // Non-diff lines are written as comments (#) to maintain valid unified diff format.
 // Colors are preserved for terminal display.
-func (t *TerminalWriter) writeAppDiffUnified(appDiff *types.AppDiff) error {
+func (t *TerminalWriter) writeAppDiffUnified(appDiff *diff.AppDiff) error {
 	// Write app header as comment with color
 	appName := appDiff.Name
 	if appDiff.Namespace != "" {
@@ -204,9 +202,8 @@ func (t *TerminalWriter) writeAppDiffUnified(appDiff *types.AppDiff) error {
 		return nil
 	}
 
-	// Type assert DiffResult
-	result, ok := appDiff.DiffResult.(*diff.ManifestSetDiff)
-	if !ok || result == nil {
+	result := appDiff.Diff
+	if result == nil {
 		_, _ = fmt.Fprintf(t.out, "# %s\n\n", dimStyle.Render("No diff available"))
 		return nil
 	}
@@ -326,7 +323,7 @@ func (t *TerminalWriter) writeFieldChanges(result *diff.DiffResult, indent strin
 
 // writeExternalDiff uses an external diff tool to display side-by-side diffs.
 // Uses the ARGOCDF_EXTERNAL_DIFF environment variable.
-func (t *TerminalWriter) writeExternalDiff(_ *types.AppDiff, result *diff.ManifestSetDiff, indent string) {
+func (t *TerminalWriter) writeExternalDiff(_ *diff.AppDiff, result *diff.ManifestSetDiff, indent string) {
 	// Parse the diff command (already validated to be non-empty)
 	parts := strings.Fields(t.externalDiff)
 	if len(parts) == 0 {
@@ -408,9 +405,7 @@ func (t *TerminalWriter) runExternalDiff(cmdParts []string, oldContent, newConte
 // WriteTree writes the full application tree.
 func (t *TerminalWriter) WriteTree(tree *diff.AppTree) error {
 	tree.Walk(func(node *diff.AppTreeNode, depth int) {
-		if appDiff, ok := node.AppDiff.(*types.AppDiff); ok {
-			_ = t.WriteAppDiff(appDiff, depth)
-		}
+		_ = t.WriteAppDiff(node.AppDiff, depth)
 	})
 	return nil
 }
