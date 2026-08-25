@@ -137,7 +137,7 @@ run = "go run ./cmd/argocdf"
 
 [tasks.check]
 alias = "ci"
-description = "Run the same checks as the CI `check` job (.github/workflows/ci.yml runs these tasks one step each): vet, build, test, test-race, deadcode, lint. Add a task here and a step there together"
+description = "Run all checks: vet, build, test, test-race, deadcode, lint. The single source of truth for CI, which runs exactly this task (.github/workflows/ci.yml) - add a task to `depends` and it is in CI"
 depends = ["vet", "build", "test", "test-race", "deadcode", "lint"]
 
 [tasks."e2e:bootstrap"]

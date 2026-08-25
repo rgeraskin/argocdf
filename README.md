@@ -510,7 +510,7 @@ mise run fmt
 # Run linter
 mise run lint
 
-# Run the same checks as the CI job (vet, build, test, test-race, deadcode, lint)
+# Run all checks (vet, build, test, test-race, deadcode, lint) - CI runs exactly this task
 mise run check
 ```
 

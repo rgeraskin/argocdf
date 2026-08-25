@@ -46,31 +46,15 @@ jobs:
           key: ${{ runner.os }}-go-${{ hashFiles('.mise.toml') }}-${{ hashFiles('**/go.sum') }}
           restore-keys: |
             ${{ runner.os }}-go-${{ hashFiles('.mise.toml') }}-
-      # Every step below is a mise task, so `mise run check` reproduces this job
-      # on a laptop: the `check` task's `depends` lists exactly these tasks, and
-      # adding a step here means adding it there (and vice versa). The steps stay
-      # separate rather than one `mise run check` so a red step names itself, and
-      # so lint can still run after a failed test.
-      - name: Vet
-        run: mise run vet
-      - name: Build
-        run: mise run build
-      - name: Test
-        # The task passes -v so t.Skip()'d integration tests are visible in the
-        # log; with mise installing helm+kustomize, none should skip anymore.
-        run: mise run test
-      - name: Test under the race detector
-        # ~10x slower than `test`, which is why it is a separate task and step.
-        run: mise run test-race
-      - name: Dead code
-        # Whole-program reachability (exported symbols included); the default
-        # `unused` linter only sees unexported ones. The task allowlists the one
-        # deliberate marker method.
-        run: mise run deadcode
-      - name: Lint
-        # Runs even when the steps above failed: a red test must not hide lint
-        # findings. `!cancelled()` rather than `always()`, so cancelling a run
-        # actually stops it. The steps above stay fail-fast on purpose — they
-        # share one compile, so a broken build reddening every step is noise.
-        if: ${{ !cancelled() }}
-        run: mise run lint
+      - name: Check
+        # The `check` task in .mise.toml is the single source of truth for what
+        # CI verifies (vet, build, test, test-race, deadcode, lint): this job runs
+        # it verbatim, so `mise run check` on a laptop IS the CI run, and a task
+        # added to check's `depends` is in CI with no edit here. mise runs the
+        # dependencies in parallel and prefixes every output line with its task
+        # name, so a red run still names the task. --continue-on-error keeps the
+        # other tasks going after a failure, so a red test cannot hide lint
+        # findings (what per-step `if: !cancelled()` used to buy). --jobs 3 caps
+        # the parallelism for the runner's memory: golangci-lint, the race build
+        # and deadcode each type-check the argo-cd tree.
+        run: mise run check --continue-on-error --jobs 3

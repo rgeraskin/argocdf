@@ -26,7 +26,7 @@ mise run lint           # Run golangci-lint
 mise run fmt            # Format code (go fmt + goimports)
 mise run vet            # Run go vet
 mise run deadcode       # Whole-program dead-code check (x/tools deadcode; allowlists the PersistentWriter marker)
-mise run check          # Same steps as the CI check job: vet, build, test, test-race, deadcode, lint
+mise run check          # All checks (vet, build, test, test-race, deadcode, lint); CI runs exactly this task
 
 # Dependencies
 mise run deps           # Download dependencies
